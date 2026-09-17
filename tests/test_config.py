@@ -18,3 +18,18 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(loaded.model_root, (root / "models/personaplex").resolve())
             self.assertEqual(loaded.manifest, (root / "prepared/train.jsonl").resolve())
             self.assertFalse(loaded.shuffle)
+
+    def test_preserves_explicit_absolute_server_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "server.yaml"
+            config.write_text(
+                '{"model": {"root": "/mnt/models/personaplex", '
+                '"source": "/opt/personaplex-source"}, '
+                '"data": {"manifest": "/mnt/processed/train.jsonl"}}'
+            )
+
+            loaded = load_config(config)
+
+            self.assertEqual(loaded.model_root, Path("/mnt/models/personaplex"))
+            self.assertEqual(loaded.personaplex_source, Path("/opt/personaplex-source"))
+            self.assertEqual(loaded.manifest, Path("/mnt/processed/train.jsonl"))
