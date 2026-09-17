@@ -12,9 +12,11 @@ dependencies:
       - einops==0.7
       - aiohttp>=3.10.5,<3.11
       - PyYAML>=6
+      - protobuf>=3.19.6,<5
       - safetensors>=0.4
       - sentencepiece==0.2
       - sphn>=0.1.4,<0.2
+      - tensorboard>=2.17,<2.19
       - sounddevice==0.5
       - pyloudnorm>=0.1.1
       - tqdm>=4.66

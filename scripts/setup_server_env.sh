@@ -12,12 +12,11 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
 command -v conda >/dev/null || { echo "Conda is required." >&2; exit 1; }
-command -v nvidia-smi >/dev/null || { echo "nvidia-smi is required." >&2; exit 1; }
-nvidia-smi
 
 conda env create -f environment.yml
 eval "$(conda shell.bash hook)"
 conda activate personaplex-overfit
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 conda install -y -c pytorch -c nvidia "pytorch=2.4.*" "pytorch-cuda=$cuda_version"
 python -m pip install --no-deps -e .
 python -m pip check

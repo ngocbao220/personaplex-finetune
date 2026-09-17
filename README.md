@@ -16,15 +16,17 @@ cd personaplex-finetune
 bash scripts/setup_hf_server_env.sh 12.4
 eval "$(conda shell.bash hook)"
 conda activate personaplex-overfit-hf
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 
 hf auth login
 bash scripts/download_hf_assets.sh \
   --dataset-repo ngocbao05/personaplex-otospeech-prepared
 
 CONFIG=configs/hf_overfit_10.yaml
-PYTHONPATH=src python -m tools.validate_dataset --manifest assets/prepared/train.jsonl
+python -m tools.validate_dataset --manifest assets/prepared/train.jsonl
 bash scripts/run_server_smoke.sh "$CONFIG"
 python -m personaplex_finetuning.train --config "$CONFIG"
+tensorboard --logdir runs/hf_overfit_10/tensorboard --bind_all
 ```
 
 ## Inference smoke

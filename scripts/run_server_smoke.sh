@@ -11,11 +11,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 config=$1
 
-if ! command -v nvidia-smi >/dev/null; then
-  echo "nvidia-smi is unavailable; this smoke test requires an NVIDIA CUDA server." >&2
-  exit 1
-fi
-nvidia-smi
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 python -m pip check
 python - <<'PY'
 import torch
