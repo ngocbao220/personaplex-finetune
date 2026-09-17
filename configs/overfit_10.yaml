@@ -1,0 +1,17 @@
+seed: 42
+model:
+  # Supply local assets; no Hugging Face fallback exists.
+  root: /models/personaplex-7b-v1
+  source: ../../refs/personaplex-original/moshi
+  device: cuda
+data:
+  manifest: ../../prepared/train.jsonl
+  window_seconds: 30
+  shuffle: false
+lora:
+  rank: 16
+  alpha: 32
+train:
+  output_dir: ../runs/overfit_10
+  max_steps: 300
+  learning_rate: 2.0e-5
