@@ -64,6 +64,10 @@ the runtime never downloads from Hugging Face. For an offline server,
 pre-provision a Linux Conda package cache/wheelhouse and use the equivalent
 `conda ... --offline` commands—do not transfer this macOS environment.
 
+`requirements.txt` mirrors the direct Python package constraints for a pip-based
+setup. It deliberately does not select a CUDA wheel; use a matching CUDA PyTorch
+installation first, or use the server setup scripts.
+
 ## Online Hugging Face CUDA server
 
 This repository includes the required `moshi` runtime package under `src/moshi`;

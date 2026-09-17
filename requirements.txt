@@ -1,0 +1,14 @@
+# CUDA PyTorch is installed separately by scripts/setup*_server_env.sh.
+# Do not use this file alone to select a CUDA runtime.
+aiohttp>=3.10.5,<3.11
+einops==0.7
+huggingface-hub[cli]>=0.24,<0.25
+numpy>=1.26,<2.2
+PyYAML>=6
+pyloudnorm>=0.1.1
+safetensors>=0.4
+sentencepiece==0.2
+sounddevice==0.5
+sphn>=0.1.4,<0.2
+torch>=2.2,<2.5
+tqdm>=4.66
