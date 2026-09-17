@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "personaplex-finetuning"
+version = "0.1.0"
+description = "Offline-first PersonaPlex LoRA overfit path for prepared OtoSpeech data"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26,<2.2",
+  "PyYAML>=6",
+  "safetensors>=0.4",
+  "sentencepiece==0.2",
+  "sphn>=0.1.4,<0.2",
+  "torch>=2.2,<2.5",
+  "tqdm>=4.66",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.unittest]
+start-directory = "tests"
