@@ -17,7 +17,7 @@ Validate before a model run:
 PYTHONPATH=src python -m tools.validate_dataset --manifest ../prepared/train.jsonl
 ```
 
-## CUDA server setup
+## Offline CUDA server setup
 
 Clone this code-only repository on the Linux CUDA server. Prepared data, the
 PersonaPlex checkpoint, and the matching local PersonaPlex/Moshi source stay
@@ -63,6 +63,54 @@ CUDA visibility. Missing local assets, Python dependencies, or CUDA fail fast;
 the runtime never downloads from Hugging Face. For an offline server,
 pre-provision a Linux Conda package cache/wheelhouse and use the equivalent
 `conda ... --offline` commands—do not transfer this macOS environment.
+
+## Online Hugging Face CUDA server
+
+This repository includes the required `moshi` runtime package under `src/moshi`;
+no second source checkout is needed. The online recipe downloads only prepared
+data and the PersonaPlex checkpoint, then returns to local-only runtime paths.
+
+### Publish prepared data once
+
+On the machine containing `../prepared/`, authenticate interactively and first
+inspect the upload without changing Hugging Face:
+
+```bash
+python -m pip install -e '.[hub]'
+hf auth login
+PYTHONPATH=src python -m tools.publish_prepared --dry-run
+PYTHONPATH=src python -m tools.publish_prepared
+```
+
+The destination is the private dataset
+`ngocbao220/personaplex-otospeech-prepared`. Upload validates `train.jsonl` and
+excludes `.DS_Store`; it never stores an HF token in this repository.
+
+### Clone, download, and overfit on the GPU server
+
+The Hugging Face account used on the server must have accepted the
+`nvidia/personaplex-7b-v1` license.
+
+```bash
+git clone https://github.com/ngocbao220/personaplex-finetune.git
+cd personaplex-finetune
+nvidia-smi
+bash scripts/setup_hf_server_env.sh 12.1
+hf auth login
+bash scripts/download_hf_assets.sh
+PYTHONPATH=src python -m tools.validate_dataset --manifest assets/prepared/train.jsonl
+bash scripts/run_server_smoke.sh configs/hf_overfit_10.yaml
+python -m personaplex_finetuning.train --config configs/hf_overfit_10.yaml
+python -m tools.inference_smoke \
+  --config configs/hf_overfit_10.yaml \
+  --adapter runs/hf_overfit_10/checkpoints/checkpoint_000300/lora.safetensors
+```
+
+`download_hf_assets.sh` saves the data under `assets/prepared/`, the three
+checkpoint files under `assets/personaplex-7b-v1/`, and records the resolved
+dataset/model revisions in `assets/hf-assets.json`. These downloaded assets and
+all run outputs are ignored by Git. The train command refuses to overwrite an
+existing run directory.
 
 ## Proof order
 

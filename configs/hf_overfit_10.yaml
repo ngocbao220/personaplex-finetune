@@ -1,0 +1,17 @@
+seed: 42
+model:
+  root: ../assets/personaplex-7b-v1
+  # Self-contained vendored runtime package.
+  source: ../src
+  device: cuda
+data:
+  manifest: ../assets/prepared/train.jsonl
+  window_seconds: 30
+  shuffle: false
+lora:
+  rank: 16
+  alpha: 32
+train:
+  output_dir: ../runs/hf_overfit_10
+  max_steps: 300
+  learning_rate: 2.0e-5

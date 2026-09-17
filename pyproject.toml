@@ -18,6 +18,11 @@ dependencies = [
   "tqdm>=4.66",
 ]
 
+[project.optional-dependencies]
+hub = [
+  "huggingface-hub[cli]>=0.24,<0.25",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
