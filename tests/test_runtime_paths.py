@@ -6,11 +6,25 @@ from personaplex_finetuning.runtime import RuntimePaths
 
 
 class RuntimePathsTest(unittest.TestCase):
-    def test_requires_all_local_personaplex_assets(self) -> None:
+    def test_requires_vendored_moshi_loader_module(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "source"
             (source / "moshi").mkdir(parents=True)
+            model = root / "model"
+            model.mkdir()
+            for name in ("model.safetensors", "tokenizer-e351c8d8-checkpoint125.safetensors", "tokenizer_spm_32k_3.model"):
+                (model / name).write_bytes(b"x")
+
+            with self.assertRaisesRegex(FileNotFoundError, "moshi/models/loaders.py"):
+                RuntimePaths(model, source).validate()
+
+    def test_requires_all_local_personaplex_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            (source / "moshi" / "models").mkdir(parents=True)
+            (source / "moshi" / "models" / "loaders.py").touch()
             model = root / "model"
             model.mkdir()
             for name in ("model.safetensors", "tokenizer-e351c8d8-checkpoint125.safetensors", "tokenizer_spm_32k_3.model"):

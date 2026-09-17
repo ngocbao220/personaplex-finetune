@@ -30,8 +30,11 @@ class RuntimePaths:
             "tokenizer-e351c8d8-checkpoint125.safetensors": root / "tokenizer-e351c8d8-checkpoint125.safetensors",
             "tokenizer_spm_32k_3.model": root / "tokenizer_spm_32k_3.model",
         }
-        if not (source / "moshi").is_dir():
-            raise FileNotFoundError(f"PersonaPlex source must contain moshi/: {source}")
+        required_source = source / "moshi" / "models" / "loaders.py"
+        if not required_source.is_file():
+            raise FileNotFoundError(
+                f"PersonaPlex source must contain moshi/models/loaders.py: {source}"
+            )
         for name, path in required.items():
             if not path.is_file():
                 raise FileNotFoundError(f"required local PersonaPlex asset missing: {path} ({name})")
