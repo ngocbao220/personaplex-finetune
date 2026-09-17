@@ -1,9 +1,22 @@
 import unittest
 
-from personaplex_finetuning.objective import stream_weights
+from personaplex_finetuning.objective import stream_weights, torch_weighted_cross_entropy
 
 
 class ObjectiveTest(unittest.TestCase):
+    def test_ignores_invalid_target_at_zero_weight_delay_position(self) -> None:
+        try:
+            import torch
+        except ModuleNotFoundError:
+            self.skipTest("PyTorch is unavailable")
+        logits = torch.zeros(2, 3)
+        targets = torch.tensor([1, -1])
+        weights = torch.tensor([1.0, 0.0])
+
+        loss = torch_weighted_cross_entropy(logits, targets, weights)
+
+        self.assertAlmostEqual(float(loss), float(torch.log(torch.tensor(3.0))), places=6)
+
     def test_only_agent_dialogue_streams_receive_weight(self) -> None:
         mask = tuple(tuple(True for _ in range(3)) for _ in range(17))
         codes = (

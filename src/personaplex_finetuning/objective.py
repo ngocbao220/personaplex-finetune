@@ -47,5 +47,9 @@ def torch_weighted_cross_entropy(logits, targets, weights):
     denominator = weights.sum()
     if denominator.item() == 0:
         return logits.sum() * 0.0
-    per_token = functional.cross_entropy(logits.float(), targets, reduction="none")
+    # CUDA cross_entropy validates every target before weights are applied.
+    # Delay/padding positions deliberately contain the PersonaPlex zero token
+    # (-1), so map only zero-weight positions to a harmless valid class.
+    safe_targets = targets.masked_fill(weights == 0, 0)
+    per_token = functional.cross_entropy(logits.float(), safe_targets, reduction="none")
     return (per_token * weights).sum() / denominator
