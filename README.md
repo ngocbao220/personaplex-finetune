@@ -23,10 +23,7 @@ bash scripts/download_hf_assets.sh \
   --dataset-repo ngocbao05/personaplex-otospeech-prepared
 
 CONFIG=configs/hf_overfit_10.yaml
-python -m tools.validate_dataset --manifest assets/prepared/train.jsonl
-bash scripts/run_server_smoke.sh "$CONFIG"
-python -m personaplex_finetuning.train --config "$CONFIG"
-tensorboard --logdir runs/hf_overfit_10/tensorboard --bind_all
+bash scripts/run_overfit.sh "$CONFIG"
 ```
 
 ## Inference smoke
