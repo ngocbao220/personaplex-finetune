@@ -67,6 +67,14 @@ class ActivationGating(nn.Module):
         self.activation = activation
 
     def forward(self, x: torch.Tensor):
+        # LoRA/QLoRA modules apply a low-rank update in ``forward``. Reading
+        # ``.weight`` would materialize a dense B @ A update for every gated
+        # projection, defeating 4-bit memory savings.
+        if hasattr(self.linear_in, "lora_a") or hasattr(self.linear_out, "lora_a"):
+            x = self.linear_in(x)
+            B, T, _ = x.shape
+            x = x.view(B, T, 2, -1)
+            return self.linear_out(self.activation(x[..., 0, :]) * x[..., 1, :])
         return gating_forward_kernel(
             self.linear_in.weight, self.linear_out.weight, self.activation, x
         )
