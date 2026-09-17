@@ -160,7 +160,13 @@ def _train_fsdp_worker(
     seed_everything(config.seed + rank, torch)
 
     samples = PreparedDataset(config.manifest, config.window_seconds).load()
-    runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), device, config.qlora, config.quant_type)
+
+    # Load model sequentially across ranks to prevent spiking CPU RAM over 30GB
+    for i in range(world_size):
+        if rank == i:
+            runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), device, config.qlora, config.quant_type)
+        dist.barrier()
+
     targets = inject_lora(runtime.model, config.lora_rank, config.lora_alpha)
 
     # Alias LMModel.forward to forward_train for FSDP compatibility
@@ -400,8 +406,13 @@ def main() -> int:
     parser.add_argument("--config", required=True)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--fsdp", type=str, default=None, help="Comma-separated GPU IDs to activate FSDP (e.g. --fsdp 0,1)")
+    parser.add_argument("--qlora", action="store_true", default=None, help="Enable 4-bit QLoRA. If omitted, uses value from config file.")
+    parser.add_argument("--no-qlora", dest="qlora", action="store_false", help="Disable QLoRA.")
     args = parser.parse_args()
-    run(load_config(args.config), smoke=args.smoke, fsdp=args.fsdp)
+    config = load_config(args.config)
+    if args.qlora is not None:
+        config = config.replace(qlora=args.qlora)
+    run(config, smoke=args.smoke, fsdp=args.fsdp)
     return 0
 
 

@@ -31,6 +31,10 @@ class Config:
         """Canonical local manifest inside the externally prepared dataset root."""
         return self.prepared_dir / "train.jsonl"
 
+    def replace(self, **kwargs) -> Config:
+        import dataclasses
+        return dataclasses.replace(self, **kwargs)
+
 
 def _read_yaml_or_json(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")

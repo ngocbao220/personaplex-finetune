@@ -132,6 +132,12 @@ def load_runtime(paths: RuntimePaths, device: str = "cuda", qlora: bool = False,
         model = quantize_model_4bit(model, device=device, quant_type=quant_type)
     else:
         model = loaders.get_moshi_lm(resolved.moshi_weight, device=device)
+
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     model.train()
     initial = tuple(int(value) for value in model._get_initial_token()[0, :, 0].tolist())
     if len(initial) != 17 or model.dep_q != 16 or model.n_q != 16:

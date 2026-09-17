@@ -11,7 +11,7 @@ data:
 lora:
   rank: 2
   alpha: 4
-  qlora: true
+  qlora: false
   quant_type: nf4
 train:
   output_dir: ../runs/hf_overfit_10
