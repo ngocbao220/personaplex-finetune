@@ -57,4 +57,12 @@ def smoke(config: Config, sample: PreparedSample, adapter: Path, output_dir: Pat
     for name in ("base.wav", "finetuned.wav", "base.txt", "finetuned.txt"):
         if not (output_dir / name).is_file() or (output_dir / name).stat().st_size == 0:
             raise RuntimeError(f"inference output is missing or empty: {name}")
+    import numpy as np
+    import sphn
+    base_audio, _ = sphn.read(str(output_dir / "base.wav"))
+    finetuned_audio, _ = sphn.read(str(output_dir / "finetuned.wav"))
+    if not np.isfinite(base_audio).all() or not np.isfinite(finetuned_audio).all():
+        raise RuntimeError("inference generated non-finite audio")
+    if np.array_equal(base_audio, finetuned_audio):
+        raise RuntimeError("adapter output is identical to base output")
     (output_dir / "run.json").write_text(json.dumps({"sample_id": sample.sample_id, "adapter": str(adapter), "base_model": str(config.model_root), "generation": "greedy native LMGen"}, indent=2))

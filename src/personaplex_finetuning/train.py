@@ -102,6 +102,7 @@ def run(config: Config, smoke: bool = False) -> Path | None:
     max_steps = 1 if smoke else config.max_steps
     saved = None
     last_record = None
+    reload_checks: list[dict[str, float | int]] = []
     started = time.monotonic()
     with log_path.open("w", encoding="utf-8") as log:
         for step in range(max_steps):
@@ -113,11 +114,13 @@ def run(config: Config, smoke: bool = False) -> Path | None:
             print(json.dumps(record))
             if (step + 1) % 50 == 0 or step + 1 == max_steps:
                 saved = save_adapter(config.output_dir, runtime.model, config, step + 1)
+                reload_loss = verify_reloaded_adapter(config, samples[step % len(samples)], saved)
+                if abs(reload_loss - record["loss/total"]) > 1e-3:
+                    raise RuntimeError(f"reloaded adapter loss drifted: {reload_loss} vs {record['loss/total']}")
+                reload_checks.append({"step": step + 1, "loss": reload_loss})
     peak = torch.cuda.max_memory_allocated(config.device) if torch.cuda.is_available() else 0
-    reload_loss = verify_reloaded_adapter(config, samples[(max_steps - 1) % len(samples)], saved) if saved else None
-    if reload_loss is not None and last_record is not None and abs(reload_loss - last_record["loss/total"]) > 1e-3:
-        raise RuntimeError(f"reloaded adapter loss drifted: {reload_loss} vs {last_record['loss/total']}")
-    run_info = {"seconds": time.monotonic() - started, "peak_gpu_bytes": peak, "checkpoint": str(saved) if saved else None, "reload_loss": reload_loss}
+    reload_loss = reload_checks[-1]["loss"] if reload_checks else None
+    run_info = {"seconds": time.monotonic() - started, "peak_gpu_bytes": peak, "checkpoint": str(saved) if saved else None, "reload_checks": reload_checks}
     (config.output_dir / "run.json").write_text(json.dumps(run_info, indent=2))
     report = config.path.parent.parent / "reports" / "overfit_10.md"
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -126,7 +129,7 @@ def run(config: Config, smoke: bool = False) -> Path | None:
         "Status: PASS\n\n"
         f"- Dataset: {config.manifest}\n- Model: {config.model_root}\n- LoRA: rank={config.lora_rank}, alpha={config.lora_alpha}\n"
         f"- Steps: {max_steps}\n- Final loss: {last_record['loss/total'] if last_record else 'n/a'}\n"
-        f"- Reload loss: {reload_loss}\n- Peak GPU bytes: {peak}\n- Checkpoint: {saved}\n"
+        f"- Reload checks: {reload_checks}\n- Peak GPU bytes: {peak}\n- Checkpoint: {saved}\n"
         "- Inference outputs: run `python -m tools.inference_smoke` with this checkpoint.\n",
         encoding="utf-8",
     )
