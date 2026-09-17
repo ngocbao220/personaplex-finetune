@@ -7,6 +7,7 @@ import json
 import os
 import random
 import time
+from datetime import datetime
 from pathlib import Path
 
 from .config import Config, load_config
@@ -31,6 +32,14 @@ def seed_everything(seed: int, torch) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def create_run_dir(output_root: Path, smoke: bool) -> Path:
+    """Create a unique, timestamped run directory below the configured root."""
+    label = "smoke" if smoke else "train"
+    run_dir = output_root / f"{label}_{datetime.now().astimezone():%Y%m%d_%H%M%S_%f}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
 
 
 def build_example(config: Config, sample, runtime):
@@ -132,14 +141,14 @@ def run(config: Config, smoke: bool = False) -> Path | None:
     if config.shuffle:
         raise ValueError("overfit configuration must set data.shuffle: false")
     samples = PreparedDataset(config.manifest, config.window_seconds).load()
-    config.output_dir.mkdir(parents=True, exist_ok=False)
+    run_dir = create_run_dir(config.output_dir, smoke)
     config_record = {
         "event": "configuration",
         "seed": config.seed,
         "model_root": str(config.model_root),
         "personaplex_source": str(config.personaplex_source),
         "manifest": str(config.manifest),
-        "output_dir": str(config.output_dir),
+        "output_dir": str(run_dir),
         "window_seconds": config.window_seconds,
         "max_steps": 1 if smoke else config.max_steps,
         "learning_rate": config.learning_rate,
@@ -150,15 +159,15 @@ def run(config: Config, smoke: bool = False) -> Path | None:
         "device": config.device,
         "cpu_threads": cpu_threads,
     }
-    (config.output_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
+    (run_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(config_record))
     runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
     targets = inject_lora(runtime.model, config.lora_rank, config.lora_alpha)
     trainable = [parameter for parameter in runtime.model.parameters() if parameter.requires_grad]
     print(f"LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
     optimizer = torch.optim.AdamW(trainable, lr=config.learning_rate, weight_decay=0.0)
-    log_path = config.output_dir / "metrics.jsonl"
-    tensorboard_dir = config.output_dir / "tensorboard"
+    log_path = run_dir / "metrics.jsonl"
+    tensorboard_dir = run_dir / "tensorboard"
     writer = SummaryWriter(log_dir=str(tensorboard_dir))
     writer.add_text("configuration", json.dumps(config_record, indent=2), 0)
     max_steps = 1 if smoke else config.max_steps
@@ -180,7 +189,7 @@ def run(config: Config, smoke: bool = False) -> Path | None:
                 progress.set_postfix(loss=f"{record['loss/total']:.4f}", grad=f"{grad_norm:.3f}")
                 tqdm.write(json.dumps({"event": "training_step", **record})) if max_steps == 1 else None
                 if (step + 1) % 50 == 0 or step + 1 == max_steps:
-                    saved = save_adapter(config.output_dir, runtime.model, config, step + 1)
+                    saved = save_adapter(run_dir, runtime.model, config, step + 1)
                     reload_loss = verify_reloaded_adapter(config, samples[step % len(samples)], saved)
                     if abs(reload_loss - record["loss/total"]) > 1e-3:
                         raise RuntimeError(f"reloaded adapter loss drifted: {reload_loss} vs {record['loss/total']}")
@@ -190,7 +199,7 @@ def run(config: Config, smoke: bool = False) -> Path | None:
     peak = torch.cuda.max_memory_allocated(config.device) if torch.cuda.is_available() else 0
     reload_loss = reload_checks[-1]["loss"] if reload_checks else None
     run_info = {"seconds": time.monotonic() - started, "peak_gpu_bytes": peak, "checkpoint": str(saved) if saved else None, "reload_checks": reload_checks}
-    (config.output_dir / "run.json").write_text(json.dumps(run_info, indent=2))
+    (run_dir / "run.json").write_text(json.dumps(run_info, indent=2))
     report = config.path.parent.parent / "reports" / "overfit_10.md"
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(

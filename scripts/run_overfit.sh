@@ -12,4 +12,4 @@ export PYTHONPATH=src${PYTHONPATH:+:$PYTHONPATH}
 python -m tools.validate_dataset --config "$CONFIG"
 python -m tools.train_smoke --config "$CONFIG"
 python -m personaplex_finetuning.train --config "$CONFIG"
-tensorboard --logdir runs/hf_overfit_10/tensorboard --bind_all
+tensorboard --logdir runs/hf_overfit_10 --bind_all

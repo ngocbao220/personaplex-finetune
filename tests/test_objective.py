@@ -17,6 +17,19 @@ class ObjectiveTest(unittest.TestCase):
 
         self.assertAlmostEqual(float(loss), float(torch.log(torch.tensor(3.0))), places=6)
 
+    def test_ignores_nan_logits_at_zero_weight_delay_position(self) -> None:
+        try:
+            import torch
+        except ModuleNotFoundError:
+            self.skipTest("PyTorch is unavailable")
+        logits = torch.tensor([[0.0, 0.0, 0.0], [float("nan"), float("nan"), float("nan")]])
+        targets = torch.tensor([1, -1])
+        weights = torch.tensor([1.0, 0.0])
+
+        loss = torch_weighted_cross_entropy(logits, targets, weights)
+
+        self.assertTrue(torch.isfinite(loss))
+
     def test_only_agent_dialogue_streams_receive_weight(self) -> None:
         mask = tuple(tuple(True for _ in range(3)) for _ in range(17))
         codes = (

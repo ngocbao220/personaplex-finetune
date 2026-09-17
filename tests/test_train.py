@@ -1,9 +1,24 @@
+import tempfile
 import unittest
+from pathlib import Path
 
-from personaplex_finetuning.train import model_forward_train, write_tensorboard_scalars
+from personaplex_finetuning.train import create_run_dir, model_forward_train, write_tensorboard_scalars
 
 
 class TrainTest(unittest.TestCase):
+    def test_creates_distinct_timestamped_run_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "runs"
+
+            smoke = create_run_dir(root, smoke=True)
+            train = create_run_dir(root, smoke=False)
+
+            self.assertTrue(smoke.is_dir())
+            self.assertTrue(train.is_dir())
+            self.assertNotEqual(smoke, train)
+            self.assertTrue(smoke.name.startswith("smoke_"))
+            self.assertTrue(train.name.startswith("train_"))
+
     def test_uses_lmmodel_forward_train_instead_of_module_forward(self) -> None:
         class Model:
             def __init__(self) -> None:
