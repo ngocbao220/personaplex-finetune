@@ -94,7 +94,14 @@ class PreparedDataset:
         sample_dir = entry.get("sample_dir")
         if not sample_id or not isinstance(sample_dir, str):
             raise ValidationError(f"line {line_number}: sample_id and sample_dir are required")
-        root = (self.manifest.parent / sample_dir).resolve()
+        sample_dir_path = Path(sample_dir)
+        if sample_dir_path.is_absolute():
+            raise ValidationError(f"{sample_id}: sample_dir must be relative to the prepared directory")
+        root = (self.manifest.parent / sample_dir_path).resolve()
+        try:
+            root.relative_to(self.manifest.parent)
+        except ValueError as exc:
+            raise ValidationError(f"{sample_id}: sample_dir must stay within the prepared directory") from exc
         conversation = root / "conversation.wav"
         voice_prompt = root / "voice_prompt.wav"
         words_path = root / "words.json"

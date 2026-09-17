@@ -66,3 +66,14 @@ class PreparedDatasetTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValidationError, "exactly 2 channels"):
                 PreparedDataset(manifest).load()
+
+    def test_rejects_absolute_sample_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "train.jsonl"
+            manifest.write_text(
+                json.dumps({"sample_id": "conv_0001", "sample_dir": "/data/samples/conv_0001"}) + "\n"
+            )
+
+            with self.assertRaisesRegex(ValidationError, "relative"):
+                PreparedDataset(manifest).load()

@@ -5,7 +5,7 @@ model:
   source: ../src # Path đến thư mục chứa code của PersonaPlex
   device: cuda
 data:
-  manifest: ../assets/prepared/train.jsonl # Path đến file train.jsonl
+  prepared_dir: ../assets/prepared # Contains train.jsonl and samples/conv_XXXX
   window_seconds: 30 # Window seconds
   shuffle: false # Shuffle 
 lora:

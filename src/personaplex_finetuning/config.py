@@ -13,7 +13,7 @@ class Config:
     path: Path
     model_root: Path
     personaplex_source: Path
-    manifest: Path
+    prepared_dir: Path
     output_dir: Path
     seed: int = 42
     window_seconds: float = 30.0
@@ -23,6 +23,11 @@ class Config:
     lora_rank: int = 16
     lora_alpha: int = 32
     device: str = "cuda"
+
+    @property
+    def manifest(self) -> Path:
+        """Canonical local manifest inside the externally prepared dataset root."""
+        return self.prepared_dir / "train.jsonl"
 
 
 def _read_yaml_or_json(path: Path) -> dict[str, Any]:
@@ -58,11 +63,12 @@ def load_config(path: str | Path) -> Config:
         if not isinstance(value, str) or not value:
             raise ValueError(f"{key} must be a non-empty path")
         return (root / value).resolve() if not Path(value).is_absolute() else Path(value)
+    prepared_dir = resolve(data, "prepared_dir") if "prepared_dir" in data else resolve(data, "manifest").parent
     return Config(
         path=path,
         model_root=resolve(model, "root"),
         personaplex_source=resolve(model, "source"),
-        manifest=resolve(data, "manifest"),
+        prepared_dir=prepared_dir,
         output_dir=resolve(train if isinstance(train, dict) else {}, "output_dir", "../runs/overfit_10"),
         seed=int(raw.get("seed", 42)),
         window_seconds=float(data.get("window_seconds", 30.0)),
