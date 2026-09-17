@@ -8,6 +8,7 @@ dependencies:
   - pip
   - ffmpeg
   - pip:
+      - bitsandbytes>=0.43
       - numpy>=1.26,<2.2
       - einops==0.7
       - aiohttp>=3.10.5,<3.11

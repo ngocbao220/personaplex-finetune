@@ -8,6 +8,7 @@ dependencies:
   - pip
   - ffmpeg
   - pip:
+      - bitsandbytes>=0.43
       - aiohttp>=3.10.5,<3.11
       - einops==0.7
       - huggingface-hub[cli]>=0.24,<0.25

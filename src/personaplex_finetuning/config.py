@@ -22,6 +22,8 @@ class Config:
     learning_rate: float = 2e-5
     lora_rank: int = 16
     lora_alpha: int = 32
+    qlora: bool = False
+    quant_type: str = "nf4"
     device: str = "cuda"
 
     @property
@@ -64,6 +66,10 @@ def load_config(path: str | Path) -> Config:
             raise ValueError(f"{key} must be a non-empty path")
         return (root / value).resolve() if not Path(value).is_absolute() else Path(value)
     prepared_dir = resolve(data, "prepared_dir") if "prepared_dir" in data else resolve(data, "manifest").parent
+    qlora = bool(lora.get("qlora", False)) if isinstance(lora, dict) else False
+    quant_type = str(lora.get("quant_type", "nf4")).lower() if isinstance(lora, dict) else "nf4"
+    if quant_type not in {"nf4", "fp4"}:
+        raise ValueError("lora.quant_type must be nf4 or fp4")
     return Config(
         path=path,
         model_root=resolve(model, "root"),
@@ -77,5 +83,7 @@ def load_config(path: str | Path) -> Config:
         learning_rate=float(train.get("learning_rate", 2e-5)) if isinstance(train, dict) else 2e-5,
         lora_rank=int(lora.get("rank", 16)) if isinstance(lora, dict) else 16,
         lora_alpha=int(lora.get("alpha", 32)) if isinstance(lora, dict) else 32,
+        qlora=qlora,
+        quant_type=quant_type,
         device=str(model.get("device", "cuda")),
     )

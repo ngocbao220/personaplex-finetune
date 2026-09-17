@@ -114,7 +114,7 @@ class PersonaPlexRuntime:
     delays: tuple[int, ...]
 
 
-def load_runtime(paths: RuntimePaths, device: str = "cuda") -> PersonaPlexRuntime:
+def load_runtime(paths: RuntimePaths, device: str = "cuda", qlora: bool = False, quant_type: str = "nf4") -> PersonaPlexRuntime:
     """Load from explicit local assets only. No Hugging Face function is imported."""
     resolved = paths.validate()
     source = str(resolved.source)
@@ -126,7 +126,12 @@ def load_runtime(paths: RuntimePaths, device: str = "cuda") -> PersonaPlexRuntim
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is false")
     mimi = loaders.get_mimi(resolved.mimi_weight, device=device)
-    model = loaders.get_moshi_lm(resolved.moshi_weight, device=device)
+    if qlora:
+        from .lora import quantize_model_4bit
+        model = loaders.get_moshi_lm(resolved.moshi_weight, device="cpu")
+        model = quantize_model_4bit(model, device=device, quant_type=quant_type)
+    else:
+        model = loaders.get_moshi_lm(resolved.moshi_weight, device=device)
     model.train()
     initial = tuple(int(value) for value in model._get_initial_token()[0, :, 0].tolist())
     if len(initial) != 17 or model.dep_q != 16 or model.n_q != 16:

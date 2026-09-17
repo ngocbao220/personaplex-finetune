@@ -9,6 +9,35 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on documentation-onl
 
 @unittest.skipIf(torch is None, "PyTorch is required for LoRA module tests")
 class LoRATest(unittest.TestCase):
+    def test_replacement_accepts_bitsandbytes_4bit_linear(self) -> None:
+        from personaplex_finetuning.lora import inject_lora
+
+        class Linear4bit(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.in_features = 3
+                self.out_features = 2
+                self.compute_dtype = torch.bfloat16
+                self.weight = torch.nn.Parameter(torch.ones(2, 3, dtype=torch.bfloat16), requires_grad=False)
+                self.bias = None
+
+            def forward(self, value):
+                return torch.nn.functional.linear(value, self.weight, self.bias)
+
+        Linear4bit.__module__ = "bitsandbytes.nn.modules"
+
+        class Model(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.transformer = torch.nn.Module()
+                self.transformer.projection = Linear4bit()
+
+        model = Model()
+        inject_lora(model, rank=2, alpha=4)
+        projection = model.transformer.projection
+        self.assertEqual(projection.base.__class__.__name__, "Linear4bit")
+        self.assertEqual(projection.lora_a.weight.dtype, torch.bfloat16)
+
     def test_replacement_exposes_effective_linear_weight_for_direct_access(self) -> None:
         from personaplex_finetuning.lora import inject_lora
 

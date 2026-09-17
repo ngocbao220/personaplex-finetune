@@ -17,7 +17,7 @@ def generate(config: Config, sample: PreparedSample, output_wav: Path, output_te
     import sphn
     import torch
 
-    runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device)
+    runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
     if adapter is not None:
         inject_lora(runtime.model, config.lora_rank, config.lora_alpha)
         load_adapter(runtime.model, adapter)

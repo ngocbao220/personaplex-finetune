@@ -107,7 +107,7 @@ def save_adapter(run_dir: Path, model, config: Config, step: int) -> Path:
 def verify_reloaded_adapter(config: Config, sample, adapter: Path) -> float:
     """Load base + adapter in a fresh model object and return teacher-forced loss."""
     import torch
-    fresh = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device)
+    fresh = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
     inject_lora(fresh.model, config.lora_rank, config.lora_alpha)
     load_adapter(fresh.model, adapter)
     fresh.model.eval()
@@ -145,12 +145,14 @@ def run(config: Config, smoke: bool = False) -> Path | None:
         "learning_rate": config.learning_rate,
         "lora_rank": config.lora_rank,
         "lora_alpha": config.lora_alpha,
+        "qlora": config.qlora,
+        "quant_type": config.quant_type if config.qlora else None,
         "device": config.device,
         "cpu_threads": cpu_threads,
     }
     (config.output_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(config_record))
-    runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device)
+    runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
     targets = inject_lora(runtime.model, config.lora_rank, config.lora_alpha)
     trainable = [parameter for parameter in runtime.model.parameters() if parameter.requires_grad]
     print(f"LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")

@@ -21,6 +21,20 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(loaded.prepared_dir, (root / "prepared").resolve())
             self.assertEqual(loaded.manifest, (root / "prepared/train.jsonl").resolve())
 
+    def test_reads_qlora_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "qlora.yaml"
+            config.write_text(
+                '{"model": {"root": "/models/personaplex", "source": "/source"}, '
+                '"data": {"prepared_dir": "/prepared"}, '
+                '"lora": {"qlora": true, "quant_type": "nf4"}}'
+            )
+
+            loaded = load_config(config)
+
+            self.assertTrue(loaded.qlora)
+            self.assertEqual(loaded.quant_type, "nf4")
+
     def test_resolves_paths_relative_to_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

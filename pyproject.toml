@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Offline-first PersonaPlex LoRA overfit path for prepared OtoSpeech data"
 requires-python = ">=3.10"
 dependencies = [
+  "bitsandbytes>=0.43",
   "numpy>=1.26,<2.2",
   "PyYAML>=6",
   "protobuf>=3.19.6,<5",
