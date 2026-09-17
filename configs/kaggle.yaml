@@ -6,7 +6,7 @@ model:
   device: cuda
 data:
   prepared_dir: /kaggle/input/datasets/ngocbaotrinhtuan/personaplex-otospeech-prepared/prepared # Contains train.jsonl and samples/conv_XXXX
-  window_seconds: 10 # Window seconds
+  window_seconds: 5 # Minimal window (5 seconds) for safe GPU memory smoke test
   shuffle: false # Shuffle 
 lora:
   rank: 2

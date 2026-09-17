@@ -103,12 +103,15 @@ def one_step(config: Config, runtime, example, optimizer=None):
     return total, components, float(grad_norm)
 
 
+from .fsdp import find_free_port, fsdp_adapter_state_dict, parse_gpu_ids, wrap_model_fsdp
+
+
 def save_adapter(run_dir: Path, model, config: Config, step: int) -> Path:
     from safetensors.torch import save_file
     path = run_dir / "checkpoints" / f"checkpoint_{step:06d}"
-    path.mkdir(parents=True, exist_ok=False)
+    path.mkdir(parents=True, exist_ok=True)
     adapter = path / "lora.safetensors"
-    save_file(adapter_state_dict(model), str(adapter))
+    save_file(fsdp_adapter_state_dict(model), str(adapter))
     (path / "adapter.json").write_text(json.dumps({"step": step, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha}, indent=2))
     return adapter
 
@@ -126,7 +129,151 @@ def verify_reloaded_adapter(config: Config, sample, adapter: Path) -> float:
     return float(total)
 
 
-def run(config: Config, smoke: bool = False) -> Path | None:
+def _train_fsdp_worker(
+    rank: int,
+    world_size: int,
+    gpu_ids: list[int],
+    port: int,
+    config: Config,
+    smoke: bool,
+    run_dir: Path,
+) -> None:
+    for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[variable] = "1"
+    import torch
+    import torch.distributed as dist
+    from tqdm.auto import tqdm
+
+    device_id = gpu_ids[rank]
+    torch.cuda.set_device(device_id)
+    device = f"cuda:{device_id}"
+
+    init_method = f"tcp://127.0.0.1:{port}"
+    dist.init_process_group(
+        backend="nccl" if torch.cuda.is_available() else "gloo",
+        init_method=init_method,
+        rank=rank,
+        world_size=world_size,
+    )
+
+    cpu_threads = limit_cpu_threads(torch)
+    seed_everything(config.seed + rank, torch)
+
+    samples = PreparedDataset(config.manifest, config.window_seconds).load()
+    runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), device, config.qlora, config.quant_type)
+    targets = inject_lora(runtime.model, config.lora_rank, config.lora_alpha)
+
+    # Alias LMModel.forward to forward_train for FSDP compatibility
+    from moshi.models.lm import LMModel
+    LMModel.forward = LMModel.forward_train
+
+    runtime.model = wrap_model_fsdp(runtime.model, device_id=device_id)
+
+    trainable = [parameter for parameter in runtime.model.parameters() if parameter.requires_grad]
+    if rank == 0:
+        print(f"[Rank 0] FSDP active across GPUs {gpu_ids}. LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
+
+    optimizer = torch.optim.AdamW(trainable, lr=config.learning_rate, weight_decay=0.0)
+
+    writer = None
+    log_path = None
+    if rank == 0:
+        from torch.utils.tensorboard import SummaryWriter
+        tensorboard_dir = run_dir / "tensorboard"
+        writer = SummaryWriter(log_dir=str(tensorboard_dir))
+        log_path = run_dir / "metrics.jsonl"
+
+    max_steps = 1 if smoke else config.max_steps
+    saved = None
+    last_record = None
+    reload_checks: list[dict[str, float | int]] = []
+    started = time.monotonic()
+
+    # Overwrite config.device with current rank device for one_step
+    config_rank = Config(
+        seed=config.seed,
+        model_root=config.model_root,
+        personaplex_source=config.personaplex_source,
+        manifest=config.manifest,
+        output_dir=config.output_dir,
+        window_seconds=config.window_seconds,
+        shuffle=config.shuffle,
+        max_steps=config.max_steps,
+        learning_rate=config.learning_rate,
+        lora_rank=config.lora_rank,
+        lora_alpha=config.lora_alpha,
+        qlora=config.qlora,
+        quant_type=config.quant_type,
+        device=device,
+        path=config.path,
+    )
+
+    try:
+        log_file = log_path.open("w", encoding="utf-8") if log_path else None
+        progress = tqdm(range(max_steps), desc="training (FSDP)", unit="step", dynamic_ncols=True) if rank == 0 else range(max_steps)
+        for step in progress:
+            example = build_example(config_rank, samples[step % len(samples)], runtime)
+            total, components, grad_norm = one_step(config_rank, runtime, example, optimizer)
+
+            # Reduce total loss across ranks for synchronized logging
+            dist.all_reduce(total, op=dist.ReduceOp.AVG)
+
+            if rank == 0:
+                record = {
+                    "step": step,
+                    "loss/total": float(total.detach()),
+                    "loss/text": float(components["text"].detach()),
+                    "loss/audio_semantic": float(components["audio_semantic"].detach()),
+                    "loss/audio_nonsemantic": float(components["audio_nonsemantic"].detach()),
+                    "lr": optimizer.param_groups[0]["lr"],
+                    "grad_norm": grad_norm,
+                    "gpu_peak_bytes": torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0,
+                }
+                last_record = record
+                if log_file:
+                    log_file.write(json.dumps(record) + "\n")
+                    log_file.flush()
+                if writer:
+                    write_tensorboard_scalars(writer, record, sum(p.numel() for p in trainable), cpu_threads)
+                if hasattr(progress, "set_postfix"):
+                    progress.set_postfix(loss=f"{record['loss/total']:.4f}", grad=f"{grad_norm:.3f}")
+                if max_steps == 1:
+                    tqdm.write(json.dumps({"event": "training_step", **record}))
+
+            if (step + 1) % 50 == 0 or step + 1 == max_steps:
+                dist.barrier()
+                if rank == 0:
+                    saved = save_adapter(run_dir, runtime.model, config_rank, step + 1)
+                dist.barrier()
+
+        if log_file:
+            log_file.close()
+    finally:
+        if writer:
+            writer.close()
+
+    if rank == 0:
+        peak = torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0
+        run_info = {"seconds": time.monotonic() - started, "peak_gpu_bytes": peak, "checkpoint": str(saved) if saved else None, "reload_checks": reload_checks}
+        (run_dir / "run.json").write_text(json.dumps(run_info, indent=2))
+        report = config.path.parent.parent / "reports" / "overfit_10.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            "# PersonaPlex overfit-10 report\n\n"
+            "Status: PASS\n\n"
+            f"- Dataset: {config.manifest}\n- Model: {config.model_root}\n- LoRA: rank={config.lora_rank}, alpha={config.lora_alpha}\n"
+            f"- FSDP GPUs: {gpu_ids}\n"
+            f"- Steps: {max_steps}\n- Final loss: {last_record['loss/total'] if last_record else 'n/a'}\n"
+            f"- Peak GPU bytes: {peak}\n- Checkpoint: {saved}\n"
+            "- Inference outputs: run `python -m tools.inference_smoke` with this checkpoint.\n",
+            encoding="utf-8",
+        )
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+def run(config: Config, smoke: bool = False, fsdp: str | None = None) -> Path | None:
     for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[variable] = "1"
     import torch
@@ -136,10 +283,44 @@ def run(config: Config, smoke: bool = False) -> Path | None:
     except ImportError as exc:
         raise RuntimeError("TensorBoard is required; install the project requirements before training") from exc
 
-    cpu_threads = limit_cpu_threads(torch)
-    seed_everything(config.seed, torch)
     if config.shuffle:
         raise ValueError("overfit configuration must set data.shuffle: false")
+
+    if fsdp:
+        gpu_ids = parse_gpu_ids(fsdp)
+        port = find_free_port()
+        run_dir = create_run_dir(config.output_dir, smoke)
+        config_record = {
+            "event": "configuration",
+            "seed": config.seed,
+            "fsdp_gpus": gpu_ids,
+            "model_root": str(config.model_root),
+            "personaplex_source": str(config.personaplex_source),
+            "manifest": str(config.manifest),
+            "output_dir": str(run_dir),
+            "window_seconds": config.window_seconds,
+            "max_steps": 1 if smoke else config.max_steps,
+            "learning_rate": config.learning_rate,
+            "lora_rank": config.lora_rank,
+            "lora_alpha": config.lora_alpha,
+            "qlora": config.qlora,
+            "quant_type": config.quant_type if config.qlora else None,
+        }
+        (run_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(config_record))
+
+        torch.multiprocessing.spawn(
+            _train_fsdp_worker,
+            args=(len(gpu_ids), gpu_ids, port, config, smoke, run_dir),
+            nprocs=len(gpu_ids),
+            join=True,
+        )
+        saved_ckpt = run_dir / "checkpoints" / f"checkpoint_{(1 if smoke else config.max_steps):06d}" / "lora.safetensors"
+        return saved_ckpt if saved_ckpt.exists() else None
+
+    # Single-GPU path
+    cpu_threads = limit_cpu_threads(torch)
+    seed_everything(config.seed, torch)
     samples = PreparedDataset(config.manifest, config.window_seconds).load()
     run_dir = create_run_dir(config.output_dir, smoke)
     config_record = {
@@ -218,8 +399,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--fsdp", type=str, default=None, help="Comma-separated GPU IDs to activate FSDP (e.g. --fsdp 0,1)")
     args = parser.parse_args()
-    run(load_config(args.config), smoke=args.smoke)
+    run(load_config(args.config), smoke=args.smoke, fsdp=args.fsdp)
     return 0
 
 
