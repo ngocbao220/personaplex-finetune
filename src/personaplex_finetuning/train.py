@@ -147,6 +147,8 @@ def _train_fsdp_worker(
     device_id = gpu_ids[rank]
     torch.cuda.set_device(device_id)
     device = f"cuda:{device_id}"
+    device_name = torch.cuda.get_device_name(device_id) if torch.cuda.is_available() else "CPU"
+    print(f"[Process Rank {rank}] Using device: {device} ({device_name})")
 
     init_method = f"tcp://127.0.0.1:{port}"
     dist.init_process_group(
@@ -164,6 +166,7 @@ def _train_fsdp_worker(
     # Load model sequentially across ranks to prevent spiking CPU RAM over 30GB
     for i in range(world_size):
         if rank == i:
+            print(f"[Rank {rank}] Loading model on {device} ({device_name})...")
             runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), device, config.qlora, config.quant_type)
         dist.barrier()
 
@@ -177,7 +180,8 @@ def _train_fsdp_worker(
 
     trainable = [parameter for parameter in runtime.model.parameters() if parameter.requires_grad]
     if rank == 0:
-        print(f"[Rank 0] FSDP active across GPUs {gpu_ids}. LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
+        gpu_summary = ", ".join(f"cuda:{gid} ({torch.cuda.get_device_name(gid) if torch.cuda.is_available() else 'CPU'})" for gid in gpu_ids)
+        print(f"[Rank 0] FSDP active across GPUs: [{gpu_summary}]. LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
 
     optimizer = torch.optim.AdamW(trainable, lr=config.learning_rate, weight_decay=0.0)
 
@@ -348,6 +352,8 @@ def run(config: Config, smoke: bool = False, fsdp: str | None = None) -> Path | 
     }
     (run_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(config_record))
+    device_desc = f"{config.device} ({torch.cuda.get_device_name(config.device)})" if torch.cuda.is_available() and config.device.startswith("cuda") else config.device
+    print(f"Using single device: {device_desc}")
     runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
     targets = inject_lora(runtime.model, config.lora_rank, config.lora_alpha)
     trainable = [parameter for parameter in runtime.model.parameters() if parameter.requires_grad]
