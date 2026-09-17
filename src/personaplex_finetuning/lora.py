@@ -25,6 +25,23 @@ def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0) -> list[st
         def forward(self, value):
             return self.base(value) + self.lora_b(self.lora_a(self.dropout(value))) * self.scale
 
+        @property
+        def weight(self):
+            """Effective weight for Moshi modules that access ``Linear.weight`` directly."""
+            return self.base.weight + (self.lora_b.weight @ self.lora_a.weight) * self.scale
+
+        @property
+        def bias(self):
+            return self.base.bias
+
+        @property
+        def in_features(self):
+            return self.base.in_features
+
+        @property
+        def out_features(self):
+            return self.base.out_features
+
     targets: list[tuple[str, object, str]] = []
     for prefix in ("transformer", "depformer"):
         root = getattr(model, prefix, None)
