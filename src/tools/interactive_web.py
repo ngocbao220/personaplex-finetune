@@ -180,7 +180,7 @@ def create_gradio_ui(app: WebDemoApp, preset_prompts: list[tuple[str, str]]):
 
     theme = gr.themes.Soft(primary_hue="teal", secondary_hue="indigo")
 
-    with gr.Blocks(title="PersonaPlex Web Demo", theme=theme) as demo:
+    with gr.Blocks(title="PersonaPlex Web Demo") as demo:
         gr.Markdown(
             f"""
             # {title}
@@ -372,6 +372,7 @@ def main() -> int:
         server_name=host,
         server_port=port,
         share=share,
+        theme=gr.themes.Soft(primary_hue="teal", secondary_hue="indigo"),
     )
 
     return 0

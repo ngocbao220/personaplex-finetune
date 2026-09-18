@@ -66,7 +66,7 @@ print('=== Kiểm tra môi trường ===')
 print('PyTorch:', torch.__version__)
 print('CUDA available:', torch.cuda.is_available())
 print('MPS available (macOS):', torch.backends.mps.is_available())
-for pkg in ['sphn', 'sounddevice', 'sentencepiece', 'safetensors', 'einops', 'accelerate']:
+for pkg in ['sphn', 'sounddevice', 'sentencepiece', 'safetensors', 'einops', 'accelerate', 'gradio']:
     __import__(pkg)
     print(f'{pkg}: OK')
 print('===========================')
@@ -284,7 +284,48 @@ python -m tools.interactive_cli \
 
 ---
 
-### 4.4. Chạy Thử Nghiệm Suy Luận File (Inference Smoke Test)
+### 4.4. Chạy Web UI Demo qua Gradio (Giao diện Web & Link công khai tạm thời gradio.live)
+
+Cung cấp giao diện Web trực quan hỗ trợ chọn giọng mẫu (Preset Voice Prompts), tải file giọng tuỳ ý, chọn persona preset (Teacher, Customer Service, Casual Friend), tinh chỉnh siêu tham số, ghi âm từ microphone trình duyệt và phát trực tiếp audio phản hồi + text transcript.
+
+Đặc biệt hỗ trợ **Temporary Public Share Link (`gradio.live`)** giống như TensorBoard giúp truy cập từ xa qua điện thoại/máy tính khác mà vẫn được cấp quyền microphone (nhờ kết nối bảo mật HTTPS).
+
+```bash
+# Cách 1: Khởi động qua file cấu hình demo.yaml (Khuyên dùng)
+python -m tools.interactive_web \
+  --config configs/demo.yaml
+
+# Cách 2: Chạy trực tiếp qua launcher script
+bash scripts/run_web_demo.sh --config configs/demo.yaml
+
+# Cách 3: Truyền cờ CLI chỉ định checkpoint LoRA & tạo link public
+python -m tools.interactive_web \
+  --model-root ../models \
+  --adapter ../runs/hf_overfit_10/checkpoints/checkpoint_000300 \
+  --share \
+  --port 8998
+```
+
+**Chi tiết các cờ (flags) và đối số:**
+- `--config` **[Optional]**: File cấu hình YAML/JSON chứa các thiết lập `model`, `adapter`, `prompt`, `server` (ví dụ: `configs/demo.yaml`).
+- `--model-root` **[Required nếu không có config]**: Thư mục chứa base model checkpoint cục bộ (`model.safetensors`, `tokenizer-*.safetensors`, `tokenizer_spm_32k_3.model`).
+- `--adapter` **[Optional]**: Đường dẫn checkpoint LoRA (`lora.safetensors` hoặc thư mục checkpoint). Nếu bỏ trống, web UI sẽ chạy base model gốc.
+- `--voice-prompt` **[Optional]**: File WAV/PT giọng mẫu mặc định. Giao diện cũng tự động quét tất cả các file `voice_prompt.wav` trong `prepared/samples/` để đưa vào dropdown.
+- `--text-prompt` **[Optional]**: Prompt vai trò hệ thống mặc định.
+- `--device` **[Optional]**: Thiết bị chạy (`cuda` hoặc `cpu`, mặc định: `cuda`).
+- `--qlora` **[Optional]**: Bật lượng tử hóa 4-bit NF4 để giảm VRAM khi chạy trên GPU yếu.
+- `--host` **[Optional]**: Địa chỉ mạng bind socket (mặc định: `0.0.0.0` để mở cho mạng nội bộ/LAN).
+- `--port` **[Optional]**: Cổng dịch vụ web (mặc định: `8998`).
+- `--share` **[Optional, mặc định bật]**: Tự động tạo temporary public URL dạng `https://xxxx.gradio.live` (có hiệu lực 72h) để truy cập từ ngoài Internet.
+- `--no-share` **[Optional]**: Tắt tính năng tạo link public, chỉ lắng nghe cục bộ trong mạng nội bộ.
+
+**Cách truy cập giao diện:**
+- Cục bộ: Mở trình duyệt truy cập `http://localhost:8998`
+- Từ xa (Internet): Sử dụng đường link `https://xxxxxxxx.gradio.live` được in ra trên terminal.
+
+---
+
+### 4.5. Chạy Thử Nghiệm Suy Luận File (Inference Smoke Test)
 
 Thực hiện nạp lại adapter LoRA trên base model gốc, tái tạo luồng Hybrid System Prompt (Voice prompt + Text prompt) và sinh phản hồi âm thanh/văn bản từ 1 mẫu trong dataset:
 
