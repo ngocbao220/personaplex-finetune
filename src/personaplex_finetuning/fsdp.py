@@ -66,11 +66,26 @@ def get_fsdp_policy(is_lora: bool = True) -> Callable[[torch.nn.Module], bool]:
     return functools.partial(torch_wrap._or_policy, policies=policies)
 
 
-def wrap_model_fsdp(model: torch.nn.Module, device_id: int | torch.device | None = None) -> FullyShardedDataParallel:
-    """Wrap model with FSDP using FULL_SHARD strategy."""
+def wrap_model_fsdp(
+    model: torch.nn.Module,
+    device_id: int | torch.device | None = None,
+    strategy: str | ShardingStrategy = "shard_grad_op",
+) -> FullyShardedDataParallel:
+    """Wrap model with FSDP using SHARD_GRAD_OP (ZeRO-2) by default, or FULL_SHARD / NO_SHARD."""
+    if isinstance(strategy, str):
+        strat_map = {
+            "shard_grad_op": ShardingStrategy.SHARD_GRAD_OP,
+            "full_shard": ShardingStrategy.FULL_SHARD,
+            "no_shard": ShardingStrategy.NO_SHARD,
+            "hybrid_shard": ShardingStrategy.HYBRID_SHARD,
+        }
+        sharding_strategy = strat_map.get(strategy.lower(), ShardingStrategy.SHARD_GRAD_OP)
+    else:
+        sharding_strategy = strategy
+
     auto_wrap_policy = get_fsdp_policy(is_lora=True)
     kwargs = {
-        "sharding_strategy": ShardingStrategy.FULL_SHARD,
+        "sharding_strategy": sharding_strategy,
         "auto_wrap_policy": auto_wrap_policy,
         "backward_prefetch": BackwardPrefetch.BACKWARD_PRE,
         "limit_all_gathers": True,
@@ -80,6 +95,7 @@ def wrap_model_fsdp(model: torch.nn.Module, device_id: int | torch.device | None
     if device_id is not None:
         kwargs["device_id"] = device_id
     return FullyShardedDataParallel(model, **kwargs)
+
 
 
 def fsdp_adapter_state_dict(model: torch.nn.Module | FullyShardedDataParallel) -> dict[str, torch.Tensor]:

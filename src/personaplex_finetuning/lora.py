@@ -40,7 +40,7 @@ def quantize_model_4bit(model, device: str, quant_type: str = "nf4"):
     return model.to(device)
 
 
-def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0) -> list[str]:
+def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0, prefixes: tuple[str, ...] = ("transformer",)) -> list[str]:
     import torch
 
     if rank <= 0 or alpha <= 0:
@@ -73,7 +73,10 @@ def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0) -> list[st
             if quant_state is not None:
                 import bitsandbytes.functional as bnb_functional
                 base_weight = bnb_functional.dequantize_4bit(base_weight.data, quant_state)
-            return base_weight.to(self.lora_a.weight.dtype) + (self.lora_b.weight @ self.lora_a.weight) * self.scale
+            lora_weight = (self.lora_b.weight @ self.lora_a.weight) * self.scale
+            if base_weight.shape != lora_weight.shape or base_weight.numel() != lora_weight.numel():
+                return base_weight.to(self.lora_a.weight.dtype)
+            return base_weight.to(self.lora_a.weight.dtype) + lora_weight
 
         @property
         def bias(self):
@@ -88,7 +91,7 @@ def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0) -> list[st
             return self.base.out_features
 
     targets: list[tuple[str, object, str]] = []
-    for prefix in ("transformer", "depformer"):
+    for prefix in prefixes:
         root = getattr(model, prefix, None)
         if root is None:
             continue
@@ -118,6 +121,9 @@ def adapter_state_dict(model):
 def load_adapter(model, path) -> None:
     from safetensors.torch import load_file
     state = load_file(str(path))
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    if unexpected or any("lora_" in name for name in missing):
-        raise RuntimeError(f"adapter mismatch; missing={missing}, unexpected={unexpected}")
+    model_sd = model.state_dict()
+    filtered_state = {k: v for k, v in state.items() if k in model_sd}
+    missing, unexpected = model.load_state_dict(filtered_state, strict=False)
+    if any("lora_" in name for name in missing):
+        raise RuntimeError(f"adapter mismatch; missing required LoRA keys: {missing}")
+

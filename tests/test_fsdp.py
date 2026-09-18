@@ -48,6 +48,16 @@ class TestFSDP(unittest.TestCase):
         state = fsdp_adapter_state_dict(model)
         self.assertEqual(state, {})
 
+    @unittest.skipUnless(torch.cuda.is_available(), "FSDP wrapping requires CUDA")
+    def test_wrap_model_fsdp_strategy_mapping(self):
+        from personaplex_finetuning.fsdp import wrap_model_fsdp
+        from torch.distributed.fsdp.api import ShardingStrategy
+        model = DummyModel()
+        wrapped = wrap_model_fsdp(model, strategy="shard_grad_op")
+        self.assertEqual(wrapped.sharding_strategy, ShardingStrategy.SHARD_GRAD_OP)
+
+
 
 if __name__ == "__main__":
     unittest.main()
+

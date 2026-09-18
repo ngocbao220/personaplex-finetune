@@ -108,7 +108,14 @@ def save_best_adapter(run_dir: Path, model, config: Config, step: int, val_loss:
 
 
 def model_forward_train(model, codes):
-    """LMModel deliberately exposes training through ``forward_train`` only."""
+    """LMModel deliberately exposes training through ``forward_train`` only.
+    When wrapped by FSDP, __call__ must be invoked to trigger FSDP parameter un-sharding hooks."""
+    try:
+        from torch.distributed.fsdp import FullyShardedDataParallel
+        if isinstance(model, FullyShardedDataParallel):
+            return model(codes)
+    except ImportError:
+        pass
     return model.forward_train(codes)
 
 
@@ -197,6 +204,7 @@ def _train_fsdp_worker(
     config: Config,
     smoke: bool,
     run_dir: Path,
+    sharding_strategy: str = "shard_grad_op",
 ) -> None:
     for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[variable] = "1"
@@ -245,12 +253,12 @@ def _train_fsdp_worker(
     from moshi.models.lm import LMModel
     LMModel.forward = LMModel.forward_train
 
-    runtime.model = wrap_model_fsdp(runtime.model, device_id=device_id)
+    runtime.model = wrap_model_fsdp(runtime.model, device_id=device_id, strategy=sharding_strategy)
 
     trainable = [parameter for parameter in runtime.model.parameters() if parameter.requires_grad]
     if rank == 0:
         gpu_summary = ", ".join(f"cuda:{gid} ({torch.cuda.get_device_name(gid) if torch.cuda.is_available() else 'CPU'})" for gid in gpu_ids)
-        print(f"[Rank 0] FSDP active across GPUs: [{gpu_summary}]. LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
+        print(f"[Rank 0] FSDP active across GPUs: [{gpu_summary}] (strategy={sharding_strategy}). LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
 
     optimizer = torch.optim.AdamW(trainable, lr=config.learning_rate, weight_decay=0.0)
     max_steps = 1 if smoke else config.max_steps
@@ -277,13 +285,15 @@ def _train_fsdp_worker(
     accum_steps = max(1, config.gradient_accumulation_steps)
     shuffled_indices = list(range(len(train_samples)))
     if config.shuffle and not smoke:
-        random.Random(config.seed + rank).shuffle(shuffled_indices)
+        random.Random(config.seed).shuffle(shuffled_indices)
 
     try:
         log_file = log_path.open("w", encoding="utf-8") if log_path else None
         progress = tqdm(range(max_steps), desc="training (FSDP)", unit="step", dynamic_ncols=True) if rank == 0 else range(max_steps)
         for step in progress:
-            sample_idx = (step % len(train_samples)) if not config.shuffle else shuffled_indices[step % len(shuffled_indices)]
+            # Distribute distinct samples across ranks (Data Parallel)
+            global_sample_idx = (step * world_size + rank) % len(train_samples)
+            sample_idx = global_sample_idx if not config.shuffle else shuffled_indices[global_sample_idx % len(shuffled_indices)]
             current_sample = train_samples[sample_idx]
             example = build_example(config_rank, current_sample, runtime, random_crop=config.random_crop and not smoke)
             codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
@@ -292,12 +302,16 @@ def _train_fsdp_worker(
 
             # Gradient accumulation
             scaled_loss = total / accum_steps
-            scaled_loss.backward()
+            is_update = ((step + 1) % accum_steps == 0) or (step + 1 == max_steps)
+            if hasattr(runtime.model, "no_sync") and not is_update:
+                with runtime.model.no_sync():
+                    scaled_loss.backward()
+            else:
+                scaled_loss.backward()
 
             # Reduce total loss across ranks for synchronized logging
             dist.all_reduce(total, op=dist.ReduceOp.AVG)
 
-            is_update = ((step + 1) % accum_steps == 0) or (step + 1 == max_steps)
             if is_update:
                 grad_norm = float(torch.nn.utils.clip_grad_norm_(trainable, 1.0))
                 optimizer.step()
@@ -306,6 +320,7 @@ def _train_fsdp_worker(
                 optimizer.zero_grad(set_to_none=True)
             else:
                 grad_norm = 0.0
+
 
             if rank == 0:
                 record = {
@@ -378,7 +393,13 @@ def _train_fsdp_worker(
     dist.destroy_process_group()
 
 
-def run(config: Config, smoke: bool = False, fsdp: str | None = None, resume_from: str | None = None) -> Path | None:
+def run(
+    config: Config,
+    smoke: bool = False,
+    fsdp: str | None = None,
+    resume_from: str | None = None,
+    sharding_strategy: str = "shard_grad_op",
+) -> Path | None:
     for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[variable] = "1"
     import torch
@@ -399,6 +420,7 @@ def run(config: Config, smoke: bool = False, fsdp: str | None = None, resume_fro
             "event": "configuration",
             "seed": config.seed,
             "fsdp_gpus": gpu_ids,
+            "sharding_strategy": sharding_strategy,
             "model_root": str(config.model_root),
             "personaplex_source": str(config.personaplex_source),
             "manifest": str(config.manifest),
@@ -422,12 +444,13 @@ def run(config: Config, smoke: bool = False, fsdp: str | None = None, resume_fro
 
         torch.multiprocessing.spawn(
             _train_fsdp_worker,
-            args=(len(gpu_ids), gpu_ids, port, config, smoke, run_dir),
+            args=(len(gpu_ids), gpu_ids, port, config, smoke, run_dir, sharding_strategy),
             nprocs=len(gpu_ids),
             join=True,
         )
         saved_ckpt = run_dir / "checkpoints" / f"checkpoint_{(1 if smoke else config.max_steps):06d}" / "lora.safetensors"
         return saved_ckpt if saved_ckpt.exists() else None
+
 
     # Single-GPU path
     cpu_threads = limit_cpu_threads(torch)
@@ -611,6 +634,13 @@ def main() -> int:
     parser.add_argument("--config", required=True)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--fsdp", type=str, default=None, help="Comma-separated GPU IDs to activate FSDP (e.g. --fsdp 0,1)")
+    parser.add_argument(
+        "--sharding-strategy",
+        type=str,
+        default="shard_grad_op",
+        choices=["shard_grad_op", "full_shard", "no_shard"],
+        help="FSDP strategy: shard_grad_op (ZeRO-2, fast for LoRA, default), full_shard (ZeRO-3), or no_shard (DDP)",
+    )
     parser.add_argument("--qlora", action="store_true", default=None, help="Enable 4-bit QLoRA. If omitted, uses value from config file.")
     parser.add_argument("--no-qlora", dest="qlora", action="store_false", help="Disable QLoRA.")
     parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint directory to resume from")
@@ -618,8 +648,16 @@ def main() -> int:
     config = load_config(args.config)
     if args.qlora is not None:
         config = config.replace(qlora=args.qlora)
-    run(config, smoke=args.smoke, fsdp=args.fsdp, resume_from=args.resume_from)
+    run(
+        config,
+        smoke=args.smoke,
+        fsdp=args.fsdp,
+        resume_from=args.resume_from,
+        sharding_strategy=args.sharding_strategy,
+    )
+
     return 0
+
 
 
 if __name__ == "__main__":
