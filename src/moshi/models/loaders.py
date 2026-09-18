@@ -210,7 +210,7 @@ def get_moshi_lm(
         if dev.type == "mps":
             state_dict = load_file(filename, device="cpu")
         else:
-            state_dict = load_file(filename, device=dev.type)
+            state_dict = load_file(filename, device=str(dev))
     else:
         # torch checkpoint
         with open(filename, "rb") as f:
