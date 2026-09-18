@@ -1,4 +1,4 @@
-"""Small configuration reader with deterministic, config-relative paths."""
+"""Small configuration reader with deterministic, config-relative paths and OmegaConf/Hydra support."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from omegaconf import DictConfig, OmegaConf
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,8 @@ class Config:
     random_crop: bool = False
     prompt_aug_prob: float = 0.0
     val_manifest_path: Path | None = None
+    gradient_checkpointing: bool = False
+    mixed_precision: str = "bf16"
 
     @property
     def manifest(self) -> Path:
@@ -67,11 +71,24 @@ def _read_yaml_or_json(path: Path) -> dict[str, Any]:
     return parsed
 
 
-def load_config(path: str | Path) -> Config:
+def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     path = Path(path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"config does not exist: {path}")
-    raw = _read_yaml_or_json(path)
+
+    # Load with OmegaConf to support dotlist overrides & config interpolation
+    try:
+        conf = OmegaConf.load(str(path))
+        if overrides:
+            override_conf = OmegaConf.from_dotlist(list(overrides))
+            conf = OmegaConf.merge(conf, override_conf)
+        raw = OmegaConf.to_container(conf, resolve=True)
+    except Exception:
+        raw = _read_yaml_or_json(path)
+
+    if not isinstance(raw, dict):
+        raise ValueError("config root must be a mapping")
+
     model = raw.get("model", {})
     data = raw.get("data", {})
     train = raw.get("train", {})
@@ -79,11 +96,13 @@ def load_config(path: str | Path) -> Config:
     if not isinstance(model, dict) or not isinstance(data, dict):
         raise ValueError("model and data config sections must be mappings")
     root = path.parent
+
     def resolve(section: dict[str, Any], key: str, default: str | None = None) -> Path:
         value = section.get(key, default)
         if not isinstance(value, str) or not value:
             raise ValueError(f"{key} must be a non-empty path")
         return (root / value).resolve() if not Path(value).is_absolute() else Path(value)
+
     prepared_dir = resolve(data, "prepared_dir") if "prepared_dir" in data else resolve(data, "manifest").parent
     qlora = bool(lora.get("qlora", False)) if isinstance(lora, dict) else False
     quant_type = str(lora.get("quant_type", "nf4")).lower() if isinstance(lora, dict) else "nf4"
@@ -91,6 +110,7 @@ def load_config(path: str | Path) -> Config:
         raise ValueError("lora.quant_type must be nf4 or fp4")
     val_manifest_raw = data.get("val_manifest")
     val_manifest_path = resolve(data, "val_manifest") if isinstance(val_manifest_raw, str) and val_manifest_raw else None
+
     return Config(
         path=path,
         model_root=resolve(model, "root"),
@@ -115,4 +135,6 @@ def load_config(path: str | Path) -> Config:
         random_crop=bool(data.get("random_crop", False)),
         prompt_aug_prob=float(data.get("prompt_aug_prob", 0.0)),
         val_manifest_path=val_manifest_path,
+        gradient_checkpointing=bool(train.get("gradient_checkpointing", False)) if isinstance(train, dict) else False,
+        mixed_precision=str(train.get("mixed_precision", "bf16")) if isinstance(train, dict) else "bf16",
     )

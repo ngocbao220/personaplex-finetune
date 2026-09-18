@@ -1,0 +1,7 @@
+# 10-sample deterministic overfit dataset configuration
+prepared_dir: ../assets/prepared
+window_seconds: 30
+shuffle: false
+random_crop: false
+prompt_aug_prob: 0.0
+val_ratio: 0.0

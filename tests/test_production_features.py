@@ -82,3 +82,39 @@ class ProductionFeaturesTest(unittest.TestCase):
         for _ in range(90):
             sched.step()
         self.assertAlmostEqual(sched.get_last_lr()[0], 0.0, places=3)
+
+    def test_enable_gradient_checkpointing(self):
+        import torch
+        from personaplex_finetuning.train import enable_gradient_checkpointing
+
+        class DummyLayer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(8, 8)
+            def forward(self, x, *args, **kwargs):
+                return self.linear(x)
+
+        class StreamingTransformer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([DummyLayer() for _ in range(2)])
+                self._streaming_state = None
+                self.positional_embedding = None
+            def forward(self, x, *args, **kwargs):
+                for layer in self.layers:
+                    x = layer(x)
+                return x
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.transformer = StreamingTransformer()
+
+        model = DummyModel()
+        enable_gradient_checkpointing(model)
+        x = torch.randn(2, 4, 8, requires_grad=True)
+        out = model.transformer(x)
+        self.assertEqual(out.shape, (2, 4, 8))
+        out.sum().backward()
+        self.assertIsNotNone(x.grad)
+

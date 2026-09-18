@@ -1,0 +1,10 @@
+# Full training configuration
+output_dir: ../runs/train_104h
+max_steps: 10000
+learning_rate: 2.0e-5
+gradient_accumulation_steps: 8
+warmup_steps: 500
+eval_every_steps: 500
+save_every_steps: 500
+gradient_checkpointing: true
+mixed_precision: bf16

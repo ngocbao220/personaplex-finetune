@@ -1,0 +1,43 @@
+# ==============================================================================
+# PersonaPlex Live Interactive Demo Configuration
+# ==============================================================================
+seed: 42
+
+# Base model checkpoint
+model:
+  root: ../models                          # Path tới PersonaPlex checkpoint (chứa model.safetensors, tokenizer-*, tokenizer_spm_32k_3.model)
+  source: ../src                           # Path tới PersonaPlex source code
+  device: cuda                             # Thiết bị chạy model: 'cuda' hoặc 'cpu'
+
+# Fine-tuned LoRA adapter (đặt null hoặc để trống nếu muốn chạy base model nguyên bản)
+adapter:
+  path: ../runs/hf_overfit_10/checkpoints/checkpoint_000300  # Path tới LoRA checkpoint directory hoặc file lora.safetensors
+  rank: 16                                 # LoRA rank (nếu có adapter.json sẽ tự động ưu tiên đọc từ adapter.json)
+  alpha: 32                                # LoRA alpha
+  qlora: false                             # Bật 4-bit quantization NF4 nếu GPU ít VRAM
+
+# Hybrid System Prompt conditioning
+prompt:
+  voice_prompt: ../prepared/samples/conv_0001/voice_prompt.wav  # File WAV hoặc .pt mẫu giọng nói của agent
+  text_prompt: "You enjoy having a good conversation. You are a helpful and friendly assistant."  # Role/system text prompt
+
+# Generation sampling hyperparameters
+generation:
+  use_sampling: true                       # true: sampling ngẫu nhiên; false: greedy decoding
+  temp: 0.8                                # Audio temperature (0.0 - 1.0)
+  temp_text: 0.7                           # Text temperature (0.0 - 1.0)
+  top_k: 250                               # Audio top-k
+  top_k_text: 25                           # Text top-k
+
+# Audio hardware & session output
+audio:
+  input_device: null                       # ID hoặc tên micro cụ thể (null: mặc định)
+  output_device: null                      # ID hoặc tên loa cụ thể (null: mặc định)
+  save_session_dir: ../outputs/demo_session # Thư mục lưu bản ghi âm và transcript sau khi kết thúc (null: không lưu)
+
+# Web Demo Server settings (Gradio)
+server:
+  host: 0.0.0.0                            # Địa chỉ interface mạng server bind (0.0.0.0 để mở cho mọi kết nối)
+  port: 8998                               # Cổng chạy Web UI
+  share: true                              # Tự động tạo link công khai tạm thời (gradio.live) để truy cập từ xa
+

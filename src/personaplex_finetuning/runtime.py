@@ -183,6 +183,11 @@ def load_runtime(paths: RuntimePaths, device: str = "cuda", qlora: bool = False,
     lm_helpers = importlib.import_module("moshi.models.lm")
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is false")
+    if torch.cuda.is_available():
+        if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+            torch.backends.cuda.enable_flash_sdp(True)
+        if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
     mimi = loaders.get_mimi(resolved.mimi_weight, device=device)
     if qlora:
         from .lora import quantize_model_4bit

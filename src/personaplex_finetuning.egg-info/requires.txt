@@ -1,0 +1,17 @@
+accelerate>=0.30
+bitsandbytes>=0.43
+hydra-core>=1.3
+numpy<2.2,>=1.26
+omegaconf>=2.3
+PyYAML>=6
+protobuf<5,>=3.19.6
+safetensors>=0.4
+sentencepiece==0.2
+sphn<0.2,>=0.1.4
+tensorboard<2.19,>=2.17
+pyloudnorm>=0.1.1
+torch<2.5,>=2.2
+tqdm>=4.66
+
+[hub]
+huggingface-hub[cli]<0.25,>=0.24

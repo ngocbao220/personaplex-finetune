@@ -1,7 +1,6 @@
 seed: 42
 model:
   root: /kaggle/input/models/phngdiuthanhngn/personalplex-7b-v1/pytorch/default/1 # Path đến model personaplex-7b
-  # Self-contained vendored runtime package.
   source: ../src # Path đến thư mục chứa code của PersonaPlex
   device: cuda
 data:

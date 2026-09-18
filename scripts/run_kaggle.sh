@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 CONFIG.yaml [--fsdp 0,1]" >&2
+  echo "Usage: $0 CONFIG.yaml [EXTRA_ARGS...]" >&2
   exit 2
 fi
 

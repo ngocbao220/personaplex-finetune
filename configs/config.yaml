@@ -1,0 +1,9 @@
+# Default Hydra configuration for PersonaPlex fine-tuning
+defaults:
+  - model: personaplex_7b
+  - data: otospeech_104h
+  - lora: default
+  - train: default
+  - _self_
+
+seed: 42

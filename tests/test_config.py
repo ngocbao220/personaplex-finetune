@@ -62,3 +62,21 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(loaded.model_root, Path("/mnt/models/personaplex"))
             self.assertEqual(loaded.personaplex_source, Path("/opt/personaplex-source"))
             self.assertEqual(loaded.manifest, Path("/mnt/processed/train.jsonl"))
+
+    def test_applies_dotlist_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "test.yaml"
+            config.write_text(
+                '{"model": {"root": "/models/personaplex", "source": "/source"}, '
+                '"data": {"prepared_dir": "/prepared"}, '
+                '"train": {"learning_rate": 2.0e-5, "max_steps": 100}}'
+            )
+            loaded = load_config(
+                config,
+                overrides=["train.learning_rate=1e-4", "train.max_steps=500", "train.gradient_checkpointing=true"],
+            )
+            self.assertEqual(loaded.learning_rate, 1e-4)
+            self.assertEqual(loaded.max_steps, 500)
+            self.assertTrue(loaded.gradient_checkpointing)
+            self.assertEqual(loaded.mixed_precision, "bf16")
+

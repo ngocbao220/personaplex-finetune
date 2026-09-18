@@ -1,0 +1,5 @@
+# LoRA configuration
+rank: 16
+alpha: 32
+qlora: false
+quant_type: nf4

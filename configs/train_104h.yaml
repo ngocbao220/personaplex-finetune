@@ -28,3 +28,6 @@ train:
   warmup_steps: 500        # Cosine warmup over first 500 steps
   eval_every_steps: 500    # Evaluate val_loss every 500 steps
   save_every_steps: 500    # Save periodic checkpoint every 500 steps
+  gradient_checkpointing: true
+  mixed_precision: bf16
+

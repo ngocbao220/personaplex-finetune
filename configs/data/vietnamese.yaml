@@ -1,0 +1,7 @@
+# Vietnamese Fine tuning
+prepared_dir: /storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared
+window_seconds: 30
+shuffle: true
+random_crop: true
+prompt_aug_prob: 0.3
+val_ratio: 0.05
