@@ -25,11 +25,26 @@ class Config:
     qlora: bool = False
     quant_type: str = "nf4"
     device: str = "cuda"
+    gradient_accumulation_steps: int = 1
+    warmup_steps: int = 0
+    eval_every_steps: int = 0
+    save_every_steps: int = 50
+    val_ratio: float = 0.05
+    random_crop: bool = False
+    prompt_aug_prob: float = 0.0
+    val_manifest_path: Path | None = None
 
     @property
     def manifest(self) -> Path:
         """Canonical local manifest inside the externally prepared dataset root."""
         return self.prepared_dir / "train.jsonl"
+
+    @property
+    def val_manifest(self) -> Path | None:
+        if self.val_manifest_path is not None:
+            return self.val_manifest_path
+        val_default = self.prepared_dir / "val.jsonl"
+        return val_default if val_default.is_file() else None
 
     def replace(self, **kwargs) -> Config:
         import dataclasses
@@ -74,6 +89,8 @@ def load_config(path: str | Path) -> Config:
     quant_type = str(lora.get("quant_type", "nf4")).lower() if isinstance(lora, dict) else "nf4"
     if quant_type not in {"nf4", "fp4"}:
         raise ValueError("lora.quant_type must be nf4 or fp4")
+    val_manifest_raw = data.get("val_manifest")
+    val_manifest_path = resolve(data, "val_manifest") if isinstance(val_manifest_raw, str) and val_manifest_raw else None
     return Config(
         path=path,
         model_root=resolve(model, "root"),
@@ -90,4 +107,12 @@ def load_config(path: str | Path) -> Config:
         qlora=qlora,
         quant_type=quant_type,
         device=str(model.get("device", "cuda")),
+        gradient_accumulation_steps=max(1, int(train.get("gradient_accumulation_steps", 1))) if isinstance(train, dict) else 1,
+        warmup_steps=max(0, int(train.get("warmup_steps", 0))) if isinstance(train, dict) else 0,
+        eval_every_steps=max(0, int(train.get("eval_every_steps", 0))) if isinstance(train, dict) else 0,
+        save_every_steps=max(1, int(train.get("save_every_steps", 50))) if isinstance(train, dict) else 50,
+        val_ratio=float(data.get("val_ratio", 0.05)),
+        random_crop=bool(data.get("random_crop", False)),
+        prompt_aug_prob=float(data.get("prompt_aug_prob", 0.0)),
+        val_manifest_path=val_manifest_path,
     )

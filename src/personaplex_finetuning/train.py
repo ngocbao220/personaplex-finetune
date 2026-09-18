@@ -42,9 +42,69 @@ def create_run_dir(output_root: Path, smoke: bool) -> Path:
     return run_dir
 
 
-def build_example(config: Config, sample, runtime):
+def build_example(config: Config, sample, runtime, random_crop: bool = False):
+    if random_crop and getattr(config, "random_crop", False):
+        effective_sample = sample.dynamic_sample(
+            config.window_seconds, random_crop=True, prompt_aug_prob=getattr(config, "prompt_aug_prob", 0.0)
+        )
+    else:
+        effective_sample = sample
     builder = PersonaPlexTrainingExampleBuilder(runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token)
-    return builder.apply_delays(builder.build(sample), runtime.delays)
+    return builder.apply_delays(builder.build(effective_sample), runtime.delays)
+
+
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps: int, num_training_steps: int):
+    import math
+    import torch
+    def lr_lambda(current_step: int):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def evaluate_validation(config: Config, runtime, val_samples: list) -> dict[str, float]:
+    if not val_samples:
+        return {}
+    import torch
+    runtime.model.eval()
+    total_losses = []
+    text_losses = []
+    semantic_losses = []
+    nonsemantic_losses = []
+    with torch.no_grad():
+        for sample in val_samples:
+            example = build_example(config, sample, runtime, random_crop=False)
+            codes = torch.tensor(example.input_codes, dtype=torch.long, device=config.device).unsqueeze(0)
+            output = model_forward_train(runtime.model, codes)
+            total, comps = loss_components(output, codes, example, runtime.tokenizer.padding_id, torch)
+            total_losses.append(float(total.detach()))
+            text_losses.append(float(comps["text"].detach()))
+            semantic_losses.append(float(comps["audio_semantic"].detach()))
+            nonsemantic_losses.append(float(comps["audio_nonsemantic"].detach()))
+    runtime.model.train()
+    return {
+        "val/loss_total": sum(total_losses) / len(total_losses),
+        "val/loss_text": sum(text_losses) / len(text_losses),
+        "val/loss_audio_semantic": sum(semantic_losses) / len(semantic_losses),
+        "val/loss_audio_nonsemantic": sum(nonsemantic_losses) / len(nonsemantic_losses),
+    }
+
+
+def save_best_adapter(run_dir: Path, model, config: Config, step: int, val_loss: float) -> Path:
+    from safetensors.torch import save_file
+    path = run_dir / "checkpoints" / "best"
+    path.mkdir(parents=True, exist_ok=True)
+    adapter = path / "lora.safetensors"
+    save_file(fsdp_adapter_state_dict(model), str(adapter))
+    (path / "adapter.json").write_text(
+        json.dumps(
+            {"step": step, "val_loss": val_loss, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha},
+            indent=2,
+        )
+    )
+    return adapter
 
 
 def model_forward_train(model, codes):
@@ -161,7 +221,16 @@ def _train_fsdp_worker(
     cpu_threads = limit_cpu_threads(torch)
     seed_everything(config.seed + rank, torch)
 
-    samples = PreparedDataset(config.manifest, config.window_seconds).load()
+    if config.val_manifest:
+        train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
+        val_samples = PreparedDataset(config.val_manifest, config.window_seconds).load()
+    elif config.eval_every_steps > 0:
+        train_samples, val_samples = PreparedDataset(config.manifest, config.window_seconds).split(
+            val_ratio=config.val_ratio, seed=config.seed
+        )
+    else:
+        train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
+        val_samples = []
 
     # Load model sequentially across ranks to prevent spiking CPU RAM over 30GB
     for i in range(world_size):
@@ -184,6 +253,10 @@ def _train_fsdp_worker(
         print(f"[Rank 0] FSDP active across GPUs: [{gpu_summary}]. LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
 
     optimizer = torch.optim.AdamW(trainable, lr=config.learning_rate, weight_decay=0.0)
+    max_steps = 1 if smoke else config.max_steps
+    scheduler = None
+    if config.warmup_steps > 0 and not smoke:
+        scheduler = get_cosine_schedule_with_warmup(optimizer, config.warmup_steps, max_steps)
 
     writer = None
     log_path = None
@@ -193,40 +266,46 @@ def _train_fsdp_worker(
         writer = SummaryWriter(log_dir=str(tensorboard_dir))
         log_path = run_dir / "metrics.jsonl"
 
-    max_steps = 1 if smoke else config.max_steps
     saved = None
+    best_saved = None
+    best_val_loss = float("inf")
     last_record = None
     reload_checks: list[dict[str, float | int]] = []
     started = time.monotonic()
+    config_rank = config.replace(device=device)
 
-    # Overwrite config.device with current rank device for one_step
-    config_rank = Config(
-        seed=config.seed,
-        model_root=config.model_root,
-        personaplex_source=config.personaplex_source,
-        manifest=config.manifest,
-        output_dir=config.output_dir,
-        window_seconds=config.window_seconds,
-        shuffle=config.shuffle,
-        max_steps=config.max_steps,
-        learning_rate=config.learning_rate,
-        lora_rank=config.lora_rank,
-        lora_alpha=config.lora_alpha,
-        qlora=config.qlora,
-        quant_type=config.quant_type,
-        device=device,
-        path=config.path,
-    )
+    accum_steps = max(1, config.gradient_accumulation_steps)
+    shuffled_indices = list(range(len(train_samples)))
+    if config.shuffle and not smoke:
+        random.Random(config.seed + rank).shuffle(shuffled_indices)
 
     try:
         log_file = log_path.open("w", encoding="utf-8") if log_path else None
         progress = tqdm(range(max_steps), desc="training (FSDP)", unit="step", dynamic_ncols=True) if rank == 0 else range(max_steps)
         for step in progress:
-            example = build_example(config_rank, samples[step % len(samples)], runtime)
-            total, components, grad_norm = one_step(config_rank, runtime, example, optimizer)
+            sample_idx = (step % len(train_samples)) if not config.shuffle else shuffled_indices[step % len(shuffled_indices)]
+            current_sample = train_samples[sample_idx]
+            example = build_example(config_rank, current_sample, runtime, random_crop=config.random_crop and not smoke)
+            codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
+            output = model_forward_train(runtime.model, codes)
+            total, components = loss_components(output, codes, example, runtime.tokenizer.padding_id, torch)
+
+            # Gradient accumulation
+            scaled_loss = total / accum_steps
+            scaled_loss.backward()
 
             # Reduce total loss across ranks for synchronized logging
             dist.all_reduce(total, op=dist.ReduceOp.AVG)
+
+            is_update = ((step + 1) % accum_steps == 0) or (step + 1 == max_steps)
+            if is_update:
+                grad_norm = float(torch.nn.utils.clip_grad_norm_(trainable, 1.0))
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+            else:
+                grad_norm = 0.0
 
             if rank == 0:
                 record = {
@@ -250,7 +329,23 @@ def _train_fsdp_worker(
                 if max_steps == 1:
                     tqdm.write(json.dumps({"event": "training_step", **record}))
 
-            if (step + 1) % 50 == 0 or step + 1 == max_steps:
+            # Validation evaluation
+            if val_samples and config.eval_every_steps > 0 and ((step + 1) % config.eval_every_steps == 0 or step + 1 == max_steps):
+                dist.barrier()
+                val_metrics = evaluate_validation(config_rank, runtime, val_samples)
+                dist.barrier()
+                if rank == 0:
+                    for k, v in val_metrics.items():
+                        if writer:
+                            writer.add_scalar(k, v, step + 1)
+                    val_loss = val_metrics.get("val/loss_total", float("inf"))
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_saved = save_best_adapter(run_dir, runtime.model, config_rank, step + 1, val_loss)
+                        tqdm.write(json.dumps({"event": "new_best_val_loss", "step": step + 1, "val_loss": val_loss}))
+
+            save_interval = 1 if smoke else config.save_every_steps
+            if (step + 1) % save_interval == 0 or step + 1 == max_steps:
                 dist.barrier()
                 if rank == 0:
                     saved = save_adapter(run_dir, runtime.model, config_rank, step + 1)
@@ -283,7 +378,7 @@ def _train_fsdp_worker(
     dist.destroy_process_group()
 
 
-def run(config: Config, smoke: bool = False, fsdp: str | None = None) -> Path | None:
+def run(config: Config, smoke: bool = False, fsdp: str | None = None, resume_from: str | None = None) -> Path | None:
     for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[variable] = "1"
     import torch
@@ -293,8 +388,8 @@ def run(config: Config, smoke: bool = False, fsdp: str | None = None) -> Path | 
     except ImportError as exc:
         raise RuntimeError("TensorBoard is required; install the project requirements before training") from exc
 
-    if config.shuffle:
-        raise ValueError("overfit configuration must set data.shuffle: false")
+    if smoke and config.shuffle:
+        raise ValueError("overfit/smoke configuration must set data.shuffle: false")
 
     if fsdp:
         gpu_ids = parse_gpu_ids(fsdp)
@@ -315,6 +410,12 @@ def run(config: Config, smoke: bool = False, fsdp: str | None = None) -> Path | 
             "lora_alpha": config.lora_alpha,
             "qlora": config.qlora,
             "quant_type": config.quant_type if config.qlora else None,
+            "gradient_accumulation_steps": config.gradient_accumulation_steps,
+            "warmup_steps": config.warmup_steps,
+            "eval_every_steps": config.eval_every_steps,
+            "save_every_steps": config.save_every_steps,
+            "random_crop": config.random_crop,
+            "prompt_aug_prob": config.prompt_aug_prob,
         }
         (run_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(config_record))
@@ -331,7 +432,18 @@ def run(config: Config, smoke: bool = False, fsdp: str | None = None) -> Path | 
     # Single-GPU path
     cpu_threads = limit_cpu_threads(torch)
     seed_everything(config.seed, torch)
-    samples = PreparedDataset(config.manifest, config.window_seconds).load()
+
+    if config.val_manifest:
+        train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
+        val_samples = PreparedDataset(config.val_manifest, config.window_seconds).load()
+    elif config.eval_every_steps > 0:
+        train_samples, val_samples = PreparedDataset(config.manifest, config.window_seconds).split(
+            val_ratio=config.val_ratio, seed=config.seed
+        )
+    else:
+        train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
+        val_samples = []
+
     run_dir = create_run_dir(config.output_dir, smoke)
     config_record = {
         "event": "configuration",
@@ -349,6 +461,14 @@ def run(config: Config, smoke: bool = False, fsdp: str | None = None) -> Path | 
         "quant_type": config.quant_type if config.qlora else None,
         "device": config.device,
         "cpu_threads": cpu_threads,
+        "gradient_accumulation_steps": config.gradient_accumulation_steps,
+        "warmup_steps": config.warmup_steps,
+        "eval_every_steps": config.eval_every_steps,
+        "save_every_steps": config.save_every_steps,
+        "random_crop": config.random_crop,
+        "prompt_aug_prob": config.prompt_aug_prob,
+        "num_train_samples": len(train_samples),
+        "num_val_samples": len(val_samples),
     }
     (run_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(config_record))
@@ -356,55 +476,134 @@ def run(config: Config, smoke: bool = False, fsdp: str | None = None) -> Path | 
     print(f"Using single device: {device_desc}")
     runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
     targets = inject_lora(runtime.model, config.lora_rank, config.lora_alpha)
+
+    start_step = 0
+    if resume_from:
+        resume_path = Path(resume_from)
+        adapter_file = resume_path if resume_path.is_file() else resume_path / "lora.safetensors"
+        print(f"Resuming LoRA weights from {adapter_file}")
+        load_adapter(runtime.model, adapter_file)
+        meta_file = adapter_file.parent / "adapter.json"
+        if meta_file.is_file():
+            try:
+                start_step = int(json.loads(meta_file.read_text(encoding="utf-8")).get("step", 0))
+                print(f"Resumed from step {start_step}")
+            except Exception:
+                pass
+
     trainable = [parameter for parameter in runtime.model.parameters() if parameter.requires_grad]
     print(f"LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
     optimizer = torch.optim.AdamW(trainable, lr=config.learning_rate, weight_decay=0.0)
+    max_steps = 1 if smoke else config.max_steps
+    scheduler = None
+    if config.warmup_steps > 0 and not smoke:
+        scheduler = get_cosine_schedule_with_warmup(optimizer, config.warmup_steps, max_steps)
+
     log_path = run_dir / "metrics.jsonl"
     tensorboard_dir = run_dir / "tensorboard"
     writer = SummaryWriter(log_dir=str(tensorboard_dir))
     writer.add_text("configuration", json.dumps(config_record, indent=2), 0)
-    max_steps = 1 if smoke else config.max_steps
+
     saved = None
+    best_saved = None
+    best_val_loss = float("inf")
     last_record = None
     reload_checks: list[dict[str, float | int]] = []
     started = time.monotonic()
+    accum_steps = max(1, config.gradient_accumulation_steps)
+    shuffled_indices = list(range(len(train_samples)))
+    if config.shuffle and not smoke:
+        random.Random(config.seed).shuffle(shuffled_indices)
+
     try:
         with log_path.open("w", encoding="utf-8") as log:
-            progress = tqdm(range(max_steps), desc="training", unit="step", dynamic_ncols=True)
+            progress = tqdm(range(start_step, max_steps), desc="training", unit="step", dynamic_ncols=True)
             for step in progress:
-                example = build_example(config, samples[step % len(samples)], runtime)
-                total, components, grad_norm = one_step(config, runtime, example, optimizer)
-                record = {"step": step, "loss/total": float(total.detach()), "loss/text": float(components["text"].detach()), "loss/audio_semantic": float(components["audio_semantic"].detach()), "loss/audio_nonsemantic": float(components["audio_nonsemantic"].detach()), "lr": optimizer.param_groups[0]["lr"], "grad_norm": grad_norm, "gpu_peak_bytes": torch.cuda.max_memory_allocated(config.device) if torch.cuda.is_available() else 0}
+                sample_idx = (step % len(train_samples)) if not config.shuffle else shuffled_indices[step % len(shuffled_indices)]
+                current_sample = train_samples[sample_idx]
+                example = build_example(config, current_sample, runtime, random_crop=config.random_crop and not smoke)
+                codes = torch.tensor(example.input_codes, dtype=torch.long, device=config.device).unsqueeze(0)
+                output = model_forward_train(runtime.model, codes)
+                total, components = loss_components(output, codes, example, runtime.tokenizer.padding_id, torch)
+
+                # Gradient accumulation
+                scaled_loss = total / accum_steps
+                scaled_loss.backward()
+
+                is_update = ((step + 1) % accum_steps == 0) or (step + 1 == max_steps)
+                if is_update:
+                    grad_norm = float(torch.nn.utils.clip_grad_norm_(trainable, 1.0))
+                    optimizer.step()
+                    if scheduler is not None:
+                        scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+                else:
+                    grad_norm = 0.0
+
+                record = {
+                    "step": step,
+                    "loss/total": float(total.detach()),
+                    "loss/text": float(components["text"].detach()),
+                    "loss/audio_semantic": float(components["audio_semantic"].detach()),
+                    "loss/audio_nonsemantic": float(components["audio_nonsemantic"].detach()),
+                    "lr": optimizer.param_groups[0]["lr"],
+                    "grad_norm": grad_norm,
+                    "gpu_peak_bytes": torch.cuda.max_memory_allocated(config.device) if torch.cuda.is_available() else 0,
+                }
                 last_record = record
                 log.write(json.dumps(record) + "\n")
                 log.flush()
                 write_tensorboard_scalars(writer, record, sum(p.numel() for p in trainable), cpu_threads)
                 progress.set_postfix(loss=f"{record['loss/total']:.4f}", grad=f"{grad_norm:.3f}")
                 tqdm.write(json.dumps({"event": "training_step", **record})) if max_steps == 1 else None
-                if (step + 1) % 50 == 0 or step + 1 == max_steps:
+
+                # Validation evaluation
+                if val_samples and config.eval_every_steps > 0 and ((step + 1) % config.eval_every_steps == 0 or step + 1 == max_steps):
+                    val_metrics = evaluate_validation(config, runtime, val_samples)
+                    for k, v in val_metrics.items():
+                        writer.add_scalar(k, v, step + 1)
+                    val_loss = val_metrics.get("val/loss_total", float("inf"))
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_saved = save_best_adapter(run_dir, runtime.model, config, step + 1, val_loss)
+                        tqdm.write(json.dumps({"event": "new_best_val_loss", "step": step + 1, "val_loss": val_loss}))
+
+                save_interval = 1 if smoke else config.save_every_steps
+                if (step + 1) % save_interval == 0 or step + 1 == max_steps:
                     saved = save_adapter(run_dir, runtime.model, config, step + 1)
-                    reload_loss = verify_reloaded_adapter(config, samples[step % len(samples)], saved)
-                    if abs(reload_loss - record["loss/total"]) > 1e-3:
-                        raise RuntimeError(f"reloaded adapter loss drifted: {reload_loss} vs {record['loss/total']}")
-                    reload_checks.append({"step": step + 1, "loss": reload_loss})
+                    if smoke:
+                        reload_loss = verify_reloaded_adapter(config, train_samples[step % len(train_samples)], saved)
+                        if abs(reload_loss - record["loss/total"]) > 0.02:
+                            raise RuntimeError(f"reloaded adapter loss drifted: {reload_loss} vs {record['loss/total']}")
+                        reload_checks.append({"step": step + 1, "loss": reload_loss})
     finally:
         writer.close()
+
     peak = torch.cuda.max_memory_allocated(config.device) if torch.cuda.is_available() else 0
     reload_loss = reload_checks[-1]["loss"] if reload_checks else None
-    run_info = {"seconds": time.monotonic() - started, "peak_gpu_bytes": peak, "checkpoint": str(saved) if saved else None, "reload_checks": reload_checks}
+    run_info = {
+        "seconds": time.monotonic() - started,
+        "peak_gpu_bytes": peak,
+        "checkpoint": str(saved) if saved else None,
+        "best_checkpoint": str(best_saved) if best_saved else None,
+        "best_val_loss": best_val_loss if best_val_loss < float("inf") else None,
+        "reload_checks": reload_checks,
+    }
     (run_dir / "run.json").write_text(json.dumps(run_info, indent=2))
     report = config.path.parent.parent / "reports" / "overfit_10.md"
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(
-        "# PersonaPlex overfit-10 report\n\n"
-        "Status: PASS\n\n"
+        "# PersonaPlex Training Report\n\n"
+        f"Status: PASS\n\n"
         f"- Dataset: {config.manifest}\n- Model: {config.model_root}\n- LoRA: rank={config.lora_rank}, alpha={config.lora_alpha}\n"
         f"- Steps: {max_steps}\n- Final loss: {last_record['loss/total'] if last_record else 'n/a'}\n"
+        f"- Best val loss: {best_val_loss if best_val_loss < float('inf') else 'n/a'}\n"
         f"- Reload checks: {reload_checks}\n- Peak GPU bytes: {peak}\n- Checkpoint: {saved}\n"
+        f"- Best checkpoint: {best_saved}\n"
         "- Inference outputs: run `python -m tools.inference_smoke` with this checkpoint.\n",
         encoding="utf-8",
     )
-    return saved
+    return best_saved or saved
 
 
 def main() -> int:
@@ -414,13 +613,15 @@ def main() -> int:
     parser.add_argument("--fsdp", type=str, default=None, help="Comma-separated GPU IDs to activate FSDP (e.g. --fsdp 0,1)")
     parser.add_argument("--qlora", action="store_true", default=None, help="Enable 4-bit QLoRA. If omitted, uses value from config file.")
     parser.add_argument("--no-qlora", dest="qlora", action="store_false", help="Disable QLoRA.")
+    parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint directory to resume from")
     args = parser.parse_args()
     config = load_config(args.config)
     if args.qlora is not None:
         config = config.replace(qlora=args.qlora)
-    run(config, smoke=args.smoke, fsdp=args.fsdp)
+    run(config, smoke=args.smoke, fsdp=args.fsdp, resume_from=args.resume_from)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

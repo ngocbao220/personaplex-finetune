@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import wave
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -49,6 +50,85 @@ class PreparedSample:
     agent_channel: int = 0
     user_channel: int = 1
 
+    def with_window(self, start_sec: float, end_sec: float, text_prompt: str | None = None) -> PreparedSample:
+        return dataclasses.replace(
+            self,
+            window_start_sec=start_sec,
+            window_end_sec=end_sec,
+            text_prompt=self.text_prompt if text_prompt is None else text_prompt,
+        )
+
+    def sample_window(self, window_seconds: float, random_crop: bool = False, rng=None) -> tuple[float, float]:
+        """Crop window. If random_crop=True, picks a speech-centered random window across the full audio."""
+        agent_words = [word for word in self.words if word.speaker == "agent"]
+        if not agent_words:
+            start = 0.0
+            end = min(self.audio.duration_sec, start + window_seconds)
+            return start, end
+
+        if not random_crop or self.audio.duration_sec <= window_seconds:
+            start = agent_words[0].start
+            end = min(self.audio.duration_sec, start + window_seconds)
+            return start, end
+
+        if rng is None:
+            import random
+            rng = random
+
+        # Pick a random agent word so the window contains active agent dialogue
+        target_word = rng.choice(agent_words)
+        max_start = max(0.0, self.audio.duration_sec - window_seconds)
+        offset = rng.uniform(0.0, min(window_seconds * 0.8, target_word.start))
+        start = max(0.0, min(max_start, target_word.start - offset))
+        end = min(self.audio.duration_sec, start + window_seconds)
+        return start, end
+
+    def get_augmented_prompt(self, prompt_aug_prob: float = 0.3, rng=None) -> str:
+        """Sample text prompt from multiple granularity levels in English or Vietnamese."""
+        if prompt_aug_prob <= 0.0:
+            return self.text_prompt
+        if rng is None:
+            import random
+            rng = random
+        if rng.random() > prompt_aug_prob:
+            return self.text_prompt
+
+        first_sentence = self.text_prompt.split(". ")[0].strip()
+        if not first_sentence.endswith("."):
+            first_sentence += "."
+
+        # Detect language (Vietnamese vs English)
+        lang = str(self.metadata.get("language", "")).lower()
+        vi_chars = set("àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ"
+                       "ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ")
+        is_vietnamese = lang in ("vi", "vietnamese") or any(c in vi_chars for c in self.text_prompt)
+
+        if is_vietnamese:
+            candidates = [
+                first_sentence,
+                "Bạn thích trò chuyện một cách cởi mở và tự nhiên.",
+                "Bạn là một người bạn trò chuyện thân thiện và tự nhiên.",
+                "Bạn là một trợ lý trò chuyện thân thiện, luôn lắng nghe và phản hồi tích cực.",
+                "Bạn là một người bạn đồng hành trò chuyện hòa nhã và chu đáo.",
+                "Bạn đang trò chuyện tự nhiên cùng một người bạn.",
+            ]
+        else:
+            candidates = [
+                first_sentence,
+                "You enjoy having a good conversation.",
+                "You are having a casual and natural conversation.",
+                "You are a friendly and engaging conversational partner.",
+                "You are a helpful and polite conversational assistant.",
+                "You are talking with a partner.",
+            ]
+        return str(rng.choice(candidates))
+
+    def dynamic_sample(self, window_seconds: float, random_crop: bool = True, prompt_aug_prob: float = 0.3, rng=None) -> PreparedSample:
+        """Return a copy of this sample with dynamic window slicing and optional prompt augmentation."""
+        start, end = self.sample_window(window_seconds, random_crop=random_crop, rng=rng)
+        prompt = self.get_augmented_prompt(prompt_aug_prob=prompt_aug_prob, rng=rng) if random_crop else self.text_prompt
+        return self.with_window(start, end, prompt)
+
 
 def read_wav_info(path: Path) -> AudioInfo:
     try:
@@ -88,6 +168,20 @@ class PreparedDataset:
         if len(ids) != len(set(ids)):
             raise ValidationError("manifest contains duplicate sample_id values")
         return samples
+
+    def split(self, val_ratio: float = 0.05, seed: int = 42) -> tuple[list[PreparedSample], list[PreparedSample]]:
+        """Split samples into train and validation sets deterministically."""
+        samples = self.load()
+        if len(samples) <= 1 or val_ratio <= 0.0:
+            return samples, []
+        import random
+        rng = random.Random(seed)
+        shuffled = list(samples)
+        rng.shuffle(shuffled)
+        val_size = max(1, int(len(samples) * val_ratio))
+        val_set = shuffled[:val_size]
+        train_set = shuffled[val_size:]
+        return train_set, val_set
 
     def _load_entry(self, entry: dict[str, Any], line_number: int) -> PreparedSample:
         sample_id = str(entry.get("sample_id", "")).strip()
