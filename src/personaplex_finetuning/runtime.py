@@ -62,7 +62,7 @@ class MimiCodec:
 
     codebooks = 8
 
-    def __init__(self, mimi, sample_rate: int, frame_rate: float, device: str, lm_helpers) -> None:
+    def __init__(self, mimi, sample_rate: int, frame_rate: float, device: str, lm_helpers, cache_dir: Path | None = None) -> None:
         self.mimi = mimi
         self.sample_rate = sample_rate
         self.frame_rate = frame_rate
@@ -71,6 +71,7 @@ class MimiCodec:
         self._voice_cache: dict[str, tuple[tuple[int, ...], ...]] = {}
         self._sine_cache: dict[int, tuple[tuple[int, ...], ...]] = {}
         self._silence_cache: dict[int, tuple[tuple[int, ...], ...]] = {}
+        self._cache_dir = cache_dir  # Optional persistent disk cache for conversation encoding
 
     def encode_conversation_stereo(self, path: Path, agent_channel: int, user_channel: int, start_sec: float, end_sec: float):
         import numpy as np
@@ -89,6 +90,28 @@ class MimiCodec:
             codes = self.mimi.encode(batch)
         agent_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[0])
         user_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[1])
+        return agent_codes, user_codes
+
+    def encode_conversation_stereo_cached(self, path: Path, agent_channel: int, user_channel: int, start_sec: float, end_sec: float):
+        """Stereo encode with persistent disk cache.
+
+        On first call, encodes via Mimi GPU forward and saves a ``.pt`` sidecar.
+        On subsequent calls, loads from the sidecar – no GPU work needed.
+        Falls back to live encoding if cache_dir is not set.
+        """
+        if self._cache_dir is None:
+            return self.encode_conversation_stereo(path, agent_channel, user_channel, start_sec, end_sec)
+
+        import torch
+        key = f"{path.name}_ch{agent_channel}{user_channel}_{start_sec:.3f}_{end_sec:.3f}"
+        cache_file = self._cache_dir / (key + ".pt")
+        if cache_file.is_file():
+            data = torch.load(str(cache_file), map_location="cpu", weights_only=True)
+            return data["agent"], data["user"]
+
+        agent_codes, user_codes = self.encode_conversation_stereo(path, agent_channel, user_channel, start_sec, end_sec)
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        torch.save({"agent": agent_codes, "user": user_codes}, str(cache_file))
         return agent_codes, user_codes
 
     def encode_conversation(self, path: Path, channel: int, start_sec: float, end_sec: float):

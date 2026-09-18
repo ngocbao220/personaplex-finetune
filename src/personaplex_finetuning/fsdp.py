@@ -5,12 +5,12 @@ from __future__ import annotations
 import functools
 import os
 import socket
-from typing import Callable
+from typing import Callable, Iterable
 
 import torch
 import torch.distributed as dist
 import torch.distributed.fsdp.wrap as torch_wrap
-from torch.distributed.fsdp import BackwardPrefetch
+from torch.distributed.fsdp import BackwardPrefetch, MixedPrecision
 from torch.distributed.fsdp.api import ShardingStrategy
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel
 
@@ -70,8 +70,14 @@ def wrap_model_fsdp(
     model: torch.nn.Module,
     device_id: int | torch.device | None = None,
     strategy: str | ShardingStrategy = "shard_grad_op",
+    mixed_precision: bool = True,
 ) -> FullyShardedDataParallel:
-    """Wrap model with FSDP using SHARD_GRAD_OP (ZeRO-2) by default, or FULL_SHARD / NO_SHARD."""
+    """Wrap model with FSDP.
+
+    Defaults to SHARD_GRAD_OP (ZeRO-2) with bf16 MixedPrecision for ~2× throughput.
+    All-reduce communication is kept in fp32 to avoid gradient underflow.
+    Set ``mixed_precision=False`` to disable (e.g. on GPUs that don't support bf16).
+    """
     if isinstance(strategy, str):
         strat_map = {
             "shard_grad_op": ShardingStrategy.SHARD_GRAD_OP,
@@ -84,6 +90,18 @@ def wrap_model_fsdp(
         sharding_strategy = strategy
 
     auto_wrap_policy = get_fsdp_policy(is_lora=True)
+
+    # BF16 MixedPrecision: params/buffers in bf16, gradients reduced in fp32.
+    # This matches the Kyutai official fine-tuning approach and gives ~2× throughput
+    # on Ampere+ GPUs (A100, H100, RTX 3090+) at no accuracy cost for LoRA.
+    mp_policy: MixedPrecision | None = None
+    if mixed_precision and torch.cuda.is_bf16_supported():
+        mp_policy = MixedPrecision(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,   # fp32 allreduce prevents gradient underflow
+            buffer_dtype=torch.bfloat16,
+        )
+
     kwargs = {
         "sharding_strategy": sharding_strategy,
         "auto_wrap_policy": auto_wrap_policy,
@@ -94,7 +112,56 @@ def wrap_model_fsdp(
     }
     if device_id is not None:
         kwargs["device_id"] = device_id
+    if mp_policy is not None:
+        kwargs["mixed_precision"] = mp_policy
     return FullyShardedDataParallel(model, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Mixed-precision optimizer helpers (adapted from kyutai-labs/moshi-finetune)
+# ---------------------------------------------------------------------------
+# These allow LoRA adapter params to be stored in bf16 during forward/backward
+# but updated by AdamW in fp32 master copies – preventing precision loss in
+# the optimizer state while keeping memory and compute cost low.
+
+def mp_prepare(
+    params: Iterable[torch.nn.Parameter],
+    param_dtype: torch.dtype = torch.bfloat16,
+    optim_dtype: torch.dtype = torch.float32,
+) -> None:
+    """Attach fp32 master copies to every trainable parameter."""
+    with torch.no_grad():
+        for p in params:
+            if p.requires_grad:
+                p._mp_param = torch.empty_like(p, dtype=optim_dtype)  # type: ignore[attr-defined]
+                p._mp_param.copy_(p.to(optim_dtype))  # type: ignore[attr-defined]
+            p.data = p.data.to(param_dtype)
+
+
+def mp_upcast(
+    params: Iterable[torch.nn.Parameter],
+    optim_dtype: torch.dtype = torch.float32,
+) -> None:
+    """Swap parameter data to fp32 master copy before optimizer.step()."""
+    with torch.no_grad():
+        for p in params:
+            if p.requires_grad and p.grad is not None:
+                p._temp = p.data  # type: ignore[attr-defined]
+                p.data = p._mp_param  # type: ignore[attr-defined]
+                p.grad = p.grad.to(optim_dtype)
+
+
+def mp_downcast(
+    params: Iterable[torch.nn.Parameter],
+    param_dtype: torch.dtype = torch.bfloat16,
+) -> None:
+    """Copy updated fp32 weights back to bf16 storage after optimizer.step()."""
+    with torch.no_grad():
+        for p in params:
+            if p.requires_grad and p.grad is not None:
+                p._temp.copy_(p.data)  # type: ignore[attr-defined]
+                p.data = p._temp  # type: ignore[attr-defined]
+                p.grad = p.grad.to(param_dtype)
 
 
 

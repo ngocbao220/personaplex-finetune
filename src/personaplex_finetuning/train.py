@@ -13,7 +13,7 @@ from pathlib import Path
 from .config import Config, load_config
 from .data import PreparedDataset
 from .lora import adapter_state_dict, inject_lora, load_adapter
-from .objective import stream_weights, torch_weighted_cross_entropy
+from .objective import stream_weights_torch, torch_weighted_cross_entropy
 from .runtime import RuntimePaths, load_runtime
 from .sequence import PersonaPlexTrainingExampleBuilder
 
@@ -136,17 +136,37 @@ def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_
 
 
 def loss_components(model_output, codes, example, text_padding_id, torch):
-    weights = stream_weights(example.labels, example.loss_mask, text_padding_id)
-    text_target = codes[:, 0, :]
-    text_weight = torch.tensor(weights[0], device=codes.device).unsqueeze(0)
-    text_weight = text_weight * model_output.text_mask.to(text_weight.dtype)
-    text_loss = torch_weighted_cross_entropy(model_output.text_logits.reshape(-1, model_output.text_logits.shape[-1]), text_target.reshape(-1), text_weight.reshape(-1))
-    audio_target = codes[:, 1:17, :]
-    audio_weights = torch.tensor(weights[1:17], device=codes.device).unsqueeze(0)
-    audio_weights = audio_weights * model_output.mask.to(audio_weights.dtype)
-    semantic = torch_weighted_cross_entropy(model_output.logits[:, 0].reshape(-1, model_output.logits.shape[-1]), audio_target[:, 0].reshape(-1), audio_weights[:, 0].reshape(-1))
-    nonsemantic_weights = audio_weights[:, 1:8]
-    nonsemantic = torch_weighted_cross_entropy(model_output.logits[:, 1:8].reshape(-1, model_output.logits.shape[-1]), audio_target[:, 1:8].reshape(-1), nonsemantic_weights.reshape(-1))
+    """Compute per-stream losses using GPU-native vectorized weights.
+
+    Uses stream_weights_torch to build the (S,T) weight tensor fully on-device,
+    avoiding the CPU-side Python loop that was the main per-step overhead.
+    """
+    # codes shape: (1, S, T) — build full (S, T) weight tensor directly on GPU
+    labels_tensor = torch.tensor(example.labels, dtype=torch.long, device=codes.device)  # (S, T)
+    mask_tensor = torch.tensor(example.loss_mask, dtype=torch.bool, device=codes.device)  # (S, T)
+    weights = stream_weights_torch(labels_tensor, mask_tensor, text_padding_id)  # (S, T)
+
+    text_target = codes[:, 0, :]  # (1, T)
+    text_weight = weights[0].unsqueeze(0) * model_output.text_mask.to(weights.dtype)  # (1, T)
+    text_loss = torch_weighted_cross_entropy(
+        model_output.text_logits.reshape(-1, model_output.text_logits.shape[-1]),
+        text_target.reshape(-1),
+        text_weight.reshape(-1),
+    )
+
+    audio_target = codes[:, 1:17, :]  # (1, 16, T)
+    audio_weights = weights[1:17].unsqueeze(0) * model_output.mask.to(weights.dtype)  # (1, 16, T)
+
+    semantic = torch_weighted_cross_entropy(
+        model_output.logits[:, 0].reshape(-1, model_output.logits.shape[-1]),
+        audio_target[:, 0].reshape(-1),
+        audio_weights[:, 0].reshape(-1),
+    )
+    nonsemantic = torch_weighted_cross_entropy(
+        model_output.logits[:, 1:8].reshape(-1, model_output.logits.shape[-1]),
+        audio_target[:, 1:8].reshape(-1),
+        audio_weights[:, 1:8].reshape(-1),
+    )
     return text_loss + semantic + nonsemantic, {"text": text_loss, "audio_semantic": semantic, "audio_nonsemantic": nonsemantic}
 
 
@@ -170,7 +190,7 @@ def one_step(config: Config, runtime, example, optimizer=None):
     return total, components, float(grad_norm)
 
 
-from .fsdp import find_free_port, fsdp_adapter_state_dict, parse_gpu_ids, wrap_model_fsdp
+from .fsdp import find_free_port, fsdp_adapter_state_dict, mp_downcast, mp_prepare, mp_upcast, parse_gpu_ids, wrap_model_fsdp
 
 
 def save_adapter(run_dir: Path, model, config: Config, step: int) -> Path:
@@ -258,7 +278,14 @@ def _train_fsdp_worker(
     trainable = [parameter for parameter in runtime.model.parameters() if parameter.requires_grad]
     if rank == 0:
         gpu_summary = ", ".join(f"cuda:{gid} ({torch.cuda.get_device_name(gid) if torch.cuda.is_available() else 'CPU'})" for gid in gpu_ids)
-        print(f"[Rank 0] FSDP active across GPUs: [{gpu_summary}] (strategy={sharding_strategy}). LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
+        bf16_supported = torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False
+        print(f"[Rank 0] FSDP active across GPUs: [{gpu_summary}] (strategy={sharding_strategy}, bf16={bf16_supported}). LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
+
+    # Mixed-precision: LoRA params stored in bf16, AdamW optimizer state in fp32
+    # mirrors kyutai-labs/moshi-finetune prepare_mixed_precision
+    use_mp = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    if use_mp:
+        mp_prepare(trainable)
 
     optimizer = torch.optim.AdamW(trainable, lr=config.learning_rate, weight_decay=0.0)
     max_steps = 1 if smoke else config.max_steps
@@ -314,7 +341,11 @@ def _train_fsdp_worker(
 
             if is_update:
                 grad_norm = float(torch.nn.utils.clip_grad_norm_(trainable, 1.0))
+                if use_mp:
+                    mp_upcast(trainable)
                 optimizer.step()
+                if use_mp:
+                    mp_downcast(trainable)
                 if scheduler is not None:
                     scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
