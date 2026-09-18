@@ -68,40 +68,75 @@ class MimiCodec:
         self.frame_rate = frame_rate
         self.device = device
         self._helpers = lm_helpers
+        self._voice_cache: dict[str, tuple[tuple[int, ...], ...]] = {}
+        self._sine_cache: dict[int, tuple[tuple[int, ...], ...]] = {}
+        self._silence_cache: dict[int, tuple[tuple[int, ...], ...]] = {}
+
+    def encode_conversation_stereo(self, path: Path, agent_channel: int, user_channel: int, start_sec: float, end_sec: float):
+        import numpy as np
+        import sphn
+        import torch
+        duration_sec = end_sec - start_sec
+        # Windowed seek + direct resample in C++ (avoids decoding entire 30m file)
+        audio, _ = sphn.read(str(path), start_sec=start_sec, duration_sec=duration_sec, sample_rate=self.sample_rate)
+        if agent_channel not in (0, 1) or user_channel not in (0, 1):
+            raise ValueError(f"invalid channels {agent_channel}, {user_channel} for {path}")
+        agent_audio = audio[agent_channel : agent_channel + 1]
+        user_audio = audio[user_channel : user_channel + 1]
+        # Batch encode both channels in a single Mimi GPU forward pass
+        batch = torch.as_tensor(np.stack([agent_audio, user_audio], axis=0), dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            codes = self.mimi.encode(batch)
+        agent_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[0])
+        user_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[1])
+        return agent_codes, user_codes
 
     def encode_conversation(self, path: Path, channel: int, start_sec: float, end_sec: float):
         import sphn
         import torch
-        audio, source_rate = sphn.read(str(path))
-        audio = sphn.resample(audio, src_sample_rate=source_rate, dst_sample_rate=self.sample_rate)
-        start, end = int(start_sec * self.sample_rate), int(end_sec * self.sample_rate)
-        if channel not in (0, 1) or end <= start or end > audio.shape[-1]:
+        duration_sec = end_sec - start_sec
+        audio, _ = sphn.read(str(path), start_sec=start_sec, duration_sec=duration_sec, sample_rate=self.sample_rate)
+        if channel not in (0, 1):
             raise ValueError(f"invalid conversation window {start_sec}:{end_sec} for {path}")
-        return self._encode(audio[channel : channel + 1, start:end], torch)
+        return self._encode(audio[channel : channel + 1], torch)
 
     def encode_voice_prompt(self, path: Path):
+        key = str(path)
+        if key in self._voice_cache:
+            return self._voice_cache[key]
         import torch
         audio = self._helpers.load_audio(str(path), self.sample_rate)
         audio = self._helpers.normalize_audio(audio, self.sample_rate, -24.0)
         if audio.ndim == 1:
             audio = audio[None, :]
-        return self._encode(audio[:1], torch)
+        codes = self._encode(audio[:1], torch)
+        self._voice_cache[key] = codes
+        return codes
 
     def sine(self, frames: int):
+        if frames in self._sine_cache:
+            return self._sine_cache[frames]
         import numpy as np
         import torch
         duration = frames / self.frame_rate
-        return self._encode(self._helpers.create_sinewave(duration, self.sample_rate)[None, :], torch)
+        codes = self._encode(self._helpers.create_sinewave(duration, self.sample_rate)[None, :], torch)
+        self._sine_cache[frames] = codes
+        return codes
 
     def silence(self, frames: int):
+        if frames in self._silence_cache:
+            return self._silence_cache[frames]
         import numpy as np
         import torch
-        return self._encode(np.zeros((1, int(frames * self.sample_rate / self.frame_rate)), dtype=np.float32), torch)
+        codes = self._encode(np.zeros((1, int(frames * self.sample_rate / self.frame_rate)), dtype=np.float32), torch)
+        self._silence_cache[frames] = codes
+        return codes
 
     def _encode(self, audio, torch):
         with torch.no_grad():
             codes = self.mimi.encode(torch.as_tensor(audio, dtype=torch.float32, device=self.device).unsqueeze(0))[0]
         return tuple(tuple(int(token) for token in stream.tolist()) for stream in codes)
+
 
 
 @dataclass
