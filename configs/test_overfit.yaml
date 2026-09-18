@@ -1,11 +1,11 @@
 seed: 42
 model:
-  root: ../assets/personaplex-7b-v1 # Path đến model personaplex-7b
+  root: ../models # Path đến model personaplex-7b
   # Self-contained vendored runtime package.
   source: ../src # Path đến thư mục chứa code của PersonaPlex
   device: cuda
 data:
-  prepared_dir: ../assets/prepared # Contains train.jsonl and samples/conv_XXXX
+  prepared_dir: ../prepared # Contains train.jsonl and samples/conv_XXXX
   window_seconds: 30 # Window seconds
   shuffle: false # Shuffle 
 lora:

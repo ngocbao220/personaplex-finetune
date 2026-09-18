@@ -12,11 +12,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Print one human-readable PersonaPlex training example.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--index", type=int, default=0)
+    parser.add_argument("--device", type=str, default=None, help="Device to use ('cuda' or 'cpu')")
     args = parser.parse_args()
     config = load_config(args.config)
+    import torch
+    device = args.device or config.device
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        device = "cpu"
     samples = PreparedDataset(config.manifest, config.window_seconds).load()
     sample = samples[args.index]
-    runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device)
+    runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), device)
     example = build_example(config, sample, runtime)
     print(f"sample_id: {sample.sample_id}\nwindow: {sample.window_start_sec:.3f}-{sample.window_end_sec:.3f}\naudio sample rate: {sample.audio.sample_rate}\nMimi frame rate: {runtime.codec.frame_rate}\nhybrid prompt frames: {example.prompt_frames}\ndialogue frames: {example.dialogue_frames}\ntotal frames: {example.total_frames}")
     print(f"stream shapes: 17 x {example.total_frames}\nsupervised text positions: {sum(example.loss_mask[0])}\nsupervised audio positions: {sum(sum(stream) for stream in example.loss_mask[1:9])}")

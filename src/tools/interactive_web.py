@@ -320,7 +320,18 @@ def main() -> int:
         if not val:
             return None
         p = Path(val)
-        return p.resolve() if p.is_absolute() else (cfg_dir / p).resolve()
+        if p.is_absolute():
+            return p
+        candidates = [
+            (Path.cwd() / p).resolve(),
+            (cfg_dir / p).resolve(),
+            (cfg_dir.parent / p).resolve(),
+            (cfg_dir.parent.parent / p).resolve(),
+        ]
+        for cand in candidates:
+            if cand.exists():
+                return cand
+        return (Path.cwd() / p).resolve() if (Path.cwd() / p).exists() else (cfg_dir / p).resolve()
 
     model_sec = cfg.get("model", {})
     adapter_sec = cfg.get("adapter", {})

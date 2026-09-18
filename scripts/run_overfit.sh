@@ -6,6 +6,9 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root"
+
 CONFIG=$1
 export PYTHONPATH=src${PYTHONPATH:+:$PYTHONPATH}
 

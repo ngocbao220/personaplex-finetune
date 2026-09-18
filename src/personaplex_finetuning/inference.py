@@ -34,6 +34,7 @@ def generate(config: Config, sample: PreparedSample, output_wav: Path, output_te
     pcm_frames: list[np.ndarray] = []
     text_tokens: list[str] = []
     with torch.no_grad(), generator.streaming(1):
+        generator.step_system_prompts(runtime.codec.mimi)
         for frame in range(user.shape[-1]):
             tokens = generator.step(input_tokens=user[:, :, frame : frame + 1])
             if tokens is None:
@@ -77,7 +78,7 @@ def _export_context(sample: PreparedSample, output_dir: Path) -> None:
 
 
 def smoke(config: Config, sample: PreparedSample, adapter: Path, output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=False)
+    output_dir.mkdir(parents=True, exist_ok=True)
     _export_context(sample, output_dir)
     generate(config, sample, output_dir / "base.wav", output_dir / "base.txt", None)
     generate(config, sample, output_dir / "finetuned.wav", output_dir / "finetuned.txt", adapter)

@@ -10,6 +10,9 @@
 # ==============================================================================
 set -euo pipefail
 
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root"
+
 NUM_PROCESSES=4
 DEVICE_IDS=""
 CONFIG="configs/train_104h.yaml"

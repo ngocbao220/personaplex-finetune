@@ -101,7 +101,17 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         value = section.get(key, default)
         if not isinstance(value, str) or not value:
             raise ValueError(f"{key} must be a non-empty path")
-        return (root / value).resolve() if not Path(value).is_absolute() else Path(value)
+        p = Path(value)
+        if p.is_absolute():
+            return p
+        cand_root = (root / p).resolve()
+        if cand_root.exists():
+            return cand_root
+        cand_parent = (root.parent / p).resolve()
+        if cand_parent.exists():
+            return cand_parent
+        return cand_root
+
 
     prepared_dir = resolve(data, "prepared_dir") if "prepared_dir" in data else resolve(data, "manifest").parent
     qlora = bool(lora.get("qlora", False)) if isinstance(lora, dict) else False
