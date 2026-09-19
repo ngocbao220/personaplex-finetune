@@ -1,0 +1,10 @@
+# 10-sample deterministic overfit training configuration
+output_dir: ../runs/hf_overfit_10
+max_steps: 300
+learning_rate: 2.0e-5
+gradient_accumulation_steps: 1
+warmup_steps: 0
+eval_every_steps: 0
+save_every_steps: 50
+gradient_checkpointing: false
+mixed_precision: bf16

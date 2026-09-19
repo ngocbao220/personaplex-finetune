@@ -76,14 +76,41 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     if not path.is_file():
         raise FileNotFoundError(f"config does not exist: {path}")
 
-    # Load with OmegaConf to support dotlist overrides & config interpolation
+    # Load with Hydra or OmegaConf to support modular configs and dotlist overrides
     try:
         conf = OmegaConf.load(str(path))
-        if overrides:
-            override_conf = OmegaConf.from_dotlist(list(overrides))
-            conf = OmegaConf.merge(conf, override_conf)
-        raw = OmegaConf.to_container(conf, resolve=True)
-    except Exception:
+        if isinstance(conf, DictConfig) and "defaults" in conf:
+            from hydra import compose, initialize_config_dir
+            from hydra.core.global_hydra import GlobalHydra
+
+            # Normalize common convenience overrides for user simplicity
+            hydra_overrides = []
+            for o in (overrides or []):
+                if o.startswith("gpus=") or o.startswith("gpu=") or o.startswith("devices=") or o.startswith("device_ids="):
+                    continue
+                elif o.startswith("device="):
+                    hydra_overrides.append(f"model.{o}")
+                elif o.startswith("window_seconds=") or o.startswith("shuffle="):
+                    hydra_overrides.append(f"data.{o}")
+                elif o.startswith("learning_rate=") or o.startswith("max_steps=") or o.startswith("output_dir="):
+                    hydra_overrides.append(f"train.{o}")
+                elif o.startswith("rank=") or o.startswith("alpha=") or o.startswith("qlora="):
+                    hydra_overrides.append(f"lora.{o}")
+                else:
+                    hydra_overrides.append(o)
+
+            GlobalHydra.instance().clear()
+            with initialize_config_dir(config_dir=str(path.parent), version_base=None):
+                conf = compose(config_name=path.stem, overrides=hydra_overrides)
+            raw = OmegaConf.to_container(conf, resolve=True)
+        else:
+            if overrides:
+                override_conf = OmegaConf.from_dotlist(list(overrides))
+                conf = OmegaConf.merge(conf, override_conf)
+            raw = OmegaConf.to_container(conf, resolve=True)
+    except Exception as exc:
+        if isinstance(conf, DictConfig) and "defaults" in conf:
+            raise RuntimeError(f"Failed to compose Hydra configuration '{path.name}' with overrides {overrides}: {exc}") from exc
         raw = _read_yaml_or_json(path)
 
     if not isinstance(raw, dict):

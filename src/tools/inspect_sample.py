@@ -10,11 +10,12 @@ from personaplex_finetuning.train import build_example
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Print one human-readable PersonaPlex training example.")
-    parser.add_argument("--config", required=True)
+    parser.add_argument("--config", default="configs/config.yaml", help="Path to configuration file")
     parser.add_argument("--index", type=int, default=0)
     parser.add_argument("--device", type=str, default=None, help="Device to use ('cuda' or 'cpu')")
-    args = parser.parse_args()
-    config = load_config(args.config)
+    args, unknown = parser.parse_known_args()
+    overrides = [arg for arg in unknown if "=" in arg]
+    config = load_config(args.config, overrides=overrides)
     import torch
     device = args.device or config.device
     if device.startswith("cuda") and not torch.cuda.is_available():

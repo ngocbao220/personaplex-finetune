@@ -21,9 +21,9 @@ if command -v apt-get >/dev/null 2>&1; then
     fi
 fi
 
-echo "=== [2/5] Installing PyTorch with CUDA 12.4 ==="
+echo "=== [2/5] Installing PyTorch==="
 python -m pip install --upgrade pip
-python -m pip install torch==2.4.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu124
+python -m pip install torch==2.4.1 torchaudio==2.4.1
 
 echo "=== [3/5] Installing project requirements and hf_transfer ==="
 cd "${ROOT_DIR}"

@@ -1,4 +1,0 @@
-# Kaggle
-root: ../assets/personaplex-7b-v1
-source: ../src
-device: cuda

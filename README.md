@@ -110,15 +110,12 @@ ls -lh ../models
 Kiểm tra cấu trúc file, định dạng stereo WAV (kênh LEFT: Agent, kênh RIGHT: User), file căn chỉnh từ (`words.json`), file voice prompt và file text prompt:
 
 ```bash
-python -m tools.validate_dataset \
-  --config configs/test_overfit.yaml  # [Required] Đường dẫn file config
+# Kiểm tra tập mẫu overfit 10 hội thoại
+python -m tools.validate_dataset data=overfit
+
+# Hoặc kiểm tra tập dữ liệu quy mô lớn (104 giờ)
+python -m tools.validate_dataset data=otospeech
 ```
-
-**Chi tiết các đối số (arguments):**
-- `--config` **[Required]**: Đường dẫn tới file cấu hình YAML/JSON định nghĩa dataset (`data.prepared_dir` hoặc `data.manifest`) và thời lượng cửa sổ cắt `data.window_seconds`.
-
-**Cách thay đổi tham số:**
-- Thay đổi `--config configs/train_104h.yaml` để kiểm tra tập dữ liệu quy mô lớn (104 giờ).
 
 ---
 
@@ -126,13 +123,12 @@ python -m tools.validate_dataset \
 Kiểm tra cấu trúc frame Mimi, số frame Hybrid System Prompt (voice prompt + silence + text prompt + silence), số frame dialogue, và số vị trí token được tính loss mask:
 
 ```bash
-python -m tools.inspect_sample \
-  --config configs/test_overfit.yaml \
-  --index 0
+python -m tools.inspect_sample data=overfit model=local --index 0
 ```
 
 **Chi tiết các đối số (arguments):**
-- `--config` **[Required]**: Đường dẫn tới file cấu hình.
+- `data=<preset>`: Chọn bộ dữ liệu (`overfit`, `otospeech`, `vietnamese`, `kaggle`).
+- `model=<preset>`: Chọn đường dẫn model (`local`, `server`, `kaggle`).
 - `--index` **[Optional]**: Thứ tự index của mẫu trong danh sách dataset cần kiểm tra (mặc định: `0`).
 
 ---
@@ -150,14 +146,11 @@ python -m unittest discover tests
 Kiểm tra nhanh xem pipeline mô hình, forward, backward, LoRA gradient và freeze base parameters có hoạt động đúng trên GPU hay không:
 
 ```bash
-python -m personaplex_finetuning.train \
-  --config configs/test_overfit.yaml \
-  --smoke
+python -m personaplex_finetuning.train data=overfit train=overfit model=local --smoke
 ```
-*(hoặc dùng lệnh rút gọn: `python -m tools.train_smoke --config configs/test_overfit.yaml`)*
+*(hoặc dùng lệnh rút gọn: `python -m tools.train_smoke data=overfit train=overfit model=local`)*
 
 **Chi tiết các đối số (arguments):**
-- `--config` **[Required]**: Đường dẫn file cấu hình.
 - `--smoke` **[Required cho smoke test]**: Chạy duy nhất 1 step (`max_steps=1`), xác thực gradient của các lớp LoRA khác 0, kiểm tra tham số gốc hoàn toàn đóng băng, lưu adapter và reload lại để kiểm tra sai số suy luận.
 
 ---
@@ -205,19 +198,28 @@ python -m tools.download_hf_assets \
 ### 4.1. Huấn luyện LoRA Fine-Tuning (Single GPU)
 
 ```bash
+# Huấn luyện overfit trên 10 mẫu với model local
 python -m personaplex_finetuning.train \
-  --config configs/test_overfit.yaml \
-  --no-qlora \
+  data=overfit \
+  train=overfit \
+  model=local
+
+# Hoặc tùy biến trực tiếp các siêu tham số
+python -m personaplex_finetuning.train \
+  data=overfit \
+  train=overfit \
+  model=local \
   train.learning_rate=2.0e-5 \
   train.max_steps=300 \
   lora.rank=16 \
-  lora.alpha=32 \
-  data.window_seconds=30 \
-  train.output_dir=../runs/hf_overfit_10
+  lora.alpha=32
 ```
 
 **Chi tiết các cờ CLI (flags):**
-- `--config` **[Required]**: Đường dẫn file cấu hình YAML/JSON chính.
+- `data=<preset>`: Chọn dataset (`overfit`, `otospeech`, `vietnamese`, `kaggle`).
+- `train=<preset>`: Chọn chế độ train (`overfit`, `104h`).
+- `model=<preset>`: Chọn đường dẫn model (`local`, `server`, `kaggle`).
+- `lora=<preset>`: Chọn cấu hình LoRA (`default`, `qlora`, `kaggle`).
 - `--qlora` / `--no-qlora` **[Optional]**: Bật hoặc tắt lượng tử hóa 4-bit QLoRA (`nf4`) để giảm dung lượng VRAM.
 - `--resume-from` **[Optional]**: Đường dẫn tới checkpoint trước đó để tiếp tục huấn luyện (ví dụ: `--resume-from ../runs/hf_overfit_10/checkpoints/checkpoint_000100`).
 
@@ -239,31 +241,36 @@ python -m personaplex_finetuning.train \
 #### Cách 1: Sử dụng launcher script `scripts/train_gpus.sh`
 
 ```bash
+# Huấn luyện 2 GPU trên server với tập 104 giờ
 bash scripts/train_gpus.sh \
-  --device_ids 0,1,2,3 \
-  --num_processes 4 \
-  --config configs/train_104h.yaml \
-  train.learning_rate=2.0e-5 \
-  train.max_steps=10000 \
-  train.gradient_accumulation_steps=8
+  gpus=0,1 \
+  data=otospeech \
+  model=server \
+  train=104h
+
+# Hoặc chạy 4 GPU
+bash scripts/train_gpus.sh \
+  gpus=0,1,2,3 \
+  data=otospeech \
+  model=server \
+  train=104h
 ```
 
-**Chi tiết các đối số (arguments):**
-- `--device_ids` / `--gpu_ids` **[Optional nhưng khuyến nghị]**: Danh sách chỉ số GPU vật lý sử dụng (ví dụ: `0,1` hoặc `0,1,2,3`). Script tự động thiết lập `CUDA_VISIBLE_DEVICES`.
-- `--num_processes` / `-n` **[Optional]**: Số lượng tiến trình DDP (mặc định khớp theo số GPU ở `--device_ids`).
-- `--config` **[Optional]**: Đường dẫn file cấu hình (mặc định: `configs/train_104h.yaml`).
-- Các tham số override sau cờ được chuyển trực tiếp vào chương trình.
+**Chi tiết các đối số (arguments dạng key=value đồng nhất):**
+- `gpus=0,1` / `gpus=0,1,2,3`: Danh sách chỉ số GPU vật lý sử dụng. Script tự động thiết lập `CUDA_VISIBLE_DEVICES` và số tiến trình DDP tương ứng.
+- Các preset `data=...`, `model=...`, `train=...` hoặc tham số override khác được chuyển trực tiếp vào chương trình.
 
 #### Cách 2: Gọi trực tiếp qua lệnh `accelerate launch`
 
 ```bash
 accelerate launch \
   --multi_gpu \
-  --num_processes 4 \
+  --num_processes 2 \
   --mixed_precision bf16 \
   -m personaplex_finetuning.train \
-  --config configs/train_104h.yaml \
-  train.learning_rate=2.0e-5
+  data=otospeech \
+  model=server \
+  train=104h
 ```
 
 ---

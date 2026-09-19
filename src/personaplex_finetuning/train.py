@@ -541,7 +541,7 @@ def main() -> int:
         if args.config_name:
             config_path = Path("configs") / f"{args.config_name}.yaml"
         else:
-            config_path = Path("configs/train_104h.yaml")
+            config_path = Path("configs/config.yaml")
 
     config = load_config(config_path, overrides=overrides)
     if args.qlora is not None:

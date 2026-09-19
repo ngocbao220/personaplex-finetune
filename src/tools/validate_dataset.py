@@ -9,10 +9,11 @@ from personaplex_finetuning.config import load_config
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate prepared PersonaPlex OtoSpeech samples.")
-    parser.add_argument("--config", required=True)
-    args = parser.parse_args()
+    parser.add_argument("--config", default="configs/config.yaml", help="Path to configuration file")
+    args, unknown = parser.parse_known_args()
+    overrides = [arg for arg in unknown if "=" in arg]
     try:
-        config = load_config(args.config)
+        config = load_config(args.config, overrides=overrides)
         samples = PreparedDataset(config.manifest, config.window_seconds).load()
     except (OSError, ValidationError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

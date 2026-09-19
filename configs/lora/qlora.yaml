@@ -1,0 +1,5 @@
+# 4-bit QLoRA configuration
+rank: 16
+alpha: 32
+qlora: true
+quant_type: nf4
