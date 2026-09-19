@@ -50,6 +50,13 @@ pip install -e .
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
+### Cách C: Script tự động cho GPU Server (1 lệnh duy nhất)
+
+```bash
+# Tự động cài ffmpeg, PyTorch CUDA 12.4, dependencies, hf_transfer và kiểm tra GPU
+bash scripts/setup_server_env.sh
+```
+
 ---
 
 ## 2. Các lệnh kiểm tra trước khi chạy lệnh chính (Pre-flight Checks)
@@ -160,10 +167,24 @@ python -m personaplex_finetuning.train \
 Nếu bạn thiết lập máy mới chưa có sẵn weights mô hình hoặc dataset:
 
 ```bash
-# 1. Đăng nhập Hugging Face (cần chấp thuận điều khoản tại https://huggingface.co/nvidia/personaplex-7b-v1)
+# 1. Bật tăng tốc tải đa luồng qua Rust backend (hf_transfer)
+export HF_HUB_ENABLE_HF_TRANSFER=1
+
+# 2. Đăng nhập Hugging Face (cần chấp thuận điều khoản tại https://huggingface.co/nvidia/personaplex-7b-v1)
 hf auth login
 
-# 2. Tải toàn bộ checkpoint PersonaPlex 7B và dataset mẫu
+# Cách 1: Tải trực tiếp bằng lệnh hf (Khuyên dùng - Nhanh nhất)
+hf download nvidia/personaplex-7b-v1 \
+  model.safetensors \
+  tokenizer-e351c8d8-checkpoint125.safetensors \
+  tokenizer_spm_32k_3.model \
+  --local-dir models/personaplex-7b-v1
+
+hf download ngocbao220/personaplex-otospeech-prepared \
+  --repo-type dataset \
+  --local-dir prepared
+
+# Cách 2: Tải tự động qua tool Python có sẵn trong repo
 python -m tools.download_hf_assets \
   --assets-dir assets \
   --dataset-repo ngocbao220/personaplex-otospeech-prepared \
@@ -171,7 +192,7 @@ python -m tools.download_hf_assets \
   --revision main
 ```
 
-**Chi tiết các đối số (arguments):**
+**Chi tiết các đối số (arguments cho Cách 2):**
 - `--assets-dir` **[Optional]**: Thư mục lưu weights và dataset tải về (mặc định: `assets`).
 - `--dataset-repo` **[Optional]**: Tên repository dataset trên Hugging Face Hub.
 - `--model-repo` **[Optional]**: Tên repository chứa checkpoint PersonaPlex 7B.

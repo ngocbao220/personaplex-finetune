@@ -15,18 +15,23 @@ dependencies = [
   "omegaconf>=2.3",
   "PyYAML>=6",
   "protobuf>=3.19.6,<5",
+  "rich>=13.0",
   "safetensors>=0.4",
+  "scipy>=1.11",
   "sentencepiece==0.2",
+  "sounddevice==0.5",
   "sphn>=0.1.4,<0.2",
   "tensorboard>=2.17,<2.19",
   "pyloudnorm>=0.1.1",
   "torch>=2.2,<2.5",
+  "torchaudio>=2.2,<2.5",
   "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
 hub = [
-  "huggingface-hub[cli]>=0.24,<0.25",
+  "huggingface-hub[cli]>=0.24",
+  "hf-transfer>=0.1.8",
 ]
 
 [tool.setuptools.packages.find]
