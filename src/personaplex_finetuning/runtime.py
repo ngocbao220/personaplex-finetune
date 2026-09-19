@@ -189,12 +189,20 @@ def load_runtime(paths: RuntimePaths, device: str = "cuda", qlora: bool = False,
         if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
             torch.backends.cuda.enable_mem_efficient_sdp(True)
     mimi = loaders.get_mimi(resolved.mimi_weight, device=device)
+    lm_dtype = torch.bfloat16
+    dev_type = getattr(device, "type", str(device))
+    if dev_type == "mps":
+        try:
+            _ = torch.zeros((1,), dtype=torch.bfloat16, device="mps")
+        except Exception:
+            lm_dtype = torch.float16
+
     if qlora:
         from .lora import quantize_model_4bit
-        model = loaders.get_moshi_lm(resolved.moshi_weight, device="cpu")
+        model = loaders.get_moshi_lm(resolved.moshi_weight, device="cpu", dtype=lm_dtype)
         model = quantize_model_4bit(model, device=device, quant_type=quant_type)
     else:
-        model = loaders.get_moshi_lm(resolved.moshi_weight, device=device)
+        model = loaders.get_moshi_lm(resolved.moshi_weight, device=device, dtype=lm_dtype)
 
     import gc
     gc.collect()

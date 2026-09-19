@@ -360,3 +360,89 @@ tensorboard \
 - `--logdir` **[Required]**: Thư mục chứa log sự kiện huấn luyện (event logs).
 - `--host` **[Optional]**: Địa chỉ IP bind socket (`0.0.0.0` để cho phép truy cập từ xa qua mạng).
 - `--port` **[Optional]**: Cổng mở giao diện web (mặc định: `6006`).
+
+---
+
+## 6. Đánh Giá Khả Năng Hội Thoại Song Công (Full-Duplex-Bench)
+
+Hệ thống đánh giá tự động dựa trên chuẩn của **Full-Duplex-Bench (FDB v1.0 & v1.5)** để đo lường 4 trục tương tác cốt lõi:
+1. **Pause Handling**: Khả năng kiên nhẫn, không cướp lời khi người dùng ngập ngừng/nghỉ giữa câu (**TOR ↓**).
+2. **Backchanneling**: Khả năng chèn âm đệm ngắn tự nhiên khi người dùng nói dài (**TOR ↓, Freq ↑, JSD ↓**).
+3. **Smooth Turn-Taking**: Tốc độ và độ nhạy bắt lời khi người dùng dứt câu (**TOR ↑, Latency ↓**).
+4. **User Interruption**: Xử lý nhường microphone và trả lời nội dung mới khi bị chen ngang (**TOR ↑, Response Quality ↑, Latency ↓**).
+
+> **Điểm ưu việt**: Tận dụng trực tiếp luồng native 12.5 Hz frame tokens của PersonaPlex và mốc thời gian có sẵn từ data preparation; **hoàn toàn offline, không cần cài đặt thêm mô hình ASR cồng kềnh**.
+
+### 6.1. Chạy Thử Nghiệm Mock / So Sánh Nhanh (Dry-run Demo)
+In bảng đối sánh mô phỏng giữa Base model và LoRA model dạng Rich Table trên Terminal:
+```bash
+python ../run_fdp_benchmark.py --compare_demo
+```
+
+### 6.2. Chạy Benchmark Thật Trên Checkpoint PersonaPlex Base
+Đánh giá trên tập dữ liệu chuẩn Full-Duplex-Bench v1.0 (727 mẫu tiếng Anh) để đối chuẩn với Table 2 của paper:
+
+```bash
+# Chạy trên GPU / Linux CUDA:
+python ../run_fdp_benchmark.py \
+  --model_root ../models \
+  --model_name "PersonaPlex Base" \
+  --fdb_dir ../benchmarks/datasets/fdb_v1/v1.0/extracted \
+  --max_samples_per_task 10 \
+  --output_dir ../benchmarks/results_fdb
+
+# Chạy trên macOS Apple Silicon (MPS):
+PYTORCH_ENABLE_MPS_FALLBACK=1 python ../run_fdp_benchmark.py \
+  --model_root ../models \
+  --model_name "PersonaPlex Base" \
+  --fdb_dir ../benchmarks/datasets/fdb_v1/v1.0/extracted \
+  --max_samples_per_task 10 \
+  --output_dir ../benchmarks/results_fdb
+```
+
+### 6.3. Chạy Benchmark Đánh Giá Checkpoint LoRA (Sau Khi Fine-tune)
+Kiểm tra xem mô hình sau fine-tune có bảo toàn hoặc cải thiện năng lực full-duplex hay không:
+
+```bash
+python ../run_fdp_benchmark.py \
+  --model_root ../models \
+  --adapter ../checkpoints/lora_adapter.pt \
+  --model_name "PersonaPlex LoRA" \
+  --fdb_dir ../benchmarks/datasets/fdb_v1/v1.0/extracted \
+  --max_samples_per_task 10 \
+  --output_dir ../benchmarks/results_fdb
+```
+
+### 6.4. Chạy Benchmark Trên Dữ Liệu In-Domain / Tiếng Việt (Tương Lai)
+Khi có tập dữ liệu hội thoại tiếng Việt (hoặc tập OtoSpeech trong `prepared/samples`):
+```bash
+python ../run_fdp_benchmark.py \
+  --model_root ../models \
+  --adapter ../checkpoints/lora_adapter.pt \
+  --model_name "PersonaPlex-VI LoRA" \
+  --prepared_dir ../prepared/samples \
+  --max_samples_per_task 10 \
+  --output_dir ../benchmarks/results_vi
+```
+
+### 6.5. Bảng Giải Thích Các Tham Số (Arguments)
+
+| Tham số CLI | Mặc định | Ý nghĩa |
+| :--- | :--- | :--- |
+| `--model_root` | `models` | Đường dẫn thư mục chứa base model (`model.safetensors`, tokenizer, mimi). |
+| `--adapter` | `None` | Đường dẫn file trọng số LoRA (`lora.safetensors` hoặc `.pt`). Nếu bỏ trống, chạy base model gốc. |
+| `--model_name` | `PersonaPlex Base` | Tên mô hình hiển thị trên bảng kết quả. |
+| `--fdb_dir` | `benchmarks/datasets/fdb_v1/v1.0/extracted` | Thư mục chứa dataset chuẩn Full-Duplex-Bench v1.0. |
+| `--prepared_dir` | `None` | Thư mục chứa các mẫu hội thoại tự chuẩn bị (`words.json`, `conversation.wav`). |
+| `--max_samples_per_task` | `10` | Số lượng mẫu tối đa đánh giá cho mỗi nhóm tác vụ (giúp chạy nhanh hoặc toàn diện). |
+| `--device` | `auto` | Thiết bị tính toán: `auto`, `cuda`, `mps`, hoặc `cpu`. |
+| `--output_dir` | `benchmarks/results` | Thư mục lưu bảng báo cáo Markdown và JSON. |
+| `--mock` | `False` | Bật chế độ chạy giả lập nhanh (dry-run). |
+| `--compare_demo` | `False` | Chạy demo so sánh trực quan Base vs LoRA trên Terminal. |
+
+### 6.6. File Kết Quả Đầu Ra
+Kết quả sau khi chạy được tự động:
+1. In bảng Rich Table màu sắc trực quan ngay trên Terminal.
+2. Xuất bảng Markdown: `{output_dir}/fdp-benchmark-result.md`.
+3. Xuất file JSON chi tiết: `{output_dir}/fdp-benchmark-result.json`.
+
