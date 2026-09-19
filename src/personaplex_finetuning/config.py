@@ -22,6 +22,8 @@ class Config:
     shuffle: bool = False
     max_steps: int = 300
     learning_rate: float = 2e-5
+    depformer_learning_rate: float | None = None
+    train_stage: str = "joint"
     lora_rank: int = 16
     lora_alpha: int = 32
     qlora: bool = False
@@ -92,6 +94,20 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
                     hydra_overrides.append(f"model.{o}")
                 elif o.startswith("window_seconds=") or o.startswith("shuffle="):
                     hydra_overrides.append(f"data.{o}")
+                elif o.startswith("depformer_lr=") or o.startswith("depformer_learning_rate="):
+                    val = o.split("=", 1)[1]
+                    hydra_overrides.append(f"+train.depformer_learning_rate={val}")
+                elif o.startswith("tempformer_lr=") or o.startswith("tempformer_learning_rate="):
+                    val = o.split("=", 1)[1]
+                    hydra_overrides.append(f"train.learning_rate={val}")
+                elif o.startswith("stage=") or o.startswith("train_stage="):
+                    val = o.split("=", 1)[1]
+                    hydra_overrides.append(f"+train.stage={val}")
+                elif o.startswith("freeze_depformer=") or o.startswith("freeze_tempformer="):
+                    key, val = o.split("=", 1)
+                    if val.lower() in {"true", "1"}:
+                        st = "temporal_only" if "depformer" in key else "depth_only"
+                        hydra_overrides.append(f"+train.stage={st}")
                 elif o.startswith("learning_rate=") or o.startswith("max_steps=") or o.startswith("output_dir="):
                     hydra_overrides.append(f"train.{o}")
                 elif o.startswith("rank=") or o.startswith("alpha=") or o.startswith("qlora="):
@@ -159,6 +175,8 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         shuffle=bool(data.get("shuffle", False)),
         max_steps=int(train.get("max_steps", 300)) if isinstance(train, dict) else 300,
         learning_rate=float(train.get("learning_rate", 2e-5)) if isinstance(train, dict) else 2e-5,
+        depformer_learning_rate=float(train["depformer_learning_rate"]) if (isinstance(train, dict) and train.get("depformer_learning_rate") is not None) else None,
+        train_stage=str(train.get("stage") or train.get("train_stage") or "joint").lower() if isinstance(train, dict) else "joint",
         lora_rank=int(lora.get("rank", 16)) if isinstance(lora, dict) else 16,
         lora_alpha=int(lora.get("alpha", 32)) if isinstance(lora, dict) else 32,
         qlora=qlora,

@@ -155,6 +155,24 @@ python -m personaplex_finetuning.train data=overfit train=overfit model=local --
 
 ---
 
+### 2.8. Đánh giá độ tương thích của Mimi Audio Codec (Đặc biệt cho tiếng Việt)
+Kiểm tra chất lượng tái tạo âm thanh qua Mimi Codec (Mimi Encode -> Decode) để đo đạc chỉ số SNR (dB), SI-SDR (dB) và nghe thử các dấu thanh điệu tiếng Việt:
+
+```bash
+# Đánh giá 1 file âm thanh cụ thể
+python -m tools.test_mimi --input path/to/sample.wav --model-root ../models
+
+# Hoặc đánh giá toàn bộ thư mục âm thanh tiếng Việt
+python -m tools.test_mimi --input path/to/vietnamese_wavs/ --num-codebooks 8 --output-dir outputs/mimi_vi_test
+```
+
+**Các tiêu chí đánh giá:**
+- `SI-SDR >= 12 dB`: Xuất sắc, bảo toàn hoàn hảo âm vị và thanh điệu.
+- `SI-SDR 8 - 12 dB`: Khá tốt, âm thanh rõ ràng, nghe rõ ngữ nghĩa.
+- `SI-SDR < 8 dB`: Cảnh báo, có nguy cơ mất dấu hoặc biến dạng cao độ ($F_0$) -> cần Fine-tune Mimi trước (Stage 1).
+
+---
+
 ## 3. Chuẩn bị Model Checkpoint & Dữ liệu (Nếu chưa có sẵn)
 
 Nếu bạn thiết lập máy mới chưa có sẵn weights mô hình hoặc dataset:
@@ -275,7 +293,42 @@ accelerate launch \
 
 ---
 
-### 4.3. Chạy Interactive Live Demo qua Terminal CLI (Nói chuyện Micro & Loa trực tiếp)
+### 4.3. Huấn luyện theo Stage (Stage-Wise Freezing & Dual Learning Rate)
+
+Khi huấn luyện thích nghi ngôn ngữ mới (như tiếng Việt), bạn có thể chia thành các giai đoạn tối ưu hóa từng thành phần:
+
+```bash
+# --------------------------------------------------------------------------
+# Stage 0: Fine-tune thích nghi Mimi Audio Codec (Nếu kiểm tra ở mục 2.8 < 8 dB)
+# Chỉ cần audio WAV mono (không cần text transcript, không cần alignment)
+# --------------------------------------------------------------------------
+bash scripts/train_mimi.sh gpus=0 data_dir=path/to/vietnamese_wavs learning_rate=5e-5 max_steps=5000
+
+# --------------------------------------------------------------------------
+# Stage 1: Chỉ huấn luyện khối Temporal 7B (Đóng băng 100% Depth Transformer)
+# Thích hợp cho giai đoạn đầu học ngữ nghĩa hội thoại và turn-taking
+# --------------------------------------------------------------------------
+bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=104h stage=temporal_only
+
+# --------------------------------------------------------------------------
+# Stage 2: Chỉ huấn luyện khối Depth Transformer (Đóng băng 100% Temporal 7B)
+# Thích hợp để tinh chỉnh phát âm âm học và thanh điệu mà không làm lệch tư duy hội thoại
+# --------------------------------------------------------------------------
+bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=104h stage=depth_only
+
+# --------------------------------------------------------------------------
+# Stage 3: Huấn luyện liên hợp (Joint) với 2 Learning Rate riêng biệt
+# Temporal học 2e-5, Depth học chậm hơn ở 5e-6 để bảo vệ chất lượng giọng nói
+# --------------------------------------------------------------------------
+bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=104h \
+  stage=joint \
+  learning_rate=2e-5 \
+  depformer_lr=5e-6
+```
+
+---
+
+### 4.4. Chạy Interactive Live Demo qua Terminal CLI (Nói chuyện Micro & Loa trực tiếp)
 
 Tương tác đàm thoại 2 chiều thời gian thực (full-duplex) với PersonaPlex qua microphone và loa máy tính. Hỗ trợ trỏ vào base checkpoint cục bộ và nạp adapter LoRA đã fine-tune.
 

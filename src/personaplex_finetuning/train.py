@@ -239,7 +239,14 @@ def evaluate_validation(config: Config, runtime, val_samples: list, accelerator:
 def verify_reloaded_adapter(config: Config, sample, adapter: Path) -> float:
     """Load base + adapter in a fresh model object and return teacher-forced loss."""
     fresh = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
-    inject_lora(fresh.model, config.lora_rank, config.lora_alpha)
+    stage = getattr(config, "train_stage", "joint").lower()
+    if stage in {"temporal_only", "freeze_depformer"}:
+        prefixes = ("transformer",)
+    elif stage in {"depth_only", "freeze_tempformer"}:
+        prefixes = ("depformer",)
+    else:
+        prefixes = ("transformer", "depformer") if config.depformer_learning_rate is not None else ("transformer",)
+    inject_lora(fresh.model, config.lora_rank, config.lora_alpha, prefixes=prefixes)
     load_adapter(fresh.model, adapter)
     fresh.model.eval()
     example = build_example(config, sample, fresh)
@@ -337,8 +344,26 @@ def run(
             )
         accelerator.wait_for_everyone()
 
-    # Inject LoRA
-    targets = inject_lora(runtime.model, config.lora_rank, config.lora_alpha)
+    # Inject LoRA with Stage-Wise Freezing support
+    stage = getattr(config, "train_stage", "joint").lower()
+    if stage in {"temporal_only", "freeze_depformer"}:
+        lora_prefixes = ("transformer",)
+        if hasattr(runtime.model, "depformer"):
+            runtime.model.depformer.requires_grad_(False)
+        if accelerator.is_main_process:
+            print("[Stage-Wise Training] Active Stage: TEMPORAL ONLY (Depth Transformer / Depformer is 100% frozen).")
+    elif stage in {"depth_only", "freeze_tempformer"}:
+        lora_prefixes = ("depformer",)
+        if hasattr(runtime.model, "transformer"):
+            runtime.model.transformer.requires_grad_(False)
+        if accelerator.is_main_process:
+            print("[Stage-Wise Training] Active Stage: DEPTH ONLY (Temporal 7B Transformer is 100% frozen).")
+    else:
+        lora_prefixes = ("transformer", "depformer") if config.depformer_learning_rate is not None else ("transformer",)
+        if accelerator.is_main_process:
+            print("[Stage-Wise Training] Active Stage: JOINT (Both Temporal & Depth active).")
+
+    targets = inject_lora(runtime.model, config.lora_rank, config.lora_alpha, prefixes=lora_prefixes)
 
     # Optional gradient checkpointing
     if config.gradient_checkpointing:
@@ -371,7 +396,21 @@ def run(
     if accelerator.is_main_process:
         print(f"LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
 
-    optimizer = torch.optim.AdamW(trainable, lr=config.learning_rate, weight_decay=0.0)
+    temp_lr = config.learning_rate
+    dep_lr = config.depformer_learning_rate
+    if dep_lr is not None and dep_lr != temp_lr:
+        temp_params = [p for n, p in runtime.model.named_parameters() if p.requires_grad and "depformer" not in n]
+        dep_params = [p for n, p in runtime.model.named_parameters() if p.requires_grad and "depformer" in n]
+        param_groups = []
+        if temp_params:
+            param_groups.append({"params": temp_params, "lr": temp_lr})
+        if dep_params:
+            param_groups.append({"params": dep_params, "lr": dep_lr})
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=0.0)
+        if accelerator.is_main_process:
+            print(f"Using Dual Learning Rates -> Temporal Transformer: {temp_lr:.2e}, Depth Transformer: {dep_lr:.2e}")
+    else:
+        optimizer = torch.optim.AdamW(trainable, lr=temp_lr, weight_decay=0.0)
     max_steps = 1 if smoke else config.max_steps
     scheduler = None
     if config.warmup_steps > 0 and not smoke:

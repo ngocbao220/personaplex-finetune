@@ -1,5 +1,5 @@
 # Full 104-hour training configuration
-output_dir: ../runs/train_104h
+output_dir: ../runs/full
 max_steps: 10000
 learning_rate: 2.0e-5
 gradient_accumulation_steps: 8
