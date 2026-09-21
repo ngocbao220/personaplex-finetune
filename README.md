@@ -235,11 +235,11 @@ python -m personaplex_finetuning.train \
 
 **Chi tiết các cờ CLI (flags):**
 - `data=<preset>`: Chọn dataset (`overfit`, `otospeech`, `vietnamese`, `kaggle`).
-- `train=<preset>`: Chọn chế độ train (`overfit`, `104h`).
+- `train=<preset>`: Chọn chế độ train (`overfit`, `full`).
 - `model=<preset>`: Chọn đường dẫn model (`local`, `server`, `kaggle`).
 - `lora=<preset>`: Chọn cấu hình LoRA (`default`, `qlora`, `kaggle`).
 - `--qlora` / `--no-qlora` **[Optional]**: Bật hoặc tắt lượng tử hóa 4-bit QLoRA (`nf4`) để giảm dung lượng VRAM.
-- `--resume-from` **[Optional]**: Đường dẫn tới checkpoint trước đó để tiếp tục huấn luyện (ví dụ: `--resume-from ../runs/hf_overfit_10/checkpoints/checkpoint_000100`).
+- `--resume-from` **[Optional]**: Đường dẫn checkpoint directory hoặc `lora.safetensors` để tiếp tục huấn luyện. Checkpoint mới khôi phục adapter, optimizer và scheduler; phải giữ nguyên số GPU và `train.gradient_accumulation_steps`. Checkpoint cũ chỉ có adapter vẫn nạp được với optimizer mới.
 
 **Các tham số override trực tiếp (dotlist overrides) [Optional]:**
 - `train.learning_rate`: Tốc độ học (Learning Rate). Thường dùng `2.0e-5` cho 10 mẫu overfit, `1.0e-5` cho tập lớn.
@@ -259,24 +259,39 @@ python -m personaplex_finetuning.train \
 #### Cách 1: Sử dụng launcher script `scripts/train_gpus.sh`
 
 ```bash
-# Huấn luyện 2 GPU trên server với tập 104 giờ
+# Huấn luyện 2 GPU trên server với preset full
 bash scripts/train_gpus.sh \
   gpus=0,1 \
   data=otospeech \
   model=server \
-  train=104h
+  train=full
 
-# Hoặc chạy 4 GPU
+# Chạy 4 GPU nhưng giữ global batch bằng 1 GPU × accumulation 8:
+# 1 sample/GPU × 4 GPU × accumulation 2 = 8 samples/update.
 bash scripts/train_gpus.sh \
   gpus=0,1,2,3 \
   data=otospeech \
   model=server \
-  train=104h
+  train=full \
+  train.gradient_accumulation_steps=2
 ```
 
 **Chi tiết các đối số (arguments dạng key=value đồng nhất):**
 - `gpus=0,1` / `gpus=0,1,2,3`: Danh sách chỉ số GPU vật lý sử dụng. Script tự động thiết lập `CUDA_VISIBLE_DEVICES` và số tiến trình DDP tương ứng.
 - Các preset `data=...`, `model=...`, `train=...` hoặc tham số override khác được chuyển trực tiếp vào chương trình.
+- `train.max_steps` là số optimizer updates; log `global_batch_size` và `samples_per_second` dùng để so sánh throughput.
+
+Để tiếp tục một run bị gián đoạn, giữ nguyên topology DDP và accumulation:
+
+```bash
+bash scripts/train_gpus.sh \
+  gpus=4,5,6,7 \
+  data=otospeech \
+  model=server \
+  train=full \
+  train.gradient_accumulation_steps=2 \
+  --resume-from ../runs/full/train_YYYYMMDD_HHMMSS/checkpoints/checkpoint_000500
+```
 
 #### Cách 2: Gọi trực tiếp qua lệnh `accelerate launch`
 
@@ -288,7 +303,7 @@ accelerate launch \
   -m personaplex_finetuning.train \
   data=otospeech \
   model=server \
-  train=104h
+  train=full
 ```
 
 ---
@@ -308,19 +323,19 @@ bash scripts/train_mimi.sh gpus=0 data_dir=path/to/vietnamese_wavs learning_rate
 # Stage 1: Chỉ huấn luyện khối Temporal 7B (Đóng băng 100% Depth Transformer)
 # Thích hợp cho giai đoạn đầu học ngữ nghĩa hội thoại và turn-taking
 # --------------------------------------------------------------------------
-bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=104h stage=temporal_only
+bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=full stage=temporal_only
 
 # --------------------------------------------------------------------------
 # Stage 2: Chỉ huấn luyện khối Depth Transformer (Đóng băng 100% Temporal 7B)
 # Thích hợp để tinh chỉnh phát âm âm học và thanh điệu mà không làm lệch tư duy hội thoại
 # --------------------------------------------------------------------------
-bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=104h stage=depth_only
+bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=full stage=depth_only
 
 # --------------------------------------------------------------------------
 # Stage 3: Huấn luyện liên hợp (Joint) với 2 Learning Rate riêng biệt
 # Temporal học 2e-5, Depth học chậm hơn ở 5e-6 để bảo vệ chất lượng giọng nói
 # --------------------------------------------------------------------------
-bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=104h \
+bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=full \
   stage=joint \
   learning_rate=2e-5 \
   depformer_lr=5e-6
@@ -526,4 +541,3 @@ Kết quả sau khi chạy được tự động:
 1. In bảng Rich Table màu sắc trực quan ngay trên Terminal.
 2. Xuất bảng Markdown: `{output_dir}/fdp-benchmark-result.md`.
 3. Xuất file JSON chi tiết: `{output_dir}/fdp-benchmark-result.json`.
-

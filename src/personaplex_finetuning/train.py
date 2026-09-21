@@ -49,15 +49,65 @@ def create_run_dir(output_root: Path, smoke: bool) -> Path:
     return run_dir
 
 
-def build_example(config: Config, sample, runtime, random_crop: bool = False):
+def build_example(config: Config, sample, runtime, random_crop: bool = False, rng=None):
     if random_crop and getattr(config, "random_crop", False):
         effective_sample = sample.dynamic_sample(
-            config.window_seconds, random_crop=True, prompt_aug_prob=getattr(config, "prompt_aug_prob", 0.0)
+            config.window_seconds, random_crop=True, prompt_aug_prob=getattr(config, "prompt_aug_prob", 0.0), rng=rng
         )
     else:
         effective_sample = sample
     builder = PersonaPlexTrainingExampleBuilder(runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token)
     return builder.apply_delays(builder.build(effective_sample), runtime.delays)
+
+
+def effective_global_batch_size(per_process_batch_size: int, num_processes: int, gradient_accumulation_steps: int) -> int:
+    """Return the number of samples contributing to one optimizer update."""
+    if min(per_process_batch_size, num_processes, gradient_accumulation_steps) < 1:
+        raise ValueError("batch size, process count, and accumulation steps must all be positive")
+    return per_process_batch_size * num_processes * gradient_accumulation_steps
+
+
+def step_optimizer_if_ready(accelerator, optimizer, scheduler, trainable) -> float:
+    """Commit an accumulated DDP update only at Accelerate's sync boundary."""
+    if not accelerator.sync_gradients:
+        return 0.0
+    grad_norm = float(accelerator.clip_grad_norm_(trainable, 1.0))
+    optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
+    optimizer.zero_grad(set_to_none=True)
+    return grad_norm
+
+
+def deterministic_crop_rng(seed: int, process_index: int, micro_step: int) -> random.Random:
+    """Make dynamic crops reproducible across resume without saving Python RNG state."""
+    return random.Random(seed + (process_index * 1_000_003) + micro_step)
+
+
+def sample_index_for_rank(micro_step: int, process_index: int, num_processes: int, sample_count: int) -> int:
+    """Select a disjoint rank-local sample before wrapping around the dataset."""
+    if micro_step < 0 or process_index < 0 or process_index >= num_processes or sample_count < 1:
+        raise ValueError("invalid distributed sample selection inputs")
+    return (micro_step * num_processes + process_index) % sample_count
+
+
+def write_rank_info(run_dir: Path, process_index: int, num_processes: int, device, sample_count: int, peak_gpu_bytes: int | None = None) -> Path:
+    """Emit one non-contended runtime record per DDP rank for GPU verification."""
+    visible_devices = [item.strip() for item in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if item.strip()]
+    physical_gpu = visible_devices[process_index] if process_index < len(visible_devices) else None
+    info = {
+        "rank": process_index,
+        "world_size": num_processes,
+        "device": str(device),
+        "physical_gpu": physical_gpu,
+        "first_sample_index": sample_index_for_rank(0, process_index, num_processes, sample_count),
+    }
+    if peak_gpu_bytes is not None:
+        info["peak_gpu_bytes"] = peak_gpu_bytes
+    path = run_dir / "ranks" / f"rank_{process_index:03d}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps: int, num_training_steps: int):
@@ -175,31 +225,89 @@ def one_step(config: Config, runtime, example, optimizer=None):
     return total, components, float(grad_norm)
 
 
-def save_adapter(run_dir: Path, model, config: Config, step: int) -> Path:
+def save_training_state(
+    checkpoint_dir: Path,
+    optimizer,
+    scheduler,
+    optimizer_step: int,
+    gradient_accumulation_steps: int,
+    num_processes: int,
+) -> Path:
+    """Persist enough state to continue the optimizer trajectory exactly."""
+    path = checkpoint_dir / "training_state.pt"
+    torch.save(
+        {
+            "format_version": 1,
+            "optimizer_step": optimizer_step,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "num_processes": num_processes,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        },
+        path,
+    )
+    return path
+
+
+def load_training_state(
+    checkpoint_dir: Path,
+    optimizer,
+    scheduler,
+    gradient_accumulation_steps: int,
+    num_processes: int,
+) -> int | None:
+    """Restore an optimizer checkpoint, rejecting incompatible DDP topology."""
+    path = checkpoint_dir / "training_state.pt"
+    if not path.is_file():
+        return None
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    if state.get("gradient_accumulation_steps") != gradient_accumulation_steps:
+        raise RuntimeError("resume checkpoint gradient_accumulation_steps differs from this run")
+    if state.get("num_processes") != num_processes:
+        raise RuntimeError("resume checkpoint num_processes differs from this run")
+    optimizer.load_state_dict(state["optimizer"])
+    saved_scheduler = state.get("scheduler")
+    if scheduler is None and saved_scheduler is not None:
+        raise RuntimeError("resume checkpoint has scheduler state but this run has no scheduler")
+    if scheduler is not None and saved_scheduler is not None:
+        scheduler.load_state_dict(saved_scheduler)
+    return int(state["optimizer_step"])
+
+
+def save_adapter(run_dir: Path, model, config: Config, step: int, optimizer=None, scheduler=None, gradient_accumulation_steps: int = 1, num_processes: int = 1) -> Path:
     path = run_dir / "checkpoints" / f"checkpoint_{step:06d}"
     path.mkdir(parents=True, exist_ok=True)
     adapter = path / "lora.safetensors"
     save_file(adapter_state_dict(model), str(adapter))
     (path / "adapter.json").write_text(
         json.dumps(
-            {"step": step, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha},
+            {"step": step, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha,
+             "gradient_accumulation_steps": gradient_accumulation_steps, "num_processes": num_processes},
             indent=2,
         )
     )
+    if optimizer is not None:
+        save_training_state(path, optimizer, scheduler, step, gradient_accumulation_steps, num_processes)
     return adapter
 
 
-def save_best_adapter(run_dir: Path, model, config: Config, step: int, val_loss: float) -> Path:
+def save_best_adapter(
+    run_dir: Path, model, config: Config, step: int, val_loss: float,
+    optimizer=None, scheduler=None, gradient_accumulation_steps: int = 1, num_processes: int = 1,
+) -> Path:
     path = run_dir / "checkpoints" / "best"
     path.mkdir(parents=True, exist_ok=True)
     adapter = path / "lora.safetensors"
     save_file(adapter_state_dict(model), str(adapter))
     (path / "adapter.json").write_text(
         json.dumps(
-            {"step": step, "val_loss": val_loss, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha},
+            {"step": step, "val_loss": val_loss, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha,
+             "gradient_accumulation_steps": gradient_accumulation_steps, "num_processes": num_processes},
             indent=2,
         )
     )
+    if optimizer is not None:
+        save_training_state(path, optimizer, scheduler, step, gradient_accumulation_steps, num_processes)
     return adapter
 
 
@@ -208,31 +316,35 @@ def evaluate_validation(config: Config, runtime, val_samples: list, accelerator:
         return {}
     unwrapped = accelerator.unwrap_model(runtime.model)
     unwrapped.eval()
-    total_losses = []
-    text_losses = []
-    semantic_losses = []
-    nonsemantic_losses = []
+    totals = {"total": 0.0, "text": 0.0, "semantic": 0.0, "nonsemantic": 0.0}
+    count = 0
     device = accelerator.device
     with torch.no_grad():
-        for sample in val_samples:
+        for sample_index, sample in enumerate(val_samples):
+            if sample_index % accelerator.num_processes != accelerator.process_index:
+                continue
             example = build_example(config, sample, runtime, random_crop=False)
             codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
             output = unwrapped(codes)
             total, comps = loss_components(output, codes, example, runtime.tokenizer.padding_id, torch)
-            reduced_total = accelerator.reduce(total, reduction="mean")
-            reduced_text = accelerator.reduce(comps["text"], reduction="mean")
-            reduced_sem = accelerator.reduce(comps["audio_semantic"], reduction="mean")
-            reduced_nonsem = accelerator.reduce(comps["audio_nonsemantic"], reduction="mean")
-            total_losses.append(float(reduced_total.detach()))
-            text_losses.append(float(reduced_text.detach()))
-            semantic_losses.append(float(reduced_sem.detach()))
-            nonsemantic_losses.append(float(reduced_nonsem.detach()))
+            totals["total"] += float(total.detach())
+            totals["text"] += float(comps["text"].detach())
+            totals["semantic"] += float(comps["audio_semantic"].detach())
+            totals["nonsemantic"] += float(comps["audio_nonsemantic"].detach())
+            count += 1
     unwrapped.train()
+    reduced = accelerator.reduce(
+        torch.tensor([totals["total"], totals["text"], totals["semantic"], totals["nonsemantic"], count], device=device),
+        reduction="sum",
+    )
+    total_count = float(reduced[4].item())
+    if total_count == 0:
+        raise RuntimeError("validation has no samples after rank partitioning")
     return {
-        "val/loss_total": sum(total_losses) / len(total_losses),
-        "val/loss_text": sum(text_losses) / len(text_losses),
-        "val/loss_audio_semantic": sum(semantic_losses) / len(semantic_losses),
-        "val/loss_audio_nonsemantic": sum(nonsemantic_losses) / len(nonsemantic_losses),
+        "val/loss_total": float(reduced[0].item()) / total_count,
+        "val/loss_text": float(reduced[1].item()) / total_count,
+        "val/loss_audio_semantic": float(reduced[2].item()) / total_count,
+        "val/loss_audio_nonsemantic": float(reduced[3].item()) / total_count,
     }
 
 
@@ -276,6 +388,7 @@ def run(
         gradient_accumulation_steps=accum_steps,
     )
     device = accelerator.device
+    global_batch_size = effective_global_batch_size(1, accelerator.num_processes, accum_steps)
     cpu_threads = limit_cpu_threads(torch)
     set_seed(config.seed + accelerator.process_index)
 
@@ -313,6 +426,8 @@ def run(
             "num_processes": accelerator.num_processes,
             "cpu_threads": cpu_threads,
             "gradient_accumulation_steps": accum_steps,
+            "per_device_batch_size": 1,
+            "global_batch_size": global_batch_size,
             "warmup_steps": config.warmup_steps,
             "eval_every_steps": config.eval_every_steps,
             "save_every_steps": config.save_every_steps,
@@ -332,6 +447,10 @@ def run(
         if torch.distributed.is_initialized():
             torch.distributed.broadcast_object_list(run_dir_list, src=0)
         run_dir = Path(run_dir_list[0])
+
+    if run_dir is not None:
+        write_rank_info(run_dir, accelerator.process_index, accelerator.num_processes, device, len(train_samples))
+    accelerator.wait_for_everyone()
 
     # Sequential model loading across ranks to avoid host CPU RAM spikes
     for i in range(accelerator.num_processes):
@@ -371,20 +490,24 @@ def run(
         if accelerator.is_main_process:
             print("Gradient checkpointing enabled on transformer layers.")
 
-    # Resume checkpoint if provided
-    start_step = 0
+    # Load LoRA weights before DDP wrapping; optimizer state is restored after wrapping.
+    resume_checkpoint_dir = None
+    adapter_resume_step = 0
     if resume_from:
         resume_path = Path(resume_from)
         adapter_file = resume_path if resume_path.is_file() else resume_path / "lora.safetensors"
+        if not adapter_file.is_file():
+            raise FileNotFoundError(f"resume adapter does not exist: {adapter_file}")
+        resume_checkpoint_dir = adapter_file.parent
         if accelerator.is_main_process:
             print(f"Resuming LoRA weights from {adapter_file}")
         load_adapter(runtime.model, adapter_file)
         meta_file = adapter_file.parent / "adapter.json"
         if meta_file.is_file():
             try:
-                start_step = int(json.loads(meta_file.read_text(encoding="utf-8")).get("step", 0))
+                adapter_resume_step = int(json.loads(meta_file.read_text(encoding="utf-8")).get("step", 0))
                 if accelerator.is_main_process:
-                    print(f"Resumed from step {start_step}")
+                    print(f"Adapter checkpoint is at optimizer step {adapter_resume_step}")
             except Exception:
                 pass
 
@@ -421,6 +544,24 @@ def run(
     if scheduler is not None:
         scheduler = accelerator.prepare(scheduler)
 
+    start_step = adapter_resume_step
+    if resume_checkpoint_dir is not None:
+        restored_step = load_training_state(
+            resume_checkpoint_dir,
+            optimizer,
+            scheduler,
+            accum_steps,
+            accelerator.num_processes,
+        )
+        if restored_step is not None:
+            start_step = restored_step
+            if accelerator.is_main_process:
+                print(f"Restored optimizer and scheduler state at optimizer step {start_step}")
+        elif accelerator.is_main_process:
+            print("Resume checkpoint has no training_state.pt; resuming adapter weights with a fresh optimizer.")
+    if start_step > max_steps:
+        raise RuntimeError(f"resume checkpoint step {start_step} exceeds train.max_steps={max_steps}")
+
     writer = None
     log_file = None
     if accelerator.is_main_process and run_dir is not None:
@@ -442,17 +583,24 @@ def run(
         random.Random(config.seed).shuffle(shuffled_indices)
 
     try:
-        progress = (
-            tqdm(range(start_step, max_steps), desc="training (DDP)", unit="step", dynamic_ncols=True)
-            if accelerator.is_main_process
-            else range(start_step, max_steps)
-        )
+        start_micro_step = start_step * accum_steps
+        max_micro_steps = max_steps * accum_steps
+        progress = tqdm(total=max_steps, initial=start_step, desc="training (DDP)", unit="update", dynamic_ncols=True) if accelerator.is_main_process else None
+        last_update_time = time.monotonic()
 
-        for step in progress:
-            global_sample_idx = (step * accelerator.num_processes + accelerator.process_index) % len(train_samples)
+        for micro_step in range(start_micro_step, max_micro_steps):
+            global_sample_idx = sample_index_for_rank(
+                micro_step, accelerator.process_index, accelerator.num_processes, len(train_samples)
+            )
             sample_idx = global_sample_idx if not config.shuffle else shuffled_indices[global_sample_idx % len(shuffled_indices)]
             current_sample = train_samples[sample_idx]
-            example = build_example(config, current_sample, runtime, random_crop=config.random_crop and not smoke)
+            example = build_example(
+                config,
+                current_sample,
+                runtime,
+                random_crop=config.random_crop and not smoke,
+                rng=deterministic_crop_rng(config.seed, accelerator.process_index, micro_step),
+            )
             codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
 
             with accelerator.accumulate(runtime.model):
@@ -460,15 +608,12 @@ def run(
                 total, components = loss_components(output, codes, example, runtime.tokenizer.padding_id, torch)
                 accelerator.backward(total)
 
-                if accelerator.sync_gradients:
-                    grad_norm = float(accelerator.clip_grad_norm_(trainable, 1.0))
-                else:
-                    grad_norm = 0.0
+                grad_norm = step_optimizer_if_ready(accelerator, optimizer, scheduler, trainable)
 
-                optimizer.step()
-                if scheduler is not None:
-                    scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
+            if not accelerator.sync_gradients:
+                continue
+
+            optimizer_step = (micro_step + 1) // accum_steps
 
             reduced_total = accelerator.reduce(total, reduction="mean")
             reduced_text = accelerator.reduce(components["text"], reduction="mean")
@@ -477,28 +622,33 @@ def run(
 
             if accelerator.is_main_process:
                 record = {
-                    "step": step,
+                    "step": optimizer_step,
+                    "micro_step": micro_step + 1,
                     "loss/total": float(reduced_total.detach()),
                     "loss/text": float(reduced_text.detach()),
                     "loss/audio_semantic": float(reduced_sem.detach()),
                     "loss/audio_nonsemantic": float(reduced_nonsem.detach()),
                     "lr": optimizer.param_groups[0]["lr"],
                     "grad_norm": grad_norm,
+                    "global_batch_size": global_batch_size,
+                    "samples_per_second": global_batch_size / max(time.monotonic() - last_update_time, 1e-9),
                     "gpu_peak_bytes": torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0,
                 }
+                last_update_time = time.monotonic()
                 last_record = record
                 if log_file:
                     log_file.write(json.dumps(record) + "\n")
                     log_file.flush()
                 if writer:
                     write_tensorboard_scalars(writer, record, sum(p.numel() for p in trainable), cpu_threads)
-                if hasattr(progress, "set_postfix"):
+                if progress is not None:
+                    progress.update(1)
                     progress.set_postfix(loss=f"{record['loss/total']:.4f}", grad=f"{grad_norm:.3f}")
                 if max_steps == 1:
                     tqdm.write(json.dumps({"event": "training_step", **record}))
 
             # Validation evaluation
-            if val_samples and config.eval_every_steps > 0 and ((step + 1) % config.eval_every_steps == 0 or step + 1 == max_steps):
+            if val_samples and config.eval_every_steps > 0 and (optimizer_step % config.eval_every_steps == 0 or optimizer_step == max_steps):
                 accelerator.wait_for_everyone()
                 val_metrics = evaluate_validation(config, runtime, val_samples, accelerator)
                 accelerator.wait_for_everyone()
@@ -510,28 +660,41 @@ def run(
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         unwrapped = accelerator.unwrap_model(runtime.model)
-                        best_saved = save_best_adapter(run_dir, unwrapped, config, step + 1, val_loss)
-                        tqdm.write(json.dumps({"event": "new_best_val_loss", "step": step + 1, "val_loss": val_loss}))
+                        best_saved = save_best_adapter(
+                            run_dir, unwrapped, config, optimizer_step, val_loss, optimizer, scheduler,
+                            gradient_accumulation_steps=accum_steps, num_processes=accelerator.num_processes,
+                        )
+                        tqdm.write(json.dumps({"event": "new_best_val_loss", "step": optimizer_step, "val_loss": val_loss}))
 
             # Periodic saving & smoke reload verification
             save_interval = 1 if smoke else config.save_every_steps
-            if (step + 1) % save_interval == 0 or step + 1 == max_steps:
+            if optimizer_step % save_interval == 0 or optimizer_step == max_steps:
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
                     unwrapped = accelerator.unwrap_model(runtime.model)
-                    saved = save_adapter(run_dir, unwrapped, config, step + 1)
+                    saved = save_adapter(
+                        run_dir, unwrapped, config, optimizer_step, optimizer, scheduler,
+                        gradient_accumulation_steps=accum_steps, num_processes=accelerator.num_processes,
+                    )
                     if smoke:
-                        reload_loss = verify_reloaded_adapter(config, train_samples[step % len(train_samples)], saved)
+                        reload_loss = verify_reloaded_adapter(config, train_samples[micro_step % len(train_samples)], saved)
                         if abs(reload_loss - record["loss/total"]) > 0.05:
                             raise RuntimeError(f"reloaded adapter loss drifted: {reload_loss} vs {record['loss/total']}")
-                        reload_checks.append({"step": step + 1, "loss": reload_loss})
+                        reload_checks.append({"step": optimizer_step, "loss": reload_loss})
                 accelerator.wait_for_everyone()
 
         if log_file:
             log_file.close()
+        if progress is not None:
+            progress.close()
     finally:
         if writer:
             writer.close()
+
+    if run_dir is not None:
+        rank_peak = torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0
+        write_rank_info(run_dir, accelerator.process_index, accelerator.num_processes, device, len(train_samples), rank_peak)
+    accelerator.wait_for_everyone()
 
     if accelerator.is_main_process and run_dir is not None:
         peak = torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0

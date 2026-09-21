@@ -6,6 +6,18 @@ from personaplex_finetuning.config import load_config
 
 
 class ConfigTest(unittest.TestCase):
+    def test_full_server_hydra_preset_preserves_production_settings(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        loaded = load_config(
+            root / "configs" / "config.yaml",
+            overrides=["data=otospeech", "model=server", "train=full"],
+        )
+
+        self.assertEqual(loaded.max_steps, 10_000)
+        self.assertEqual(loaded.gradient_accumulation_steps, 8)
+        self.assertTrue(loaded.gradient_checkpointing)
+        self.assertEqual(loaded.prompt_aug_prob, 0.3)
+
     def test_resolves_prepared_directory_and_derives_local_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -79,4 +91,3 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(loaded.max_steps, 500)
             self.assertTrue(loaded.gradient_checkpointing)
             self.assertEqual(loaded.mixed_precision, "bf16")
-
