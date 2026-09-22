@@ -11,6 +11,7 @@ from unittest.mock import patch
 import numpy as np
 
 from personaplex_finetuning import inference
+from tools import inference_smoke
 from tools.inference_smoke import select_inference_window
 
 
@@ -147,3 +148,28 @@ class InferenceWindowSelectionTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "non-negative"):
             select_inference_window(sample, start=-0.1, window_seconds=30.0)
+
+
+class InferenceCliTest(unittest.TestCase):
+    def test_input_path_alias_is_forwarded_as_the_external_input(self):
+        sample = SimpleNamespace(
+            sample_id="sample-0",
+            window_start_sec=0.0,
+            window_end_sec=30.0,
+            audio=SimpleNamespace(duration_sec=30.0),
+        )
+        with patch.object(sys, "argv", [
+            "inference_smoke.py",
+            "--config", "config.yaml",
+            "--adapter", "adapter.safetensors",
+            "--input-path", "external.wav",
+        ]), patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
+            manifest="manifest.jsonl", window_seconds=30.0,
+        )), patch.object(inference_smoke, "PreparedDataset", return_value=SimpleNamespace(
+            load=lambda: [sample],
+        )), patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+            self.assertEqual(inference_smoke.main(), 0)
+
+        self.assertEqual(smoke.call_args.kwargs["input_file"], Path("external.wav").resolve())
+        self.assertIsInstance(smoke.call_args.kwargs["adapter"], Path)
+        self.assertIsInstance(smoke.call_args.kwargs["output_dir"], Path)

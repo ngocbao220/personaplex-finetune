@@ -42,7 +42,9 @@ def main() -> int:
         help="Start time in seconds for one exact data.window_seconds inference window.",
     )
     parser.add_argument(
+        "--input-path",
         "--input-file",
+        dest="input_file",
         type=Path,
         default=None,
         help="Optional WAV/MP3 input used instead of the sample conversation audio.",
@@ -59,9 +61,9 @@ def main() -> int:
     smoke(
         config=config,
         sample=sample,
-        adapter=args.adapter,
-        output_dir=args.output_dir,
-        input_file=args.input_file,
+        adapter=Path(args.adapter).resolve(),
+        output_dir=Path(args.output_dir).resolve(),
+        input_file=args.input_file.resolve() if args.input_file is not None else None,
     )
     return 0
 
