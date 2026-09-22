@@ -33,7 +33,9 @@ def generate(config: Config, sample: PreparedSample, output_wav: Path, output_te
     user = torch.tensor(user_codes, device=config.device).unsqueeze(0)
     pcm_frames: list[np.ndarray] = []
     text_tokens: list[str] = []
-    with torch.no_grad(), generator.streaming(1):
+    # Mimi's decoder is causal/streaming: resetting it for every 80 ms frame
+    # inserts boundary transients that sound like clicks and clipped syllables.
+    with torch.no_grad(), runtime.codec.mimi.streaming(1), generator.streaming(1):
         generator.step_system_prompts(runtime.codec.mimi)
         for frame in range(user.shape[-1]):
             tokens = generator.step(input_tokens=user[:, :, frame : frame + 1])

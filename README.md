@@ -430,6 +430,7 @@ python -m tools.inference_smoke \
   --config configs/test_overfit.yaml \
   --adapter runs/hf_overfit_10/checkpoints/checkpoint_000300/lora.safetensors \
   --index 0 \
+  --start 42.5 \
   --output-dir outputs/smoke
 ```
 
@@ -437,6 +438,7 @@ python -m tools.inference_smoke \
 - `--config` **[Required]**: File cấu hình chứa đường dẫn base checkpoint (`model.root`) và source code PersonaPlex.
 - `--adapter` **[Required]**: Đường dẫn tới file trọng số LoRA đã huấn luyện (`lora.safetensors` hoặc thư mục checkpoint).
 - `--index` **[Optional]**: Index của mẫu hội thoại trong dataset dùng làm ngữ cảnh giọng nói, prompt và input user (mặc định: `0`).
+- `--start` **[Optional]**: Mốc thời gian theo giây trong `conversation.wav`. Khi đặt, inference dùng đúng một cửa sổ `data.window_seconds` (thường 30 giây) từ mốc này; chọn đoạn có user speech để tránh input im lặng. Lệnh sẽ từ chối cửa sổ vượt cuối audio.
 - `--output-dir` **[Optional]**: Thư mục lưu kết quả sinh (mặc định: `outputs/smoke`).
 
 ---
