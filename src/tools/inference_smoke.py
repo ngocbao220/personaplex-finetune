@@ -1,3 +1,12 @@
+"""
+python -m your_package.smoke \
+    --adapter outputs/checkpoint/adapter.pt \
+    --input-file ./test.mp3 \
+    --voice-prompt voice.wav
+    --text-prompt ""
+
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -32,6 +41,12 @@ def main() -> int:
         "--start", type=float, default=None,
         help="Start time in seconds for one exact data.window_seconds inference window.",
     )
+    parser.add_argument(
+        "--input-file",
+        type=Path,
+        default=None,
+        help="Optional WAV/MP3 input used instead of the sample conversation audio.",
+    )
     parser.add_argument("--output-dir", default="outputs/smoke")
     args = parser.parse_args()
     config = load_config(args.config)
@@ -41,7 +56,13 @@ def main() -> int:
         f"Inference sample {sample.sample_id}: "
         f"window {sample.window_start_sec:.3f}-{sample.window_end_sec:.3f} seconds"
     )
-    smoke(config, sample, Path(args.adapter).resolve(), Path(args.output_dir).resolve())
+    smoke(
+        config=config,
+        sample=sample,
+        adapter=args.adapter,
+        output_dir=args.output_dir,
+        input_file=args.input_file,
+    )
     return 0
 
 
