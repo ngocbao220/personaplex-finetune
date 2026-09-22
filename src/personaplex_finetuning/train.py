@@ -18,7 +18,7 @@ from safetensors.torch import save_file
 from tqdm.auto import tqdm
 
 from .config import Config, load_config
-from .data import PreparedDataset
+from .data import PreparedDataset, contiguous_chunks, sample_for_training_position
 from .lora import adapter_state_dict, inject_lora, load_adapter
 from .objective import stream_weights_torch, torch_weighted_cross_entropy
 from .runtime import RuntimePaths, load_runtime
@@ -404,6 +404,14 @@ def run(
         train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
         val_samples = []
 
+    if config.static_chunking:
+        train_samples = contiguous_chunks(train_samples, config.window_seconds)
+        val_samples = contiguous_chunks(val_samples, config.window_seconds) if val_samples else []
+        if config.swap_roles_after_pass and not smoke:
+            # Fail before model loading, rather than halfway through the first right-speaker pass.
+            for sample in train_samples:
+                sample.swapped_roles()
+
     # Run directory creation (coordinated across ranks)
     run_dir = None
     if accelerator.is_main_process:
@@ -433,10 +441,13 @@ def run(
             "save_every_steps": config.save_every_steps,
             "random_crop": config.random_crop,
             "prompt_aug_prob": config.prompt_aug_prob,
+            "static_chunking": config.static_chunking,
+            "swap_roles_after_pass": config.swap_roles_after_pass,
             "gradient_checkpointing": config.gradient_checkpointing,
             "mixed_precision": config.mixed_precision,
             "num_train_samples": len(train_samples),
             "num_val_samples": len(val_samples),
+            "num_train_role_views": len(train_samples) * (2 if config.swap_roles_after_pass else 1),
         }
         (run_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(config_record))
@@ -578,10 +589,6 @@ def run(
     reload_checks: list[dict[str, float | int]] = []
     started = time.monotonic()
 
-    shuffled_indices = list(range(len(train_samples)))
-    if config.shuffle and not smoke:
-        random.Random(config.seed).shuffle(shuffled_indices)
-
     try:
         start_micro_step = start_step * accum_steps
         max_micro_steps = max_steps * accum_steps
@@ -589,16 +596,25 @@ def run(
         last_update_time = time.monotonic()
 
         for micro_step in range(start_micro_step, max_micro_steps):
-            global_sample_idx = sample_index_for_rank(
-                micro_step, accelerator.process_index, accelerator.num_processes, len(train_samples)
-            )
-            sample_idx = global_sample_idx if not config.shuffle else shuffled_indices[global_sample_idx % len(shuffled_indices)]
-            current_sample = train_samples[sample_idx]
+            global_position = micro_step * accelerator.num_processes + accelerator.process_index
+            if config.static_chunking:
+                current_sample = sample_for_training_position(
+                    train_samples,
+                    global_position,
+                    seed=config.seed,
+                    shuffle=config.shuffle and not smoke,
+                    swap_roles=config.swap_roles_after_pass and not smoke,
+                )
+            else:
+                sample_idx = sample_index_for_rank(
+                    micro_step, accelerator.process_index, accelerator.num_processes, len(train_samples)
+                )
+                current_sample = train_samples[sample_idx]
             example = build_example(
                 config,
                 current_sample,
                 runtime,
-                random_crop=config.random_crop and not smoke,
+                random_crop=config.random_crop and not config.static_chunking and not smoke,
                 rng=deterministic_crop_rng(config.seed, accelerator.process_index, micro_step),
             )
             codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)

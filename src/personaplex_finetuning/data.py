@@ -49,6 +49,8 @@ class PreparedSample:
     window_end_sec: float
     agent_channel: int = 0
     user_channel: int = 1
+    voice_prompt_right_wav: Path | None = None
+    text_prompt_right: str | None = None
 
     def with_window(self, start_sec: float, end_sec: float, text_prompt: str | None = None) -> PreparedSample:
         return dataclasses.replace(
@@ -56,6 +58,29 @@ class PreparedSample:
             window_start_sec=start_sec,
             window_end_sec=end_sec,
             text_prompt=self.text_prompt if text_prompt is None else text_prompt,
+        )
+
+    def swapped_roles(self) -> PreparedSample:
+        """Use the original right speaker as the logical PersonaPlex agent."""
+        if self.voice_prompt_right_wav is None:
+            raise ValidationError(
+                f"{self.sample_id}: role-swapped training requires voice_prompt_right.wav"
+            )
+        if not self.text_prompt_right:
+            raise ValidationError(
+                f"{self.sample_id}: role-swapped training requires metadata.text_prompt_right"
+            )
+        swapped_words = tuple(
+            Word("user" if word.speaker == "agent" else "agent", word.word, word.start, word.end)
+            for word in self.words
+        )
+        return dataclasses.replace(
+            self,
+            voice_prompt_wav=self.voice_prompt_right_wav,
+            text_prompt=self.text_prompt_right,
+            words=swapped_words,
+            agent_channel=self.user_channel,
+            user_channel=self.agent_channel,
         )
 
     def sample_window(self, window_seconds: float, random_crop: bool = False, rng=None) -> tuple[float, float]:
@@ -130,6 +155,38 @@ class PreparedSample:
         return self.with_window(start, end, prompt)
 
 
+def contiguous_chunks(samples: list[PreparedSample], window_seconds: float) -> list[PreparedSample]:
+    """Split conversations into fixed consecutive windows, padding the final window at encode time."""
+    if window_seconds <= 0:
+        raise ValueError("window_seconds must be positive")
+    chunks: list[PreparedSample] = []
+    for sample in samples:
+        start = 0.0
+        while start < sample.audio.duration_sec:
+            chunks.append(sample.with_window(start, start + window_seconds))
+            start += window_seconds
+    if not chunks:
+        raise ValidationError("no contiguous chunks were created")
+    return chunks
+
+
+def sample_for_training_position(
+    chunks: list[PreparedSample], position: int, seed: int, shuffle: bool, swap_roles: bool
+) -> PreparedSample:
+    """Return one chunk from a deterministic role pass; the second pass swaps speakers."""
+    if not chunks or position < 0:
+        raise ValueError("chunks must be non-empty and position must be non-negative")
+    import random
+
+    chunk_count = len(chunks)
+    pass_index, index_within_pass = divmod(position, chunk_count)
+    indices = list(range(chunk_count))
+    if shuffle:
+        random.Random(seed + pass_index).shuffle(indices)
+    sample = chunks[indices[index_within_pass]]
+    return sample.swapped_roles() if swap_roles and pass_index % 2 else sample
+
+
 def read_wav_info(path: Path) -> AudioInfo:
     try:
         with wave.open(str(path), "rb") as wav:
@@ -198,6 +255,7 @@ class PreparedDataset:
             raise ValidationError(f"{sample_id}: sample_dir must stay within the prepared directory") from exc
         conversation = root / "conversation.wav"
         voice_prompt = root / "voice_prompt.wav"
+        voice_prompt_right = root / "voice_prompt_right.wav"
         words_path = root / "words.json"
         metadata_path = root / "metadata.json"
         for path in (conversation, voice_prompt, words_path, metadata_path):
@@ -233,6 +291,8 @@ class PreparedDataset:
             audio=audio,
             window_start_sec=start,
             window_end_sec=end,
+            voice_prompt_right_wav=voice_prompt_right if voice_prompt_right.is_file() else None,
+            text_prompt_right=str(metadata.get("text_prompt_right", "")).strip() or None,
         )
 
     @staticmethod

@@ -16,7 +16,9 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(loaded.max_steps, 10_000)
         self.assertEqual(loaded.gradient_accumulation_steps, 8)
         self.assertTrue(loaded.gradient_checkpointing)
-        self.assertEqual(loaded.prompt_aug_prob, 0.3)
+        self.assertEqual(loaded.prompt_aug_prob, 0.0)
+        self.assertTrue(loaded.static_chunking)
+        self.assertTrue(loaded.swap_roles_after_pass)
 
     def test_resolves_prepared_directory_and_derives_local_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -46,6 +48,20 @@ class ConfigTest(unittest.TestCase):
 
             self.assertTrue(loaded.qlora)
             self.assertEqual(loaded.quant_type, "nf4")
+
+    def test_reads_static_chunking_and_role_swap_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "static_chunks.yaml"
+            config.write_text(
+                '{"model": {"root": "/models/personaplex", "source": "/source"}, '
+                '"data": {"prepared_dir": "/prepared", "static_chunking": true, '
+                '"swap_roles_after_pass": true}}'
+            )
+
+            loaded = load_config(config)
+
+            self.assertTrue(loaded.static_chunking)
+            self.assertTrue(loaded.swap_roles_after_pass)
 
     def test_resolves_paths_relative_to_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -36,6 +36,8 @@ class Config:
     val_ratio: float = 0.05
     random_crop: bool = False
     prompt_aug_prob: float = 0.0
+    static_chunking: bool = False
+    swap_roles_after_pass: bool = False
     val_manifest_path: Path | None = None
     gradient_checkpointing: bool = False
     mixed_precision: str = "bf16"
@@ -189,6 +191,8 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         val_ratio=float(data.get("val_ratio", 0.05)),
         random_crop=bool(data.get("random_crop", False)),
         prompt_aug_prob=float(data.get("prompt_aug_prob", 0.0)),
+        static_chunking=bool(data.get("static_chunking", False)),
+        swap_roles_after_pass=bool(data.get("swap_roles_after_pass", False)),
         val_manifest_path=val_manifest_path,
         gradient_checkpointing=bool(train.get("gradient_checkpointing", False)) if isinstance(train, dict) else False,
         mixed_precision=str(train.get("mixed_precision", "bf16")) if isinstance(train, dict) else "bf16",

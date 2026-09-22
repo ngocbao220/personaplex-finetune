@@ -8,6 +8,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _pad_audio_window(audio, sample_rate: int, duration_sec: float):
+    """Match the fixed final-chunk padding performed by the reference dataset loader."""
+    import numpy as np
+
+    expected_samples = round(sample_rate * duration_sec)
+    if audio.shape[-1] >= expected_samples:
+        return audio[..., :expected_samples]
+    return np.pad(audio, [(0, 0)] * (audio.ndim - 1) + [(0, expected_samples - audio.shape[-1])])
+
+
 @dataclass(frozen=True)
 class ResolvedRuntimePaths:
     source: Path
@@ -80,6 +90,7 @@ class MimiCodec:
         duration_sec = end_sec - start_sec
         # Windowed seek + direct resample in C++ (avoids decoding entire 30m file)
         audio, _ = sphn.read(str(path), start_sec=start_sec, duration_sec=duration_sec, sample_rate=self.sample_rate)
+        audio = _pad_audio_window(audio, self.sample_rate, duration_sec)
         if agent_channel not in (0, 1) or user_channel not in (0, 1):
             raise ValueError(f"invalid channels {agent_channel}, {user_channel} for {path}")
         agent_audio = audio[agent_channel : agent_channel + 1]
@@ -119,6 +130,7 @@ class MimiCodec:
         import torch
         duration_sec = end_sec - start_sec
         audio, _ = sphn.read(str(path), start_sec=start_sec, duration_sec=duration_sec, sample_rate=self.sample_rate)
+        audio = _pad_audio_window(audio, self.sample_rate, duration_sec)
         if channel not in (0, 1):
             raise ValueError(f"invalid conversation window {start_sec}:{end_sec} for {path}")
         return self._encode(audio[channel : channel + 1], torch)

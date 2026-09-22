@@ -281,6 +281,10 @@ bash scripts/train_gpus.sh \
 - Các preset `data=...`, `model=...`, `train=...` hoặc tham số override khác được chuyển trực tiếp vào chương trình.
 - `train.max_steps` là số optimizer updates; log `global_batch_size` và `samples_per_second` dùng để so sánh throughput.
 
+Preset `otospeech` và `vietnamese` chia mỗi hội thoại thành các cửa sổ liên tiếp 30 giây (chunk cuối được zero-pad), rồi shuffle chunk trong mỗi pass. Sau một pass đầy đủ với speaker LEFT là logical agent, pass kế tiếp dùng speaker RIGHT là logical agent; do đó có hai role views cho mỗi chunk.
+
+Mỗi thư mục mẫu phải có `voice_prompt_right.wav` và `metadata.text_prompt_right` trước khi bật training role-swapped. Hai prompt này là persona của speaker RIGHT; training fail-fast trước khi load model nếu thiếu một trong hai. Không dùng lại voice/text prompt của LEFT cho speaker RIGHT.
+
 Để tiếp tục một run bị gián đoạn, giữ nguyên topology DDP và accumulation:
 
 ```bash
