@@ -283,7 +283,7 @@ bash scripts/train_gpus.sh \
 
 Preset `otospeech` và `vietnamese` chia mỗi hội thoại thành các cửa sổ liên tiếp 30 giây (chunk cuối được zero-pad), rồi shuffle chunk trong mỗi pass. Sau một pass đầy đủ với speaker LEFT là logical agent, pass kế tiếp dùng speaker RIGHT là logical agent; do đó có hai role views cho mỗi chunk.
 
-Mỗi thư mục mẫu phải có `voice_prompt_right.wav` và `metadata.text_prompt_right` trước khi bật training role-swapped. Hai prompt này là persona của speaker RIGHT; training fail-fast trước khi load model nếu thiếu một trong hai. Không dùng lại voice/text prompt của LEFT cho speaker RIGHT.
+Mỗi thư mục mẫu phải có `voice_prompt_left.wav`, `voice_prompt_right.wav`, `metadata.text_prompt_left`, và `metadata.text_prompt_right`. Hai cặp prompt là persona tương ứng của LEFT và RIGHT; training fail-fast trước khi load model nếu thiếu một trường. Không dùng lại voice/text prompt giữa hai speaker.
 
 Để tiếp tục một run bị gián đoạn, giữ nguyên topology DDP và accumulation:
 
@@ -360,7 +360,7 @@ python -m tools.interactive_cli \
 python -m tools.interactive_cli \
   --model-root ../models \
   --adapter ../runs/hf_overfit_10/checkpoints/checkpoint_000300 \
-  --voice-prompt ../prepared/samples/conv_0001/voice_prompt.wav \
+  --voice-prompt ../prepared/samples/conv_0001/voice_prompt_left.wav \
   --text-prompt "You enjoy having a good conversation. You are a helpful and friendly assistant." \
   --device cuda \
   --save-session-dir outputs/live_session
@@ -410,7 +410,7 @@ python -m tools.interactive_web \
 - `--config` **[Optional]**: File cấu hình YAML/JSON chứa các thiết lập `model`, `adapter`, `prompt`, `server` (ví dụ: `configs/demo.yaml`).
 - `--model-root` **[Required nếu không có config]**: Thư mục chứa base model checkpoint cục bộ (`model.safetensors`, `tokenizer-*.safetensors`, `tokenizer_spm_32k_3.model`).
 - `--adapter` **[Optional]**: Đường dẫn checkpoint LoRA (`lora.safetensors` hoặc thư mục checkpoint). Nếu bỏ trống, web UI sẽ chạy base model gốc.
-- `--voice-prompt` **[Optional]**: File WAV/PT giọng mẫu mặc định. Giao diện cũng tự động quét tất cả các file `voice_prompt.wav` trong `prepared/samples/` để đưa vào dropdown.
+- `--voice-prompt` **[Optional]**: File WAV/PT giọng mẫu mặc định. Giao diện tự động quét `voice_prompt_left.wav` và `voice_prompt_right.wav` trong `prepared/samples/` để đưa vào dropdown.
 - `--text-prompt` **[Optional]**: Prompt vai trò hệ thống mặc định.
 - `--device` **[Optional]**: Thiết bị chạy (`cuda` hoặc `cpu`, mặc định: `cuda`).
 - `--qlora` **[Optional]**: Bật lượng tử hóa 4-bit NF4 để giảm VRAM khi chạy trên GPU yếu.

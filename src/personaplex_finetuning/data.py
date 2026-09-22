@@ -254,7 +254,7 @@ class PreparedDataset:
         except ValueError as exc:
             raise ValidationError(f"{sample_id}: sample_dir must stay within the prepared directory") from exc
         conversation = root / "conversation.wav"
-        voice_prompt = root / "voice_prompt.wav"
+        voice_prompt = root / "voice_prompt_left.wav"
         voice_prompt_right = root / "voice_prompt_right.wav"
         words_path = root / "words.json"
         metadata_path = root / "metadata.json"
@@ -266,15 +266,15 @@ class PreparedDataset:
             raise ValidationError(f"{sample_id}: conversation.wav must have exactly 2 channels")
         prompt_audio = read_wav_info(voice_prompt)
         if prompt_audio.duration_sec <= 0:
-            raise ValidationError(f"{sample_id}: voice_prompt.wav is empty")
+            raise ValidationError(f"{sample_id}: voice_prompt_left.wav is empty")
         metadata = self._read_object(metadata_path, sample_id)
         if metadata.get("agent_channel", "left").lower() != "left":
             raise ValidationError(f"{sample_id}: agent_channel must be left")
         if metadata.get("user_channel", "right").lower() != "right":
             raise ValidationError(f"{sample_id}: user_channel must be right")
-        text_prompt = str(metadata.get("text_prompt", "")).strip()
+        text_prompt = str(metadata.get("text_prompt_left", "")).strip()
         if not text_prompt:
-            raise ValidationError(f"{sample_id}: metadata.text_prompt is required")
+            raise ValidationError(f"{sample_id}: metadata.text_prompt_left is required")
         words = self._read_words(words_path, sample_id, audio.duration_sec)
         agent_words = [word for word in words if word.speaker == "agent"]
         if not agent_words:

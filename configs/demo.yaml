@@ -18,7 +18,7 @@ adapter:
 
 # Hybrid System Prompt conditioning
 prompt:
-  voice_prompt: ../prepared/samples/conv_0001/voice_prompt.wav  # File WAV hoặc .pt mẫu giọng nói của agent
+  voice_prompt: ../prepared/samples/conv_0001/voice_prompt_left.wav  # File WAV hoặc .pt mẫu giọng nói của agent
   text_prompt: "You enjoy having a good conversation. You are a helpful and friendly assistant."  # Role/system text prompt
 
 # Generation sampling hyperparameters
@@ -40,4 +40,3 @@ server:
   host: 0.0.0.0                            # Địa chỉ interface mạng server bind (0.0.0.0 để mở cho mọi kết nối)
   port: 8998                               # Cổng chạy Web UI
   share: true                              # Tự động tạo link công khai tạm thời (gradio.live) để truy cập từ xa
-

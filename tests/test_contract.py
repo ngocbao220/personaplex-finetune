@@ -28,13 +28,13 @@ class PreparedDatasetTest(unittest.TestCase):
             sample_dir = root / "samples" / "conv_0001"
             sample_dir.mkdir(parents=True)
             write_stereo_wav(sample_dir / "conversation.wav", frames=24000 * 90)
-            write_stereo_wav(sample_dir / "voice_prompt.wav", frames=24000 * 6)
+            write_stereo_wav(sample_dir / "voice_prompt_left.wav", frames=24000 * 6)
             (sample_dir / "metadata.json").write_text(
                 json.dumps({
                     "sample_id": "conv_0001",
                     "agent_channel": "left",
                     "user_channel": "right",
-                    "text_prompt": "Be helpful.",
+                    "text_prompt_left": "Be helpful.",
                 })
             )
             (sample_dir / "words.json").write_text(json.dumps([
@@ -62,8 +62,8 @@ class PreparedDatasetTest(unittest.TestCase):
                 output.setsampwidth(2)
                 output.setframerate(24000)
                 output.writeframes(b"\0\0" * 24000)
-            write_stereo_wav(sample_dir / "voice_prompt.wav")
-            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt": "x"}))
+            write_stereo_wav(sample_dir / "voice_prompt_left.wav")
+            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt_left": "x"}))
             (sample_dir / "words.json").write_text(json.dumps([
                 {"speaker": "agent", "word": "Hi", "start": 0.0, "end": 0.2},
             ]))
@@ -90,8 +90,8 @@ class PreparedDatasetTest(unittest.TestCase):
             sample_dir = root / "samples" / "conv_0001"
             sample_dir.mkdir(parents=True)
             write_stereo_wav(sample_dir / "conversation.wav", frames=24000 * 95)
-            write_stereo_wav(sample_dir / "voice_prompt.wav", frames=24000)
-            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt": "x"}))
+            write_stereo_wav(sample_dir / "voice_prompt_left.wav", frames=24000)
+            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt_left": "x"}))
             (sample_dir / "words.json").write_text(json.dumps([
                 {"speaker": "agent", "word": "Hi", "start": 0.0, "end": 0.2},
             ]))
@@ -109,10 +109,10 @@ class PreparedDatasetTest(unittest.TestCase):
             sample_dir = root / "samples" / "conv_0001"
             sample_dir.mkdir(parents=True)
             write_stereo_wav(sample_dir / "conversation.wav", frames=24000 * 60)
-            write_stereo_wav(sample_dir / "voice_prompt.wav", frames=24000)
+            write_stereo_wav(sample_dir / "voice_prompt_left.wav", frames=24000)
             write_stereo_wav(sample_dir / "voice_prompt_right.wav", frames=24000)
             (sample_dir / "metadata.json").write_text(json.dumps({
-                "text_prompt": "left persona", "text_prompt_right": "right persona",
+                "text_prompt_left": "left persona", "text_prompt_right": "right persona",
             }))
             (sample_dir / "words.json").write_text(json.dumps([
                 {"speaker": "agent", "word": "Left", "start": 1.0, "end": 1.2},
@@ -134,8 +134,8 @@ class PreparedDatasetTest(unittest.TestCase):
             sample_dir = root / "samples" / "conv_0001"
             sample_dir.mkdir(parents=True)
             write_stereo_wav(sample_dir / "conversation.wav", frames=24000 * 30)
-            write_stereo_wav(sample_dir / "voice_prompt.wav", frames=24000)
-            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt": "x"}))
+            write_stereo_wav(sample_dir / "voice_prompt_left.wav", frames=24000)
+            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt_left": "x"}))
             (sample_dir / "words.json").write_text(json.dumps([
                 {"speaker": "agent", "word": "Hi", "start": 0.0, "end": 0.2},
             ]))
@@ -152,9 +152,9 @@ class PreparedDatasetTest(unittest.TestCase):
             sample_dir = root / "samples" / "conv_0001"
             sample_dir.mkdir(parents=True)
             write_stereo_wav(sample_dir / "conversation.wav", frames=24000 * 30)
-            write_stereo_wav(sample_dir / "voice_prompt.wav", frames=24000)
+            write_stereo_wav(sample_dir / "voice_prompt_left.wav", frames=24000)
             write_stereo_wav(sample_dir / "voice_prompt_right.wav", frames=24000)
-            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt": "left persona"}))
+            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt_left": "left persona"}))
             (sample_dir / "words.json").write_text(json.dumps([
                 {"speaker": "agent", "word": "Hi", "start": 0.0, "end": 0.2},
             ]))

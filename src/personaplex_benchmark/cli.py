@@ -18,7 +18,7 @@ def run_benchmark_cli(args: list[str] | None = None) -> int:
     parser.add_argument("--model_name", type=str, default="PersonaPlex Base", help="Display name of the model.")
     parser.add_argument("--fdb_dir", type=Path, default=Path("benchmarks/datasets/fdb_v1/v1.0/extracted"), help="Path to extracted official Full-Duplex-Bench v1.0 directory.")
     parser.add_argument("--prepared_dir", type=Path, default=None, help="Optional path to prepared conversation samples.")
-    parser.add_argument("--voice_prompt", type=Path, default=Path("prepared/samples/conv_0001/voice_prompt.wav"), help="Default voice prompt audio.")
+    parser.add_argument("--voice_prompt", type=Path, default=Path("prepared/samples/conv_0001/voice_prompt_left.wav"), help="Default voice prompt audio.")
     parser.add_argument("--gt_dist", type=Path, default=Path("benchmarks/datasets/fdb_v1/icc_gt_distribution.json"), help="Path to ICC ground-truth distribution.")
     parser.add_argument("--output_dir", type=Path, default=Path("benchmarks/results"), help="Directory to save benchmark reports.")
     parser.add_argument("--max_samples_per_task", type=int, default=10, help="Maximum samples to evaluate per task.")

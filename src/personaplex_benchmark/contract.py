@@ -43,7 +43,7 @@ def extract_samples_from_prepared_dir(
     words_file = sample_dir / "words.json"
     meta_file = sample_dir / "metadata.json"
     conv_wav = sample_dir / "conversation.wav"
-    voice_wav = sample_dir / "voice_prompt.wav"
+    voice_wav = sample_dir / "voice_prompt_left.wav"
 
     if not (words_file.is_file() and conv_wav.is_file()):
         return []
@@ -54,7 +54,7 @@ def extract_samples_from_prepared_dir(
 
     sample_id = meta.get("sample_id", sample_dir.name)
     user_channel = 1 if meta.get("user_channel", "right").lower() == "right" else 0
-    text_prompt = meta.get("text_prompt", "You are a helpful and natural conversational AI.")
+    text_prompt = meta.get("text_prompt_left", "You are a helpful and natural conversational AI.")
 
     raw_words = json.loads(words_file.read_text(encoding="utf-8"))
     user_words = [w for w in raw_words if w.get("speaker") == "user"]

@@ -17,11 +17,11 @@ logger = logging.getLogger("interactive_web")
 
 
 def find_preset_voice_prompts(search_dir: Path) -> list[tuple[str, str]]:
-    """Scan search_dir for voice_prompt.wav files and return (label, path) pairs."""
+    """Scan search_dir for left/right prepared voice prompts."""
     prompts: list[tuple[str, str]] = []
     if not search_dir.is_dir():
         return prompts
-    for p in sorted(search_dir.rglob("*voice_prompt*.wav")):
+    for p in sorted(search_dir.rglob("voice_prompt_left.wav")) + sorted(search_dir.rglob("voice_prompt_right.wav")):
         label = f"{p.parent.name} ({p.name})"
         prompts.append((label, str(p.resolve())))
     return prompts

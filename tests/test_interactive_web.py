@@ -13,11 +13,11 @@ class TestInteractiveWeb(unittest.TestCase):
             base = Path(tmpdir)
             conv1 = base / "conv_0001"
             conv1.mkdir()
-            (conv1 / "voice_prompt.wav").write_bytes(b"dummy")
+            (conv1 / "voice_prompt_left.wav").write_bytes(b"dummy")
 
             conv2 = base / "conv_0002"
             conv2.mkdir()
-            (conv2 / "agent_voice_prompt.wav").write_bytes(b"dummy")
+            (conv2 / "voice_prompt_right.wav").write_bytes(b"dummy")
 
             # Non-prompt wav
             (conv2 / "stereo.wav").write_bytes(b"dummy")

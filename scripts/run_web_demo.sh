@@ -10,7 +10,7 @@
 #   bash scripts/run_web_demo.sh \
 #     --model-root ../models \
 #     --adapter ../runs/hf_overfit_10/checkpoints/checkpoint_000300 \
-#     --voice-prompt ../prepared/samples/conv_0001/voice_prompt.wav \
+#     --voice-prompt ../prepared/samples/conv_0001/voice_prompt_left.wav \
 #     --share
 #
 #   # Chạy cục bộ không mở share public:

@@ -23,8 +23,8 @@ def make_prepared(root: Path) -> Path:
     sample = root / "samples" / "conv_0001"
     sample.mkdir(parents=True)
     write_wav(sample / "conversation.wav")
-    write_wav(sample / "voice_prompt.wav")
-    (sample / "metadata.json").write_text(json.dumps({"text_prompt": "Helpful."}))
+    write_wav(sample / "voice_prompt_left.wav")
+    (sample / "metadata.json").write_text(json.dumps({"text_prompt_left": "Helpful."}))
     (sample / "words.json").write_text(json.dumps([
         {"speaker": "agent", "word": "Hello", "start": 0.0, "end": 0.2},
     ]))
