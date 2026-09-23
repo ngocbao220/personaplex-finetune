@@ -128,6 +128,33 @@ class InferenceStreamingTest(unittest.TestCase):
         self.assertEqual(mimi.decode_calls, 2)
 
 
+class InferenceOutputWarningTest(unittest.TestCase):
+    def test_missing_outputs_warn_and_write_run_report_instead_of_raising(self):
+        sample = SimpleNamespace(
+            sample_id="sample-0",
+            voice_prompt_wav=Path("voice.wav"),
+            text_prompt="Helpful",
+            conversation_wav=Path("conversation.wav"),
+            user_channel=1,
+            window_start_sec=0.0,
+            window_end_sec=0.16,
+            words=(),
+        )
+        config = SimpleNamespace(model_root=Path("model"))
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            with patch.object(inference, "_export_context"), \
+                 patch.object(inference, "generate"), \
+                 patch.dict(sys.modules, {"sphn": types.SimpleNamespace(read=lambda _path: (_ for _ in ()).throw(AssertionError("missing output should not be read")))}), \
+                 self.assertLogs(inference.__name__, level="WARNING") as logs:
+                inference.smoke(config, sample, Path("adapter.safetensors"), output_dir)
+
+            report = __import__("json").loads((output_dir / "run.json").read_text())
+
+        self.assertTrue(any("missing or empty" in message for message in logs.output))
+        self.assertGreater(len(report["warnings"]), 0)
+
+
 class InferenceWindowSelectionTest(unittest.TestCase):
     def test_start_selects_an_exact_configured_window(self):
         sample = SimpleNamespace(

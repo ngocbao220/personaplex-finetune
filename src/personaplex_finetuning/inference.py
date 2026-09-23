@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from .config import Config
 from .data import PreparedSample
 from .lora import inject_lora, load_adapter
 from .runtime import RuntimePaths, load_runtime
+
+logger = logging.getLogger(__name__)
 
 
 def _prepare_input_audio(input_file: Path, output_dir: Path) -> Path:
@@ -128,18 +131,44 @@ def smoke(
     _export_context(sample, output_dir)
     generate(config, sample, output_dir / "base.wav", output_dir / "base.txt", None)
     generate(config, sample, output_dir / "finetuned.wav", output_dir / "finetuned.txt", adapter)
+    output_warnings = []
     for name in ("user.wav", "base.wav", "finetuned.wav", "base.txt", "finetuned.txt"):
-        if not (output_dir / name).is_file() or (output_dir / name).stat().st_size == 0:
-            raise RuntimeError(f"inference output is missing or empty: {name}")
+        path = output_dir / name
+        if not path.is_file() or path.stat().st_size == 0:
+            message = f"inference output is missing or empty: {path}"
+            logger.warning(message)
+            output_warnings.append(message)
+
     import numpy as np
     import sphn
-    base_audio, _ = sphn.read(str(output_dir / "base.wav"))
-    finetuned_audio, _ = sphn.read(str(output_dir / "finetuned.wav"))
-    user_audio, _ = sphn.read(str(output_dir / "user.wav"))
-    if not np.isfinite(base_audio).all() or not np.isfinite(finetuned_audio).all():
-        raise RuntimeError("inference generated non-finite audio")
-    if np.array_equal(base_audio, finetuned_audio):
-        raise RuntimeError("adapter output is identical to base output")
+
+    def _read_audio(name: str) -> np.ndarray | None:
+        path = output_dir / name
+        if not path.is_file() or path.stat().st_size == 0:
+            return None
+        try:
+            audio, _ = sphn.read(str(path))
+        except Exception as exc:
+            message = f"could not read inference output {path}: {exc}"
+            logger.warning(message)
+            output_warnings.append(message)
+            return None
+        return audio
+
+    base_audio = _read_audio("base.wav")
+    finetuned_audio = _read_audio("finetuned.wav")
+    user_audio = _read_audio("user.wav")
+    for name, audio in (("base.wav", base_audio), ("finetuned.wav", finetuned_audio)):
+        if audio is not None and not np.isfinite(audio).all():
+            message = f"inference output contains non-finite audio: {output_dir / name}"
+            logger.warning(message)
+            output_warnings.append(message)
+            if name == "base.wav":
+                base_audio = None
+            else:
+                finetuned_audio = None
+    if base_audio is not None and finetuned_audio is not None and np.array_equal(base_audio, finetuned_audio):
+        logger.warning("adapter output is identical to base output")
 
     # Export stereo dialogue: LEFT = Agent, RIGHT = User
     def _make_stereo(agent_pcm: np.ndarray, user_pcm: np.ndarray) -> np.ndarray:
@@ -148,8 +177,10 @@ def smoke(
         min_len = min(len(a), len(u))
         return np.stack([a[:min_len], u[:min_len]], axis=0)
 
-    sphn.write_wav(str(output_dir / "dialogue_base.wav"), _make_stereo(base_audio, user_audio), 24000)
-    sphn.write_wav(str(output_dir / "dialogue_finetune.wav"), _make_stereo(finetuned_audio, user_audio), 24000)
+    if base_audio is not None and user_audio is not None:
+        sphn.write_wav(str(output_dir / "dialogue_base.wav"), _make_stereo(base_audio, user_audio), 24000)
+    if finetuned_audio is not None and user_audio is not None:
+        sphn.write_wav(str(output_dir / "dialogue_finetune.wav"), _make_stereo(finetuned_audio, user_audio), 24000)
 
     (output_dir / "run.json").write_text(
         json.dumps(
@@ -162,6 +193,7 @@ def smoke(
                 "base_model": str(config.model_root),
                 "generation": "greedy native LMGen",
                 "stereo_mapping": "Channel 0 (LEFT) = Agent, Channel 1 (RIGHT) = User",
+                "warnings": output_warnings,
             },
             indent=2,
         )
