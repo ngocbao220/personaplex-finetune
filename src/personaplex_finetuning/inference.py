@@ -49,14 +49,15 @@ def generate(config: Config, sample: PreparedSample, output_wav: Path, output_te
     lm_module = importlib.import_module("moshi.models.lm")
     generator = lm_module.LMGen(
         runtime.model, audio_silence_frame_cnt=6, sample_rate=runtime.codec.sample_rate,
-        frame_rate=runtime.codec.frame_rate, device=config.device, use_sampling=False,
+        frame_rate=runtime.codec.frame_rate, device=config.device, use_sampling=True,
+        temp=0.8, temp_text=0.7, top_k=250, top_k_text=25,
     )
     generator.load_voice_prompt(str(sample.voice_prompt_wav))
     generator.text_prompt_tokens = runtime.tokenizer.encode(f"<system> {sample.text_prompt.strip()} <system>")
     user_codes = runtime.codec.encode_conversation(sample.conversation_wav, sample.user_channel, sample.window_start_sec, sample.window_end_sec)
     user = torch.tensor(user_codes, device=config.device).unsqueeze(0)
     pcm_frames: list[np.ndarray] = []
-    text_tokens: list[str] = []
+    text_token_ids: list[int] = []
     # Mimi's decoder is causal/streaming: resetting it for every 80 ms frame
     # inserts boundary transients that sound like clicks and clipped syllables.
     with torch.no_grad(), runtime.codec.mimi.streaming(1), generator.streaming(1):
@@ -69,12 +70,14 @@ def generate(config: Config, sample: PreparedSample, output_wav: Path, output_te
             pcm_frames.append(decoded)
             token = int(tokens[0, 0, 0])
             if token not in (0, runtime.tokenizer.padding_id):
-                text_tokens.append(runtime.tokenizer._processor.id_to_piece(token).replace("▁", " "))
+                text_token_ids.append(token)
     if not pcm_frames:
         raise RuntimeError("native PersonaPlex generation produced no frames")
     output_wav.parent.mkdir(parents=True, exist_ok=True)
     sphn.write_wav(str(output_wav), np.concatenate(pcm_frames), runtime.codec.sample_rate)
-    output_text.write_text("".join(text_tokens), encoding="utf-8")
+    # SentencePiece decode_ids merges multi-byte tokens into clean Vietnamese text
+    cleaned_text = runtime.tokenizer._processor.decode_ids(text_token_ids)
+    output_text.write_text(cleaned_text, encoding="utf-8")
 
 
 def _export_context(sample: PreparedSample, output_dir: Path) -> None:
