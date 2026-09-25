@@ -445,6 +445,8 @@ python -m tools.inference_smoke \
 - `--start` **[Optional]**: Mốc thời gian theo giây trong `conversation.wav`. Khi đặt, inference dùng đúng một cửa sổ `data.window_seconds` (thường 30 giây) từ mốc này; chọn đoạn có user speech để tránh input im lặng. Lệnh sẽ từ chối cửa sổ vượt cuối audio.
 - `--output-dir` **[Optional]**: Thư mục lưu kết quả sinh (mặc định: `outputs/smoke`).
 
+Thư mục kết quả có `dialogue_original.wav` (hội thoại nguồn, cắt theo đúng cửa sổ inference; giữ nguyên thứ tự kênh), `user.wav`, audio/text do base model sinh và audio/text do adapter sinh. `finetuned.txt` có thể rỗng nếu lúc sinh tự do mô hình không phát token text hợp lệ; loss train giảm đo khả năng dự đoán target khi có ngữ cảnh teacher-forced, không đảm bảo đầu ra greedy lúc inference sẽ chép lại transcript train.
+
 ---
 
 ## 5. Giám Sát Quá Trình Huấn Luyện (TensorBoard)

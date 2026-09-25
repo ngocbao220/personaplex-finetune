@@ -87,6 +87,10 @@ def _export_context(sample: PreparedSample, output_dir: Path) -> None:
         audio = sphn.resample(audio, src_sample_rate=source_rate, dst_sample_rate=24000)
     start = int(sample.window_start_sec * 24000)
     end = int(sample.window_end_sec * 24000)
+    original_window = audio[..., start:end]
+    if original_window.size == 0:
+        raise ValueError(f"{sample.sample_id}: original dialogue window contains no audio")
+    sphn.write_wav(str(output_dir / "dialogue_original.wav"), original_window, 24000)
     user_audio = audio[sample.user_channel, start:end]
     sphn.write_wav(str(output_dir / "user.wav"), user_audio, 24000)
 
@@ -132,7 +136,7 @@ def smoke(
     generate(config, sample, output_dir / "base.wav", output_dir / "base.txt", None)
     generate(config, sample, output_dir / "finetuned.wav", output_dir / "finetuned.txt", adapter)
     output_warnings = []
-    for name in ("user.wav", "base.wav", "finetuned.wav", "base.txt", "finetuned.txt"):
+    for name in ("dialogue_original.wav", "user.wav", "base.wav", "finetuned.wav", "base.txt", "finetuned.txt"):
         path = output_dir / name
         if not path.is_file() or path.stat().st_size == 0:
             message = f"inference output is missing or empty: {path}"

@@ -155,6 +155,33 @@ class InferenceOutputWarningTest(unittest.TestCase):
         self.assertGreater(len(report["warnings"]), 0)
 
 
+class OriginalDialogueExportTest(unittest.TestCase):
+    def test_exports_original_window_with_original_channel_order(self):
+        original = np.array([[0, 1, 2, 3, 4, 5], [10, 11, 12, 13, 14, 15]], dtype=np.float32)
+        written = {}
+        fake_sphn = types.SimpleNamespace(
+            read=lambda _path: (original, 24000),
+            write_wav=lambda path, audio, sample_rate: written.update(
+                {Path(path).name: (np.array(audio), sample_rate)}
+            ),
+        )
+        sample = SimpleNamespace(
+            conversation_wav=Path("conversation.wav"),
+            user_channel=1,
+            window_start_sec=2 / 24000,
+            window_end_sec=5 / 24000,
+            words=(),
+            text_prompt="Prompt",
+            voice_prompt_wav=Path("missing.wav"),
+        )
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, {"sphn": fake_sphn}):
+            inference._export_context(sample, Path(directory))
+
+        self.assertIn("dialogue_original.wav", written)
+        np.testing.assert_array_equal(written["dialogue_original.wav"][0], original[:, 2:5])
+        self.assertEqual(written["dialogue_original.wav"][1], 24000)
+
+
 class InferenceWindowSelectionTest(unittest.TestCase):
     def test_start_selects_an_exact_configured_window(self):
         sample = SimpleNamespace(
