@@ -21,6 +21,11 @@ def find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def materialize_meta_module(module, device) -> None:
+    """Materialize only this module's meta parameters without calling reset_parameters."""
+    module.to_empty(device=device, recurse=False)
+
+
 def get_fsdp_policy(is_lora: bool):
     """Wrap transformer blocks and isolate trainable LoRA groups."""
     import torch.distributed.fsdp.wrap as wrap
@@ -55,6 +60,13 @@ def wrap_model_fsdp(model, strategy: str = "full_shard", *, device=None, param_i
 
     if not torch.distributed.is_initialized():
         raise RuntimeError("initialize torch.distributed before wrapping the model with FSDP")
+    if param_init_fn is None:
+        target_device = device or torch.cuda.current_device()
+
+        def param_init_fn(module):
+            # Moshi modules such as StreamingMultiheadAttention do not define
+            # reset_parameters(); materialize their meta tensors before FSDP sync.
+            materialize_meta_module(module, target_device)
     strategies = {
         "full_shard": ShardingStrategy.FULL_SHARD,
         "shard_grad_op": ShardingStrategy.SHARD_GRAD_OP,

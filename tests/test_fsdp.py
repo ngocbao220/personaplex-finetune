@@ -3,7 +3,7 @@
 import unittest
 import torch
 import torch.nn as nn
-from personaplex_finetuning.fsdp import parse_gpu_ids, get_fsdp_policy, fsdp_adapter_state_dict, find_free_port
+from personaplex_finetuning.fsdp import parse_gpu_ids, get_fsdp_policy, fsdp_adapter_state_dict, find_free_port, materialize_meta_module
 
 
 class DummyLayer(nn.Module):
@@ -25,6 +25,12 @@ class DummyModel(nn.Module):
         return self.layer2(self.layer1(x))
 
 
+class NoResetMetaModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(2, device="meta"))
+
+
 class TestFSDP(unittest.TestCase):
     def test_parse_gpu_ids(self):
         self.assertEqual(parse_gpu_ids("0,1"), [0, 1])
@@ -43,6 +49,14 @@ class TestFSDP(unittest.TestCase):
         policy = get_fsdp_policy(is_lora=True)
         self.assertTrue(callable(policy))
 
+    def test_meta_init_uses_to_empty_without_reset_parameters(self):
+        module = NoResetMetaModule()
+
+        materialize_meta_module(module, torch.device("cpu"))
+
+        self.assertFalse(module.weight.is_meta)
+        self.assertEqual(module.weight.device.type, "cpu")
+
     def test_fsdp_adapter_state_dict_unwrapped(self):
         model = DummyModel()
         state = fsdp_adapter_state_dict(model)
@@ -60,4 +74,3 @@ class TestFSDP(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

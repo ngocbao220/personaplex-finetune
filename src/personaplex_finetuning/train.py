@@ -540,7 +540,7 @@ def run(
     main_process = rank == 0
     def barrier():
         if use_fsdp:
-            torch.distributed.barrier()
+            torch.distributed.barrier(device_ids=[local_rank])
     def all_reduce_sum(value):
         if use_fsdp:
             torch.distributed.all_reduce(value, op=torch.distributed.ReduceOp.SUM)
@@ -639,7 +639,7 @@ def run(
     if run_dir is not None:
         write_rank_info(run_dir, rank, world_size, device, len(train_samples))
     if use_fsdp:
-        torch.distributed.barrier()
+        barrier()
 
     # Only rank zero materializes the base checkpoint; other ranks initialize
     # the identical architecture on meta tensors for FSDP synchronization.
@@ -743,7 +743,7 @@ def run(
         )
     if use_fsdp:
         runtime.model = wrap_model_fsdp(runtime.model, strategy="full_shard", device=device)
-        torch.distributed.barrier()
+        barrier()
 
     start_step = adapter_resume_step
     if resume_checkpoint_dir is not None:
