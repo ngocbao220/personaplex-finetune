@@ -19,7 +19,6 @@ dependencies = [
   "safetensors>=0.4",
   "scipy>=1.11",
   "sentencepiece==0.2",
-  "sounddevice==0.5",
   "sphn>=0.1.4,<0.2",
   "tensorboard>=2.17,<2.19",
   "pyloudnorm>=0.1.1",

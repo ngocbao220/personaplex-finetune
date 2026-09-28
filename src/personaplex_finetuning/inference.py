@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
+
+import numpy as np
 
 from .config import Config
 from .data import PreparedSample
@@ -13,6 +17,109 @@ from .lora import inject_lora, load_adapter
 from .runtime import RuntimePaths, load_runtime
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class GenerationSettings:
+    """Sampling settings forwarded to moshi's ``LMGen``.
+
+    The defaults mirror Moshi/PersonaPlex (``LMGen.__init__``) and are exactly what the
+    inference smoke test hard-coded before the ``generation:`` config block existed, so an
+    absent or partial block keeps the previous behaviour unchanged.
+    """
+
+    use_sampling: bool = True
+    temp: float = 0.8
+    temp_text: float = 0.7
+    top_k: int = 250
+    top_k_text: int = 25
+    audio_silence_frame_cnt: int = 6
+
+    def lmgen_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments handed to ``LMGen`` and the structured run-report payload."""
+        return {
+            "use_sampling": self.use_sampling,
+            "temp": self.temp,
+            "temp_text": self.temp_text,
+            "top_k": self.top_k,
+            "top_k_text": self.top_k_text,
+            "audio_silence_frame_cnt": self.audio_silence_frame_cnt,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.lmgen_kwargs()
+
+    def label(self) -> str:
+        """Describe the mechanism ``sample_token`` really uses, per stream.
+
+        ``moshi.utils.sampling.sample_token`` falls back to argmax when sampling is disabled
+        or the temperature is not positive, so the audio and text streams are labelled
+        separately instead of claiming one global mode.
+        """
+        audio = "greedy" if (not self.use_sampling or self.temp <= 0.0) else f"sampling temp={self.temp:g}"
+        text = "greedy" if (not self.use_sampling or self.temp_text <= 0.0) else f"sampling temp={self.temp_text:g}"
+        return (
+            f"native LMGen audio={audio}, text={text}, top_k={self.top_k}, "
+            f"top_k_text={self.top_k_text}, audio_silence_frame_cnt={self.audio_silence_frame_cnt}"
+        )
+
+
+def _as_bool(name: str, value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "false", "1", "0"}:
+        return value.strip().lower() in {"true", "1"}
+    raise ValueError(f"{name} must be a boolean, got {value!r}")
+
+
+def _as_float(name: str, value: Any, minimum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number, got {value!r}")
+    number = float(value)
+    if not np.isfinite(number) or number < minimum:
+        raise ValueError(f"{name} must be finite and >= {minimum:g}, got {value!r}")
+    return number
+
+
+def _as_int(name: str, value: Any, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    if float(value) != int(value):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    number = int(value)
+    if number < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value!r}")
+    return number
+
+
+def generation_from_config(raw: Mapping[str, Any] | None) -> GenerationSettings:
+    """Read the optional ``generation:`` section of a raw (Hydra/OmegaConf) config.
+
+    Missing keys fall back to the Moshi defaults. Unknown keys and out-of-range values
+    raise immediately, so a typo in the YAML can never be mistaken for a working setting.
+    """
+    defaults = GenerationSettings()
+    section = {} if raw is None else raw.get("generation")
+    if section is None:
+        section = {}
+    if not isinstance(section, Mapping):
+        raise ValueError("generation config section must be a mapping")
+    supported = sorted(defaults.as_dict())
+    unknown = sorted(set(section) - set(supported))
+    if unknown:
+        raise ValueError(f"unknown generation config keys: {unknown}; supported keys are {supported}")
+    return GenerationSettings(
+        use_sampling=_as_bool("generation.use_sampling", section.get("use_sampling", defaults.use_sampling)),
+        temp=_as_float("generation.temp", section.get("temp", defaults.temp), minimum=0.0),
+        temp_text=_as_float("generation.temp_text", section.get("temp_text", defaults.temp_text), minimum=0.0),
+        top_k=_as_int("generation.top_k", section.get("top_k", defaults.top_k), minimum=0),
+        top_k_text=_as_int("generation.top_k_text", section.get("top_k_text", defaults.top_k_text), minimum=0),
+        audio_silence_frame_cnt=_as_int(
+            "generation.audio_silence_frame_cnt",
+            section.get("audio_silence_frame_cnt", defaults.audio_silence_frame_cnt),
+            minimum=0,
+        ),
+    )
 
 
 def _prepare_input_audio(input_file: Path, output_dir: Path) -> Path:
@@ -35,12 +142,25 @@ def _prepare_input_audio(input_file: Path, output_dir: Path) -> Path:
     return normalized_path
 
 
-def generate(config: Config, sample: PreparedSample, output_wav: Path, output_text: Path, adapter: Path | None) -> None:
+def generate(
+    config: Config,
+    sample: PreparedSample,
+    output_wav: Path,
+    output_text: Path,
+    adapter: Path | None,
+    generation: GenerationSettings | None = None,
+    seed: int | None = None,
+) -> None:
     import importlib
     import numpy as np
     import sphn
     import torch
 
+    settings = GenerationSettings() if generation is None else generation
+    if settings.use_sampling and seed is not None:
+        # Sampling is only reproducible with a pinned RNG (AGENTS.md: seed all randomness).
+        torch.manual_seed(int(seed))
+        logger.info("seeded torch RNG with %s for reproducible sampling", seed)
     runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
     if adapter is not None:
         inject_lora(runtime.model, config.lora_rank, config.lora_alpha)
@@ -48,9 +168,9 @@ def generate(config: Config, sample: PreparedSample, output_wav: Path, output_te
     runtime.model.eval()
     lm_module = importlib.import_module("moshi.models.lm")
     generator = lm_module.LMGen(
-        runtime.model, audio_silence_frame_cnt=6, sample_rate=runtime.codec.sample_rate,
-        frame_rate=runtime.codec.frame_rate, device=config.device, use_sampling=True,
-        temp=0.8, temp_text=0.7, top_k=250, top_k_text=25,
+        runtime.model, sample_rate=runtime.codec.sample_rate,
+        frame_rate=runtime.codec.frame_rate, device=config.device,
+        **settings.lmgen_kwargs(),
     )
     generator.load_voice_prompt(str(sample.voice_prompt_wav))
     generator.text_prompt_tokens = runtime.tokenizer.encode(f"<system> {sample.text_prompt.strip()} <system>")
@@ -76,7 +196,11 @@ def generate(config: Config, sample: PreparedSample, output_wav: Path, output_te
     output_wav.parent.mkdir(parents=True, exist_ok=True)
     sphn.write_wav(str(output_wav), np.concatenate(pcm_frames), runtime.codec.sample_rate)
     # SentencePiece decode_ids merges multi-byte tokens into clean Vietnamese text
-    cleaned_text = runtime.tokenizer._processor.decode_ids(text_token_ids)
+    if hasattr(runtime.tokenizer._processor, "decode_ids"):
+        cleaned_text = runtime.tokenizer._processor.decode_ids(text_token_ids)
+    else:
+        pieces = [runtime.tokenizer._processor.id_to_piece(t) for t in text_token_ids]
+        cleaned_text = "".join(pieces).replace(" ", " ").strip()
     output_text.write_text(cleaned_text, encoding="utf-8")
 
 
@@ -90,7 +214,7 @@ def _export_context(sample: PreparedSample, output_dir: Path) -> None:
         audio = sphn.resample(audio, src_sample_rate=source_rate, dst_sample_rate=24000)
     start = int(sample.window_start_sec * 24000)
     end = int(sample.window_end_sec * 24000)
-    original_window = audio[..., start:end]
+    original_window = np.ascontiguousarray(audio[..., start:end])
     if original_window.size == 0:
         raise ValueError(f"{sample.sample_id}: original dialogue window contains no audio")
     sphn.write_wav(str(output_dir / "dialogue_original.wav"), original_window, 24000)
@@ -116,7 +240,11 @@ def smoke(
     adapter: Path,
     output_dir: Path,
     input_file: Path | None = None,
+    generation: GenerationSettings | None = None,
 ) -> None:
+    settings = GenerationSettings() if generation is None else generation
+    seed = int(getattr(config, "seed", 42))
+    logger.info("generation settings: %s (seed=%s)", settings.label(), seed)
     output_dir.mkdir(parents=True, exist_ok=True)
     if input_file is not None:
         normalized_input = _prepare_input_audio(input_file, output_dir)
@@ -136,8 +264,13 @@ def smoke(
         )
 
     _export_context(sample, output_dir)
-    generate(config, sample, output_dir / "base.wav", output_dir / "base.txt", None)
-    generate(config, sample, output_dir / "finetuned.wav", output_dir / "finetuned.txt", adapter)
+    # Base and fine-tuned runs share the same sampling settings and the same seed, so any
+    # audible difference comes from the adapter and not from a different random draw.
+    generate(config, sample, output_dir / "base.wav", output_dir / "base.txt", None, generation=settings, seed=seed)
+    generate(
+        config, sample, output_dir / "finetuned.wav", output_dir / "finetuned.txt", adapter,
+        generation=settings, seed=seed,
+    )
     output_warnings = []
     for name in ("dialogue_original.wav", "user.wav", "base.wav", "finetuned.wav", "base.txt", "finetuned.txt"):
         path = output_dir / name
@@ -198,7 +331,9 @@ def smoke(
                 "window_end_sec": sample.window_end_sec,
                 "adapter": str(adapter),
                 "base_model": str(config.model_root),
-                "generation": "greedy native LMGen",
+                "generation": settings.label(),
+                "generation_settings": settings.as_dict(),
+                "seed": seed,
                 "stereo_mapping": "Channel 0 (LEFT) = Agent, Channel 1 (RIGHT) = User",
                 "warnings": output_warnings,
             },

@@ -1,9 +1,13 @@
 # Full 104h OtoSpeech dataset configuration
 prepared_dir: /storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared
-window_seconds: 30
+window_seconds: 30 # Fixed windows are reserved for static_chunking debug runs.
+target_window_seconds: 25
+min_window_seconds: 10
+max_window_seconds: 30
 shuffle: true
+randomize_train: true
 random_crop: false
 prompt_aug_prob: 0.0
-static_chunking: true
+static_chunking: false
 swap_roles_after_pass: true
 val_ratio: 0.05

@@ -26,6 +26,16 @@ class Tokenizer(Protocol):
 
 
 @dataclass(frozen=True)
+class WordTokenAlignment:
+    speaker: str
+    word: str
+    start_sec: float
+    end_sec: float
+    start_frame: int
+    token_frames: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class TrainingExample:
     input_codes: tuple[tuple[int, ...], ...]
     labels: tuple[tuple[int, ...], ...]
@@ -33,6 +43,9 @@ class TrainingExample:
     stream_names: tuple[str, ...]
     prompt_frames: int
     dialogue_frames: int
+    voice_prompt_frames: int = 0
+    text_prompt_frames: int = 0
+    word_alignments: tuple[WordTokenAlignment, ...] = ()
 
     @property
     def total_frames(self) -> int:
@@ -52,8 +65,10 @@ class PersonaPlexTrainingExampleBuilder:
         if codec.codebooks != 8 or len(self.initial_tokens) != 17:
             raise ValueError("PersonaPlex requires 8 codebooks per speaker and 17 initial tokens")
 
-    def build(self, sample: PreparedSample) -> TrainingExample:
-        if hasattr(self.codec, "encode_conversation_stereo"):
+    def build(self, sample: PreparedSample, dialogue_codes=None) -> TrainingExample:
+        if dialogue_codes is not None:
+            agent, user = dialogue_codes
+        elif hasattr(self.codec, "encode_conversation_stereo"):
             agent, user = self.codec.encode_conversation_stereo(
                 sample.conversation_wav, sample.agent_channel, sample.user_channel, sample.window_start_sec, sample.window_end_sec
             )
@@ -84,11 +99,12 @@ class PersonaPlexTrainingExampleBuilder:
             for index in range(8)
         )
         user_audio = tuple(user_prompt[index] + user[index] for index in range(8))
+        dialogue_text, word_alignments = self._dialogue_text(sample, dialogue_frames)
         agent_text = (
             (self.tokenizer.padding_id,) * (voice_frames + self.pause_frames)
             + text_prompt
             + (self.tokenizer.padding_id,) * self.pause_frames
-            + self._dialogue_text(sample, dialogue_frames)
+            + dialogue_text
         )
         streams = (agent_text,) + agent_audio + user_audio
         if any(len(stream) != len(agent_text) for stream in streams):
@@ -107,6 +123,9 @@ class PersonaPlexTrainingExampleBuilder:
             stream_names=("agent_text",) + tuple(f"agent_audio_{i}" for i in range(8)) + tuple(f"user_audio_{i}" for i in range(8)),
             prompt_frames=prompt_audio_frames,
             dialogue_frames=dialogue_frames,
+            voice_prompt_frames=voice_frames,
+            text_prompt_frames=len(text_prompt),
+            word_alignments=word_alignments,
         )
 
     def apply_delays(self, example: TrainingExample, delays: Sequence[int]) -> TrainingExample:
@@ -122,14 +141,25 @@ class PersonaPlexTrainingExampleBuilder:
             input_codes=tuple(streams), labels=tuple(streams), loss_mask=tuple(masks),
             stream_names=example.stream_names, prompt_frames=example.prompt_frames,
             dialogue_frames=example.dialogue_frames,
+            voice_prompt_frames=example.voice_prompt_frames,
+            text_prompt_frames=example.text_prompt_frames,
+            word_alignments=example.word_alignments,
         )
 
-    def _dialogue_text(self, sample: PreparedSample, frames: int) -> tuple[int, ...]:
+    def _dialogue_text(self, sample: PreparedSample, frames: int) -> tuple[tuple[int, ...], tuple[WordTokenAlignment, ...]]:
         text = [self.tokenizer.padding_id] * frames
+        alignments: list[WordTokenAlignment] = []
         for word in sample.words:
-            if word.speaker != "agent" or not sample.window_start_sec <= word.start < sample.window_end_sec:
+            if not sample.window_start_sec <= word.start < sample.window_end_sec:
                 continue
             frame = min(frames - 1, int((word.start - sample.window_start_sec) * self.codec.frame_rate))
+            start_frame = frame
+            if word.speaker != "agent":
+                alignments.append(WordTokenAlignment(
+                    word.speaker, word.word, word.start, word.end, start_frame
+                ))
+                continue
+            token_frames: list[int] = []
             for token in self.tokenizer.encode(" " + word.word):
                 while frame < frames and text[frame] != self.tokenizer.padding_id:
                     frame += 1
@@ -138,8 +168,12 @@ class PersonaPlexTrainingExampleBuilder:
                 if frame > 0 and text[frame - 1] == self.tokenizer.padding_id:
                     text[frame - 1] = self.tokenizer.end_padding_id
                 text[frame] = token
+                token_frames.append(frame)
                 frame += 1
-        return tuple(text)
+            alignments.append(WordTokenAlignment(
+                word.speaker, word.word, word.start, word.end, start_frame, tuple(token_frames)
+            ))
+        return tuple(text), tuple(alignments)
 
     def _assert_codebooks(self, streams: tuple[tuple[int, ...], ...], label: str) -> None:
         if len(streams) != 8 or len({len(stream) for stream in streams}) != 1:

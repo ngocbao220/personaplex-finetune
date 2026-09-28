@@ -107,6 +107,10 @@ class TrainTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "gradient_accumulation_steps"):
                 load_training_state(checkpoint, optimizer, None, 1, 4)
 
+            save_training_state(checkpoint, optimizer, None, 12, 2, 4, per_device_batch_size=2)
+            with self.assertRaisesRegex(RuntimeError, "per_device_batch_size"):
+                load_training_state(checkpoint, optimizer, None, 2, 4, per_device_batch_size=1)
+
     def test_creates_distinct_timestamped_run_directories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "runs"

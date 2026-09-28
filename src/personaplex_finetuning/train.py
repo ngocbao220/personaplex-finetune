@@ -18,7 +18,10 @@ from safetensors.torch import save_file
 from tqdm.auto import tqdm
 
 from .config import Config, load_config
-from .data import PreparedDataset, contiguous_chunks, sample_for_training_position
+from .data import PreparedDataset, conversation_group_keys, turn_aware_chunks
+from .batching import (
+    DistributedBucketBatchSampler, RawAudioDataset, collate_raw_audio, post_encode_collate,
+)
 from .lora import adapter_state_dict, inject_lora, load_adapter
 from .objective import stream_weights_torch, torch_weighted_cross_entropy
 from .runtime import RuntimePaths, load_runtime
@@ -49,15 +52,10 @@ def create_run_dir(output_root: Path, smoke: bool) -> Path:
     return run_dir
 
 
-def build_example(config: Config, sample, runtime, random_crop: bool = False, rng=None):
-    if random_crop and getattr(config, "random_crop", False):
-        effective_sample = sample.dynamic_sample(
-            config.window_seconds, random_crop=True, prompt_aug_prob=getattr(config, "prompt_aug_prob", 0.0), rng=rng
-        )
-    else:
-        effective_sample = sample
+def build_example(config: Config, sample, runtime, random_crop: bool = False, rng=None, dialogue_codes=None):
+    effective_sample = sample
     builder = PersonaPlexTrainingExampleBuilder(runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token)
-    return builder.apply_delays(builder.build(effective_sample), runtime.delays)
+    return builder.apply_delays(builder.build(effective_sample, dialogue_codes=dialogue_codes), runtime.delays)
 
 
 def effective_global_batch_size(per_process_batch_size: int, num_processes: int, gradient_accumulation_steps: int) -> int:
@@ -82,6 +80,71 @@ def step_optimizer_if_ready(accelerator, optimizer, scheduler, trainable) -> flo
 def deterministic_crop_rng(seed: int, process_index: int, micro_step: int) -> random.Random:
     """Make dynamic crops reproducible across resume without saving Python RNG state."""
     return random.Random(seed + (process_index * 1_000_003) + micro_step)
+
+
+def iter_training_batches(config, conversations, runtime, device, rank: int, world_size: int, smoke: bool, skip_batches: int = 0):
+    """Load CPU waveform batches, encode unpadded samples with Mimi, then collate codes."""
+    from torch.utils.data import DataLoader
+    from .data import fixed_chunks
+
+    epoch = 0
+    while True:
+        randomize = config.randomize_train and not smoke and not config.static_chunking
+        if config.static_chunking:
+            samples = fixed_chunks(conversations, config.window_seconds)
+        else:
+            samples = turn_aware_chunks(
+                conversations, config.target_window_seconds, config.min_window_seconds,
+                config.max_window_seconds, randomize=randomize,
+                rng=random.Random(config.seed + epoch),
+            )
+        if config.swap_roles_after_pass and not smoke and epoch % 2:
+            samples = [sample.swapped_roles() for sample in samples]
+        sampler = DistributedBucketBatchSampler(
+            [round((sample.window_end_sec - sample.window_start_sec) * runtime.codec.frame_rate) for sample in samples],
+            config.per_device_batch_size, rank=rank, world_size=world_size,
+            seed=config.seed + epoch, shuffle=config.shuffle and not smoke,
+        )
+        if len(sampler) == 0:
+            raise ValueError("dataset is too small to form one full distributed batch")
+        loader = DataLoader(
+            RawAudioDataset(samples, runtime.codec.sample_rate), batch_sampler=sampler,
+            collate_fn=collate_raw_audio, num_workers=config.num_workers,
+            pin_memory=config.pin_memory,
+            persistent_workers=config.persistent_workers and config.num_workers > 0,
+        )
+        for raw_batch in loader:
+            if skip_batches:
+                skip_batches -= 1
+                continue
+            examples = []
+            local_audio_frames = 0
+            for index, sample in enumerate(raw_batch["samples"]):
+                if randomize and config.prompt_aug_prob > 0:
+                    sample = sample.with_window(
+                        sample.window_start_sec, sample.window_end_sec,
+                        sample.get_augmented_prompt(config.prompt_aug_prob, rng=random.Random(
+                            config.seed + epoch * 1_000_003 + index
+                        )),
+                    )
+                valid_samples = int(raw_batch["valid_samples"][index])
+                waveform = raw_batch["waveforms"][index, :, :valid_samples].to(
+                    device, non_blocking=config.pin_memory
+                )
+                dialogue_codes = runtime.codec.encode_stereo_waveform(
+                    waveform, sample.agent_channel, sample.user_channel
+                )
+                local_audio_frames += len(dialogue_codes[0][0])
+                examples.append(build_example(config, sample, runtime, dialogue_codes=dialogue_codes))
+            batch = post_encode_collate(
+                examples, runtime.tokenizer.padding_id, runtime.zero_token, device
+            )
+            yield (
+                batch, epoch, len(examples),
+                sum(raw_batch["valid_samples"].tolist()) / runtime.codec.sample_rate,
+                local_audio_frames,
+            )
+        epoch += 1
 
 
 def sample_index_for_rank(micro_step: int, process_index: int, num_processes: int, sample_count: int) -> int:
@@ -178,20 +241,24 @@ def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_
 
 def loss_components(model_output, codes, example, text_padding_id, torch_module):
     """Compute per-stream losses using GPU-native vectorized weights."""
-    labels_tensor = torch_module.tensor(example.labels, dtype=torch_module.long, device=codes.device)
-    mask_tensor = torch_module.tensor(example.loss_mask, dtype=torch_module.bool, device=codes.device)
+    if isinstance(example, dict):
+        labels_tensor = example["labels"]
+        mask_tensor = example["loss_mask"]
+    else:
+        labels_tensor = torch_module.tensor(example.labels, dtype=torch_module.long, device=codes.device).unsqueeze(0)
+        mask_tensor = torch_module.tensor(example.loss_mask, dtype=torch_module.bool, device=codes.device).unsqueeze(0)
     weights = stream_weights_torch(labels_tensor, mask_tensor, text_padding_id)
 
-    text_target = codes[:, 0, :]
-    text_weight = weights[0].unsqueeze(0) * model_output.text_mask.to(weights.dtype)
+    text_target = labels_tensor[:, 0, :]
+    text_weight = weights[:, 0, :] * model_output.text_mask[:, 0].to(weights.dtype)
     text_loss = torch_weighted_cross_entropy(
         model_output.text_logits.reshape(-1, model_output.text_logits.shape[-1]),
         text_target.reshape(-1),
         text_weight.reshape(-1),
     )
 
-    audio_target = codes[:, 1:17, :]
-    audio_weights = weights[1:17].unsqueeze(0) * model_output.mask.to(weights.dtype)
+    audio_target = labels_tensor[:, 1:17, :]
+    audio_weights = weights[:, 1:17, :] * model_output.mask.to(weights.dtype)
 
     semantic = torch_weighted_cross_entropy(
         model_output.logits[:, 0].reshape(-1, model_output.logits.shape[-1]),
@@ -232,6 +299,7 @@ def save_training_state(
     optimizer_step: int,
     gradient_accumulation_steps: int,
     num_processes: int,
+    per_device_batch_size: int = 1,
 ) -> Path:
     """Persist enough state to continue the optimizer trajectory exactly."""
     path = checkpoint_dir / "training_state.pt"
@@ -241,6 +309,7 @@ def save_training_state(
             "optimizer_step": optimizer_step,
             "gradient_accumulation_steps": gradient_accumulation_steps,
             "num_processes": num_processes,
+            "per_device_batch_size": per_device_batch_size,
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
         },
@@ -255,6 +324,7 @@ def load_training_state(
     scheduler,
     gradient_accumulation_steps: int,
     num_processes: int,
+    per_device_batch_size: int = 1,
 ) -> int | None:
     """Restore an optimizer checkpoint, rejecting incompatible DDP topology."""
     path = checkpoint_dir / "training_state.pt"
@@ -265,6 +335,8 @@ def load_training_state(
         raise RuntimeError("resume checkpoint gradient_accumulation_steps differs from this run")
     if state.get("num_processes") != num_processes:
         raise RuntimeError("resume checkpoint num_processes differs from this run")
+    if state.get("per_device_batch_size", 1) != per_device_batch_size:
+        raise RuntimeError("resume checkpoint per_device_batch_size differs from this run")
     optimizer.load_state_dict(state["optimizer"])
     saved_scheduler = state.get("scheduler")
     if scheduler is None and saved_scheduler is not None:
@@ -282,12 +354,13 @@ def save_adapter(run_dir: Path, model, config: Config, step: int, optimizer=None
     (path / "adapter.json").write_text(
         json.dumps(
             {"step": step, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha,
-             "gradient_accumulation_steps": gradient_accumulation_steps, "num_processes": num_processes},
+             "gradient_accumulation_steps": gradient_accumulation_steps, "num_processes": num_processes,
+             "per_device_batch_size": config.per_device_batch_size},
             indent=2,
         )
     )
     if optimizer is not None:
-        save_training_state(path, optimizer, scheduler, step, gradient_accumulation_steps, num_processes)
+        save_training_state(path, optimizer, scheduler, step, gradient_accumulation_steps, num_processes, config.per_device_batch_size)
     return adapter
 
 
@@ -302,12 +375,13 @@ def save_best_adapter(
     (path / "adapter.json").write_text(
         json.dumps(
             {"step": step, "val_loss": val_loss, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha,
-             "gradient_accumulation_steps": gradient_accumulation_steps, "num_processes": num_processes},
+             "gradient_accumulation_steps": gradient_accumulation_steps, "num_processes": num_processes,
+             "per_device_batch_size": config.per_device_batch_size},
             indent=2,
         )
     )
     if optimizer is not None:
-        save_training_state(path, optimizer, scheduler, step, gradient_accumulation_steps, num_processes)
+        save_training_state(path, optimizer, scheduler, step, gradient_accumulation_steps, num_processes, config.per_device_batch_size)
     return adapter
 
 
@@ -381,6 +455,8 @@ def run(
 
     if smoke and config.shuffle:
         raise ValueError("overfit/smoke configuration must set data.shuffle: false")
+    if config.static_chunking and not smoke:
+        raise ValueError("data.static_chunking is reserved for smoke/debug runs")
 
     accum_steps = max(1, config.gradient_accumulation_steps)
     accelerator = Accelerator(
@@ -388,11 +464,12 @@ def run(
         gradient_accumulation_steps=accum_steps,
     )
     device = accelerator.device
-    global_batch_size = effective_global_batch_size(1, accelerator.num_processes, accum_steps)
+    global_batch_size = effective_global_batch_size(config.per_device_batch_size, accelerator.num_processes, accum_steps)
     cpu_threads = limit_cpu_threads(torch)
     set_seed(config.seed + accelerator.process_index)
 
     # Dataset loading
+    test_samples = []
     if config.val_manifest:
         train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
         val_samples = PreparedDataset(config.val_manifest, config.window_seconds).load()
@@ -404,13 +481,38 @@ def run(
         train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
         val_samples = []
 
+    if config.test_manifest:
+        test_samples = PreparedDataset(config.test_manifest, config.window_seconds).load()
+    train_groups = {key for sample in train_samples for key in conversation_group_keys(sample)}
+    val_groups = {key for sample in val_samples for key in conversation_group_keys(sample)}
+    test_groups = {key for sample in test_samples for key in conversation_group_keys(sample)}
+    if train_groups & val_groups or train_groups & test_groups or val_groups & test_groups:
+        raise ValueError("train/validation/test manifests contain overlapping conversation groups")
+
+    train_conversations = list(train_samples)
     if config.static_chunking:
-        train_samples = contiguous_chunks(train_samples, config.window_seconds)
-        val_samples = contiguous_chunks(val_samples, config.window_seconds) if val_samples else []
+        from .data import fixed_chunks
+        train_samples = fixed_chunks(train_samples, config.window_seconds)
+        val_samples = fixed_chunks(val_samples, config.window_seconds) if val_samples else []
+        test_samples = fixed_chunks(test_samples, config.window_seconds) if test_samples else []
         if config.swap_roles_after_pass and not smoke:
             # Fail before model loading, rather than halfway through the first right-speaker pass.
             for sample in train_samples:
                 sample.swapped_roles()
+    else:
+        train_samples = turn_aware_chunks(
+            train_samples, config.target_window_seconds, config.min_window_seconds,
+            config.max_window_seconds, randomize=config.randomize_train and not smoke,
+            rng=random.Random(config.seed),
+        )
+        val_samples = turn_aware_chunks(
+            val_samples, config.target_window_seconds, config.min_window_seconds,
+            config.max_window_seconds, randomize=False,
+        ) if val_samples else []
+        test_samples = turn_aware_chunks(
+            test_samples, config.target_window_seconds, config.min_window_seconds,
+            config.max_window_seconds, randomize=False,
+        ) if test_samples else []
 
     # Run directory creation (coordinated across ranks)
     run_dir = None
@@ -424,6 +526,9 @@ def run(
             "manifest": str(config.manifest),
             "output_dir": str(run_dir),
             "window_seconds": config.window_seconds,
+            "target_window_seconds": config.target_window_seconds,
+            "min_window_seconds": config.min_window_seconds,
+            "max_window_seconds": config.max_window_seconds,
             "max_steps": 1 if smoke else config.max_steps,
             "learning_rate": config.learning_rate,
             "lora_rank": config.lora_rank,
@@ -434,12 +539,16 @@ def run(
             "num_processes": accelerator.num_processes,
             "cpu_threads": cpu_threads,
             "gradient_accumulation_steps": accum_steps,
-            "per_device_batch_size": 1,
+            "per_device_batch_size": config.per_device_batch_size,
+            "num_workers": config.num_workers,
+            "pin_memory": config.pin_memory,
+            "persistent_workers": config.persistent_workers,
             "global_batch_size": global_batch_size,
             "warmup_steps": config.warmup_steps,
             "eval_every_steps": config.eval_every_steps,
             "save_every_steps": config.save_every_steps,
             "random_crop": config.random_crop,
+            "randomize_train": config.randomize_train,
             "prompt_aug_prob": config.prompt_aug_prob,
             "static_chunking": config.static_chunking,
             "swap_roles_after_pass": config.swap_roles_after_pass,
@@ -447,6 +556,7 @@ def run(
             "mixed_precision": config.mixed_precision,
             "num_train_samples": len(train_samples),
             "num_val_samples": len(val_samples),
+            "num_test_samples": len(test_samples),
             "num_train_role_views": len(train_samples) * (2 if config.swap_roles_after_pass else 1),
         }
         (run_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
@@ -563,6 +673,7 @@ def run(
             scheduler,
             accum_steps,
             accelerator.num_processes,
+            config.per_device_batch_size,
         )
         if restored_step is not None:
             start_step = restored_step
@@ -594,34 +705,31 @@ def run(
         max_micro_steps = max_steps * accum_steps
         progress = tqdm(total=max_steps, initial=start_step, desc="training (DDP)", unit="update", dynamic_ncols=True) if accelerator.is_main_process else None
         last_update_time = time.monotonic()
+        batch_iterator = iter(iter_training_batches(
+            config, train_conversations, runtime, device, accelerator.process_index,
+            accelerator.num_processes, smoke, skip_batches=start_micro_step,
+        ))
+        samples_seen = 0
+        audio_seconds_seen = 0.0
+        audio_frames_seen = 0
 
         for micro_step in range(start_micro_step, max_micro_steps):
-            global_position = micro_step * accelerator.num_processes + accelerator.process_index
-            if config.static_chunking:
-                current_sample = sample_for_training_position(
-                    train_samples,
-                    global_position,
-                    seed=config.seed,
-                    shuffle=config.shuffle and not smoke,
-                    swap_roles=config.swap_roles_after_pass and not smoke,
-                )
-            else:
-                sample_idx = sample_index_for_rank(
-                    micro_step, accelerator.process_index, accelerator.num_processes, len(train_samples)
-                )
-                current_sample = train_samples[sample_idx]
-            example = build_example(
-                config,
-                current_sample,
-                runtime,
-                random_crop=config.random_crop and not config.static_chunking and not smoke,
-                rng=deterministic_crop_rng(config.seed, accelerator.process_index, micro_step),
+            try:
+                batch, epoch, local_samples, local_audio_seconds, local_audio_frames = next(batch_iterator)
+            except StopIteration as exc:
+                raise RuntimeError("training batch iterator stopped before max_steps") from exc
+            codes = batch["codes"]
+            samples_seen += local_samples * accelerator.num_processes
+            global_audio_seconds = accelerator.reduce(
+                torch.tensor([local_audio_seconds, local_audio_frames], dtype=torch.float32, device=device),
+                reduction="sum",
             )
-            codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
+            audio_seconds_seen += float(global_audio_seconds[0])
+            audio_frames_seen += int(global_audio_seconds[1])
 
             with accelerator.accumulate(runtime.model):
                 output = runtime.model(codes)
-                total, components = loss_components(output, codes, example, runtime.tokenizer.padding_id, torch)
+                total, components = loss_components(output, codes, batch, runtime.tokenizer.padding_id, torch)
                 accelerator.backward(total)
 
                 grad_norm = step_optimizer_if_ready(accelerator, optimizer, scheduler, trainable)
@@ -640,13 +748,17 @@ def run(
                 record = {
                     "step": optimizer_step,
                     "micro_step": micro_step + 1,
+                    "epoch": epoch,
+                    "samples_seen": samples_seen,
+                    "audio_seconds_seen": audio_seconds_seen,
+                    "audio_frames_seen": audio_frames_seen,
+                    "global_batch_size": global_batch_size,
                     "loss/total": float(reduced_total.detach()),
                     "loss/text": float(reduced_text.detach()),
                     "loss/audio_semantic": float(reduced_sem.detach()),
                     "loss/audio_nonsemantic": float(reduced_nonsem.detach()),
                     "lr": optimizer.param_groups[0]["lr"],
                     "grad_norm": grad_norm,
-                    "global_batch_size": global_batch_size,
                     "samples_per_second": global_batch_size / max(time.monotonic() - last_update_time, 1e-9),
                     "gpu_peak_bytes": torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0,
                 }
@@ -671,7 +783,7 @@ def run(
                 if accelerator.is_main_process:
                     for k, v in val_metrics.items():
                         if writer:
-                            writer.add_scalar(k, v, step + 1)
+                            writer.add_scalar(k, v, optimizer_step)
                     val_loss = val_metrics.get("val/loss_total", float("inf"))
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss

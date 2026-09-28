@@ -17,8 +17,9 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(loaded.gradient_accumulation_steps, 8)
         self.assertTrue(loaded.gradient_checkpointing)
         self.assertEqual(loaded.prompt_aug_prob, 0.0)
-        self.assertTrue(loaded.static_chunking)
+        self.assertFalse(loaded.static_chunking)
         self.assertTrue(loaded.swap_roles_after_pass)
+        self.assertEqual(loaded.per_device_batch_size, 2)
 
     def test_resolves_prepared_directory_and_derives_local_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -75,6 +76,22 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(loaded.model_root, (root / "models/personaplex").resolve())
             self.assertEqual(loaded.manifest, (root / "prepared/train.jsonl").resolve())
             self.assertFalse(loaded.shuffle)
+
+    def test_loads_explicit_test_manifest_and_batching_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "configs" / "test.yaml"
+            config.parent.mkdir()
+            config.write_text(
+                '{"model": {"root": "/models", "source": "/source"}, '
+                '"data": {"prepared_dir": "/data", "test_manifest_path": "/data/test.jsonl"}, '
+                '"train": {"per_device_batch_size": 3, "num_workers": 0, "pin_memory": false}}'
+            )
+            loaded = load_config(config)
+        self.assertEqual(loaded.test_manifest, Path("/data/test.jsonl"))
+        self.assertEqual(loaded.per_device_batch_size, 3)
+        self.assertEqual(loaded.num_workers, 0)
+        self.assertFalse(loaded.pin_memory)
 
     def test_preserves_explicit_absolute_server_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

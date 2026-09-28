@@ -66,6 +66,9 @@ class SentencePieceTokenizer:
     def encode(self, text: str) -> list[int]:
         return list(self._processor.encode(text))
 
+    def decode(self, tokens: list[int]) -> str:
+        return str(self._processor.decode(tokens))
+
 
 class MimiCodec:
     """Mimi adapter using the same source helpers as PersonaPlex inference."""
@@ -101,6 +104,21 @@ class MimiCodec:
             codes = self.mimi.encode(batch)
         agent_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[0])
         user_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[1])
+        return agent_codes, user_codes
+
+    def encode_stereo_waveform(self, waveform, agent_channel: int, user_channel: int):
+        """Encode one unpadded [2, T] waveform, preserving Mimi's true end context."""
+        import torch
+
+        if waveform.ndim != 2 or waveform.shape[0] != 2 or waveform.shape[-1] == 0:
+            raise ValueError("Mimi input must be an unpadded stereo waveform [2, T]")
+        if {agent_channel, user_channel} != {0, 1}:
+            raise ValueError("agent/user channels must be a permutation of LEFT/RIGHT")
+        batch = waveform[[agent_channel, user_channel]].to(self.device, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            codes = self.mimi.encode(batch)
+        agent_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[0, 0])
+        user_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[0, 1])
         return agent_codes, user_codes
 
     def encode_conversation_stereo_cached(self, path: Path, agent_channel: int, user_channel: int, start_sec: float, end_sec: float):

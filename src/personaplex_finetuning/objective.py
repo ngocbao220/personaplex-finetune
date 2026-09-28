@@ -76,29 +76,38 @@ def stream_weights_torch(
     """
     import torch
 
-    S, T = codes.shape
+    if codes.ndim == 2:
+        codes = codes.unsqueeze(0)
+        loss_mask = loss_mask.unsqueeze(0)
+        squeeze = True
+    elif codes.ndim == 3:
+        squeeze = False
+    else:
+        raise ValueError("codes and masks must have shape [S,T] or [B,S,T]")
+    B, S, T = codes.shape
     assert S == 17, f"Expected 17 streams, got {S}"
-    weights = torch.zeros(S, T, dtype=torch.float32, device=codes.device)
-
+    if loss_mask.shape != codes.shape:
+        raise ValueError("loss mask shape must match code tensor")
     # Agent text stream (index 0): 1.0 for real tokens, text_padding_weight for padding
-    text_mask = loss_mask[0]
-    is_pad = codes[0] == text_padding_id
-    weights[0] = torch.where(
+    weights = torch.zeros(B, S, T, dtype=torch.float32, device=codes.device)
+    text_mask = loss_mask[:, 0]
+    is_pad = codes[:, 0] == text_padding_id
+    weights[:, 0] = torch.where(
         text_mask,
         torch.where(is_pad, torch.tensor(text_padding_weight, device=codes.device), torch.tensor(1.0, device=codes.device)),
         torch.tensor(0.0, device=codes.device),
     )
 
     # Agent semantic audio (index 1): full weight where unmasked
-    weights[1] = loss_mask[1].float()
+    weights[:, 1] = loss_mask[:, 1].float()
 
     # Agent non-semantic audio (indices 2-8): downweighted
-    weights[2:9] = loss_mask[2:9].float() * nonsemantic_audio_weight
+    weights[:, 2:9] = loss_mask[:, 2:9].float() * nonsemantic_audio_weight
 
     # User audio streams (indices 9-16): zero (no loss on user stream)
     # weights[9:17] already 0
 
-    return weights
+    return weights[0] if squeeze else weights
 
 
 def torch_weighted_cross_entropy(logits, targets, weights):

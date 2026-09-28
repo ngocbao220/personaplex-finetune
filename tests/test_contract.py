@@ -5,10 +5,14 @@ import wave
 from pathlib import Path
 
 from personaplex_finetuning.data import (
+    AudioInfo,
+    PreparedSample,
     PreparedDataset,
     ValidationError,
     contiguous_chunks,
     sample_for_training_position,
+    turn_aware_chunks,
+    Word,
 )
 from personaplex_finetuning.runtime import _pad_audio_window
 
@@ -22,6 +26,36 @@ def write_stereo_wav(path: Path, frames: int = 24000) -> None:
 
 
 class PreparedDatasetTest(unittest.TestCase):
+    def test_turn_aware_chunks_use_safe_boundaries_and_clip_to_real_audio(self) -> None:
+        sample = PreparedSample(
+            "conversation", Path("conversation.wav"), Path("voice.wav"),
+            tuple(
+                Word("agent" if index % 2 == 0 else "user", f"word{index}.", index * 2.0, index * 2.0 + 1.0)
+                for index in range(20)
+            ), "prompt", {}, AudioInfo(24000, 2, 40.0), 0.0, 40.0,
+        )
+        chunks = turn_aware_chunks([sample], 25, 10, 30, randomize=False)
+        bounds = [(item.window_start_sec, item.window_end_sec) for item in chunks]
+        self.assertEqual(bounds[0][0], 0.0)
+        self.assertEqual(bounds[-1][1], 40.0)
+        self.assertTrue(all(0 < end - start <= 30 for start, end in bounds))
+        self.assertTrue(all(left[1] == right[0] for left, right in zip(bounds, bounds[1:])))
+        safe_ends = {word.end for word in sample.words}
+        self.assertTrue(all(end == 40.0 or end in safe_ends for _, end in bounds))
+
+    def test_training_chunk_boundaries_are_seeded_but_can_vary_by_epoch(self) -> None:
+        sample = PreparedSample(
+            "conversation", Path("conversation.wav"), Path("voice.wav"),
+            tuple(Word("user", "word", index * 2.0, index * 2.0 + 1.0) for index in range(30)),
+            "prompt", {}, AudioInfo(24000, 2, 60.0), 0.0, 60.0,
+        )
+        from random import Random
+        first = turn_aware_chunks([sample], 25, 10, 30, Random(1), randomize=True)
+        same = turn_aware_chunks([sample], 25, 10, 30, Random(1), randomize=True)
+        other = turn_aware_chunks([sample], 25, 10, 30, Random(2), randomize=True)
+        self.assertEqual([item.window_end_sec for item in first], [item.window_end_sec for item in same])
+        self.assertNotEqual([item.window_end_sec for item in first], [item.window_end_sec for item in other])
+
     def test_loads_prompt_from_metadata_and_selects_first_agent_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -84,7 +118,7 @@ class PreparedDatasetTest(unittest.TestCase):
             with self.assertRaisesRegex(ValidationError, "relative"):
                 PreparedDataset(manifest).load()
 
-    def test_contiguous_chunks_cover_audio_and_pad_the_final_window(self) -> None:
+    def test_contiguous_chunks_cover_audio_without_extending_final_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sample_dir = root / "samples" / "conv_0001"
@@ -100,8 +134,31 @@ class PreparedDatasetTest(unittest.TestCase):
             chunks = contiguous_chunks(PreparedDataset(manifest).load(), 30.0)
 
         self.assertEqual([(chunk.window_start_sec, chunk.window_end_sec) for chunk in chunks], [
-            (0.0, 30.0), (30.0, 60.0), (60.0, 90.0), (90.0, 120.0),
+            (0.0, 30.0), (30.0, 60.0), (60.0, 90.0), (90.0, 95.0),
         ])
+
+    def test_split_keeps_entries_from_one_conversation_together(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = []
+            for index, group in enumerate(("shared", "shared", "other", "third")):
+                sample_dir = root / "samples" / str(index)
+                sample_dir.mkdir(parents=True)
+                write_stereo_wav(sample_dir / "conversation.wav")
+                write_stereo_wav(sample_dir / "voice_prompt_left.wav")
+                (sample_dir / "metadata.json").write_text(json.dumps({
+                    "conversation_id": group, "text_prompt_left": "x",
+                }))
+                (sample_dir / "words.json").write_text(json.dumps([
+                    {"speaker": "agent", "word": "Hi", "start": 0.0, "end": 0.2},
+                ]))
+                entries.append({"sample_id": str(index), "sample_dir": f"samples/{index}"})
+            manifest = root / "train.jsonl"
+            manifest.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+            train, val = PreparedDataset(manifest).split(val_ratio=0.5, seed=42)
+        train_ids, val_ids = {sample.sample_id for sample in train}, {sample.sample_id for sample in val}
+        self.assertTrue({"0", "1"} <= train_ids or {"0", "1"} <= val_ids)
+        self.assertFalse(train_ids & val_ids)
 
     def test_right_role_pass_uses_right_voice_prompt_and_inverts_channels_and_words(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

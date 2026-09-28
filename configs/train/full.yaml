@@ -3,6 +3,10 @@ output_dir: ../runs/full
 max_steps: 10000
 learning_rate: 2.0e-5
 gradient_accumulation_steps: 8
+per_device_batch_size: 2
+num_workers: 4
+pin_memory: true
+persistent_workers: true
 warmup_steps: 500
 eval_every_steps: 500
 save_every_steps: 500

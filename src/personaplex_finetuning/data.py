@@ -155,19 +155,91 @@ class PreparedSample:
         return self.with_window(start, end, prompt)
 
 
-def contiguous_chunks(samples: list[PreparedSample], window_seconds: float) -> list[PreparedSample]:
-    """Split conversations into fixed consecutive windows, padding the final window at encode time."""
-    if window_seconds <= 0:
-        raise ValueError("window_seconds must be positive")
+def conversation_group_keys(sample: PreparedSample) -> tuple[str, ...]:
+    conversation_id = str(sample.metadata.get("conversation_id", "")).strip()
+    keys = [f"wav:{sample.conversation_wav.resolve()}"]
+    if conversation_id:
+        keys.append(f"id:{conversation_id}")
+    return tuple(keys)
+
+
+def turn_aware_chunks(
+    samples: list[PreparedSample], target_seconds: float = 25.0,
+    min_seconds: float = 10.0, max_seconds: float = 30.0,
+    rng=None, randomize: bool = False,
+) -> list[PreparedSample]:
+    """Partition each conversation at turn, sentence, then word boundaries."""
+    if not 0 < min_seconds <= target_seconds <= max_seconds:
+        raise ValueError("chunk durations must satisfy 0 < min <= target <= max")
+    import random
+    rng = rng or random.Random(0)
     chunks: list[PreparedSample] = []
     for sample in samples:
         start = 0.0
-        while start < sample.audio.duration_sec:
-            chunks.append(sample.with_window(start, start + window_seconds))
-            start += window_seconds
+        duration = sample.audio.duration_sec
+        words = sorted(sample.words, key=lambda item: (item.start, item.end))
+        word_boundaries = sorted({min(duration, word.end) for word in words if start < word.end < duration})
+        sentence_boundaries = sorted({
+            min(duration, word.end) for word in words
+            if word.end < duration and word.word.rstrip().endswith((".", "?", "!", "…"))
+        })
+        turn_boundaries = sorted({
+            min(duration, word.end) for index, word in enumerate(words[:-1])
+            if words[index + 1].speaker != word.speaker and word.end < duration
+        })
+        while start < duration:
+            remaining = duration - start
+            if remaining <= max_seconds:
+                end = duration
+            else:
+                target = rng.uniform(max(min_seconds, target_seconds - 3), min(max_seconds, target_seconds + 3)) if randomize else target_seconds
+                end = None
+                for boundaries in (turn_boundaries, sentence_boundaries, word_boundaries):
+                    candidates = [
+                        point for point in boundaries
+                        if start + max(min_seconds, target - 3) <= point <= start + min(max_seconds, target + 3)
+                    ]
+                    if candidates:
+                        distance = min(abs(point - (start + target)) for point in candidates)
+                        nearest = [point for point in candidates if abs(point - (start + target)) <= distance + 1.0]
+                        end = rng.choice(nearest) if randomize else min(candidates, key=lambda point: (abs(point - start - target), -point))
+                        break
+                if end is None:
+                    # No preferred boundary is close to target; use the nearest
+                    # word boundary within limits, then the hard duration cap.
+                    candidates = [point for point in word_boundaries if start + min_seconds <= point <= start + max_seconds]
+                    if candidates:
+                        end = min(candidates, key=lambda point: (abs(point - start - target), point))
+                    else:
+                        end = min(duration, start + max_seconds)
+            if end <= start:
+                raise AssertionError("chunk boundary did not advance")
+            chunks.append(sample.with_window(start, end))
+            start = end
     if not chunks:
         raise ValidationError("no contiguous chunks were created")
     return chunks
+
+
+def fixed_chunks(samples: list[PreparedSample], window_seconds: float) -> list[PreparedSample]:
+    """Fixed, clipped chunks for deterministic debugging only."""
+    if window_seconds <= 0:
+        raise ValueError("window_seconds must be positive")
+    chunks = []
+    for sample in samples:
+        start = 0.0
+        while start < sample.audio.duration_sec:
+            end = min(sample.audio.duration_sec, start + window_seconds)
+            chunks.append(sample.with_window(start, end))
+            start = end
+    if not chunks:
+        raise ValidationError("no chunks were created")
+    return chunks
+
+
+def contiguous_chunks(samples: list[PreparedSample], window_seconds: float) -> list[PreparedSample]:
+    """Compatibility name for fixed debug chunking; windows never exceed real audio."""
+    return fixed_chunks(samples, window_seconds)
 
 
 def sample_for_training_position(
@@ -227,17 +299,35 @@ class PreparedDataset:
         return samples
 
     def split(self, val_ratio: float = 0.05, seed: int = 42) -> tuple[list[PreparedSample], list[PreparedSample]]:
-        """Split samples into train and validation sets deterministically."""
+        """Split by conversation before any temporal chunking."""
         samples = self.load()
-        if len(samples) <= 1 or val_ratio <= 0.0:
+        parents = list(range(len(samples)))
+
+        def find(index):
+            while parents[index] != index:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
+        owners: dict[str, int] = {}
+        for index, sample in enumerate(samples):
+            for key in conversation_group_keys(sample):
+                previous = owners.setdefault(key, index)
+                left, right = find(index), find(previous)
+                parents[left] = right
+        groups: dict[int, list[PreparedSample]] = {}
+        for index, sample in enumerate(samples):
+            groups.setdefault(find(index), []).append(sample)
+        if len(groups) <= 1 or val_ratio <= 0.0:
             return samples, []
         import random
         rng = random.Random(seed)
-        shuffled = list(samples)
+        shuffled = list(groups)
         rng.shuffle(shuffled)
-        val_size = max(1, int(len(samples) * val_ratio))
-        val_set = shuffled[:val_size]
-        train_set = shuffled[val_size:]
+        val_size = max(1, min(len(shuffled) - 1, round(len(shuffled) * val_ratio)))
+        val_groups = set(shuffled[:val_size])
+        train_set = [sample for key, group in groups.items() if key not in val_groups for sample in group]
+        val_set = [sample for key, group in groups.items() if key in val_groups for sample in group]
         return train_set, val_set
 
     def _load_entry(self, entry: dict[str, Any], line_number: int) -> PreparedSample:

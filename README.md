@@ -73,25 +73,16 @@ print('=== Kiểm tra môi trường ===')
 print('PyTorch:', torch.__version__)
 print('CUDA available:', torch.cuda.is_available())
 print('MPS available (macOS):', torch.backends.mps.is_available())
-for pkg in ['sphn', 'sounddevice', 'sentencepiece', 'safetensors', 'einops', 'accelerate', 'gradio']:
+for pkg in ['sphn', 'sentencepiece', 'safetensors', 'einops', 'accelerate']:
     __import__(pkg)
     print(f'{pkg}: OK')
 print('===========================')
 "
 ```
 
-### 2.2. Kiểm tra phần cứng âm thanh (Microphone & Loa)
-Liệt kê danh sách các thiết bị âm thanh đầu vào/đầu ra trên máy để phục vụ live demo:
-
-```bash
-python -m tools.interactive_cli --list-devices
-```
-**Ý nghĩa các cờ (flags):**
-- `--list-devices` **[Optional]**: Truy vấn CoreAudio/ALSA và in bảng ID, tên thiết bị micro và loa có sẵn rồi thoát.
-
 ---
 
-### 2.3. Kiểm tra file Checkpoint Model PersonaPlex cục bộ
+### 2.2. Kiểm tra file Checkpoint Model PersonaPlex cục bộ
 Đảm bảo thư mục model chứa đủ 3 file trọng số bắt buộc (tổng dung lượng ~17GB):
 
 ```bash
@@ -347,102 +338,29 @@ bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=full \
 
 ---
 
-### 4.4. Chạy Interactive Live Demo qua Terminal CLI (Nói chuyện Micro & Loa trực tiếp)
+### 4.4. Chạy Thử Nghiệm Suy Luận File (Inference Smoke Test)
 
-Tương tác đàm thoại 2 chiều thời gian thực (full-duplex) với PersonaPlex qua microphone và loa máy tính. Hỗ trợ trỏ vào base checkpoint cục bộ và nạp adapter LoRA đã fine-tune.
+Thực hiện nạp lại adapter LoRA trên base model gốc, tái tạo luồng Hybrid System Prompt (Voice prompt + Text prompt) và sinh phản hồi âm thanh/văn bản từ 1 mẫu trong dataset hoặc từ file âm thanh đầu vào tuỳ ý:
 
 ```bash
-# Cách 1: Chạy trực tiếp với file cấu hình demo.yaml (Khuyên dùng)
-python -m tools.interactive_cli \
-  --config configs/demo.yaml
+# Cách 1: Chạy trực tiếp với file cấu hình infer.yaml (Khuyên dùng)
+python -m tools.inference_smoke --config configs/infer.yaml
 
 # Cách 2: Truyền đầy đủ flags hoặc override tham số từ dòng lệnh
-python -m tools.interactive_cli \
-  --model-root ../models \
-  --adapter ../runs/hf_overfit_10/checkpoints/checkpoint_000300 \
-  --voice-prompt ../prepared/samples/conv_0001/voice_prompt_left.wav \
-  --text-prompt "You enjoy having a good conversation. You are a helpful and friendly assistant." \
-  --device cuda \
-  --save-session-dir outputs/live_session
-```
-*(Hoặc sử dụng launcher script: `bash scripts/run_cli_demo.sh --config configs/demo.yaml`)*
-
-**Chi tiết các cờ (flags) và đối số:**
-- `--config` **[Optional]**: Đường dẫn tới file cấu hình YAML/JSON (ví dụ: `configs/demo.yaml`).
-- `--model-root` **[Required nếu không có config]**: Thư mục chứa base model checkpoint cục bộ (`model.safetensors`, `tokenizer-*.safetensors`, `tokenizer_spm_32k_3.model`).
-- `--voice-prompt` **[Required nếu không có config]**: Đường dẫn tới file âm thanh mẫu giọng nói (WAV hoặc `.pt`).
-- `--adapter` **[Optional]**: Thư mục checkpoint LoRA hoặc đường dẫn file `lora.safetensors`. Nếu bỏ cờ này, hệ thống tự động chạy PersonaPlex base nguyên bản.
-- `--text-prompt` **[Optional]**: Câu prompt quy định vai trò/tính cách (chuỗi text hoặc đường dẫn file `.txt`), tự động bọc thẻ `<system> ... <system>`.
-- `--device` **[Optional]**: Thiết bị chạy model (`cuda` hoặc `cpu`, mặc định: `cuda`).
-- `--qlora` **[Optional]**: Bật lượng tử hóa 4-bit NF4 để tiết kiệm VRAM.
-- `--lora-rank`, `--lora-alpha` **[Optional]**: Chỉ định rank/alpha nếu file `adapter.json` không tồn tại.
-- `--greedy` **[Optional]**: Bật greedy decoding thay cho sampling ngẫu nhiên.
-- `--temp`, `--temp-text`, `--top-k`, `--top-k-text` **[Optional]**: Siêu tham số điều khiển tính ngẫu nhiên khi sinh audio/text.
-- `--input-device`, `--output-device` **[Optional]**: ID hoặc tên thiết bị micro/loa cụ thể.
-- `--save-session-dir` **[Optional]**: Thư mục lưu lại bản ghi âm toàn bộ cuộc trò chuyện (`user.wav`, `agent.wav`, `dialogue_stereo.wav` và `transcript.txt`).
-- `--input-wav` **[Optional]**: Chế độ file: nạp file WAV người dùng thay vì dùng micro, model sinh ra file `--output-wav`.
-
----
-
-### 4.4. Chạy Web UI Demo qua Gradio (Giao diện Web & Link công khai tạm thời gradio.live)
-
-Cung cấp giao diện Web trực quan hỗ trợ chọn giọng mẫu (Preset Voice Prompts), tải file giọng tuỳ ý, chọn persona preset (Teacher, Customer Service, Casual Friend), tinh chỉnh siêu tham số, ghi âm từ microphone trình duyệt và phát trực tiếp audio phản hồi + text transcript.
-
-Đặc biệt hỗ trợ **Temporary Public Share Link (`gradio.live`)** giống như TensorBoard giúp truy cập từ xa qua điện thoại/máy tính khác mà vẫn được cấp quyền microphone (nhờ kết nối bảo mật HTTPS).
-
-```bash
-# Cách 1: Khởi động qua file cấu hình demo.yaml (Khuyên dùng)
-python -m tools.interactive_web \
-  --config configs/demo.yaml
-
-# Cách 2: Chạy trực tiếp qua launcher script
-bash scripts/run_web_demo.sh --config configs/demo.yaml
-
-# Cách 3: Truyền cờ CLI chỉ định checkpoint LoRA & tạo link public
-python -m tools.interactive_web \
-  --model-root ../models \
-  --adapter ../runs/hf_overfit_10/checkpoints/checkpoint_000300 \
-  --share \
-  --port 8998
-```
-
-**Chi tiết các cờ (flags) và đối số:**
-- `--config` **[Optional]**: File cấu hình YAML/JSON chứa các thiết lập `model`, `adapter`, `prompt`, `server` (ví dụ: `configs/demo.yaml`).
-- `--model-root` **[Required nếu không có config]**: Thư mục chứa base model checkpoint cục bộ (`model.safetensors`, `tokenizer-*.safetensors`, `tokenizer_spm_32k_3.model`).
-- `--adapter` **[Optional]**: Đường dẫn checkpoint LoRA (`lora.safetensors` hoặc thư mục checkpoint). Nếu bỏ trống, web UI sẽ chạy base model gốc.
-- `--voice-prompt` **[Optional]**: File WAV/PT giọng mẫu mặc định. Giao diện tự động quét `voice_prompt_left.wav` và `voice_prompt_right.wav` trong `prepared/samples/` để đưa vào dropdown.
-- `--text-prompt` **[Optional]**: Prompt vai trò hệ thống mặc định.
-- `--device` **[Optional]**: Thiết bị chạy (`cuda` hoặc `cpu`, mặc định: `cuda`).
-- `--qlora` **[Optional]**: Bật lượng tử hóa 4-bit NF4 để giảm VRAM khi chạy trên GPU yếu.
-- `--host` **[Optional]**: Địa chỉ mạng bind socket (mặc định: `0.0.0.0` để mở cho mạng nội bộ/LAN).
-- `--port` **[Optional]**: Cổng dịch vụ web (mặc định: `8998`).
-- `--share` **[Optional, mặc định bật]**: Tự động tạo temporary public URL dạng `https://xxxx.gradio.live` (có hiệu lực 72h) để truy cập từ ngoài Internet.
-- `--no-share` **[Optional]**: Tắt tính năng tạo link public, chỉ lắng nghe cục bộ trong mạng nội bộ.
-
-**Cách truy cập giao diện:**
-- Cục bộ: Mở trình duyệt truy cập `http://localhost:8998`
-- Từ xa (Internet): Sử dụng đường link `https://xxxxxxxx.gradio.live` được in ra trên terminal.
-
----
-
-### 4.5. Chạy Thử Nghiệm Suy Luận File (Inference Smoke Test)
-
-Thực hiện nạp lại adapter LoRA trên base model gốc, tái tạo luồng Hybrid System Prompt (Voice prompt + Text prompt) và sinh phản hồi âm thanh/văn bản từ 1 mẫu trong dataset:
-
-```bash
 python -m tools.inference_smoke \
-  --config configs/test_overfit.yaml \
-  --adapter runs/hf_overfit_10/checkpoints/checkpoint_000300/lora.safetensors \
+  --config configs/infer.yaml \
+  --adapter runs/hf_overfit_10/checkpoints/checkpoint_000300 \
   --index 0 \
   --start 42.5 \
   --output-dir outputs/smoke
 ```
 
 **Chi tiết các đối số (arguments):**
-- `--config` **[Required]**: File cấu hình chứa đường dẫn base checkpoint (`model.root`) và source code PersonaPlex.
-- `--adapter` **[Required]**: Đường dẫn tới file trọng số LoRA đã huấn luyện (`lora.safetensors` hoặc thư mục checkpoint).
-- `--index` **[Optional]**: Index của mẫu hội thoại trong dataset dùng làm ngữ cảnh giọng nói, prompt và input user (mặc định: `0`).
+- `--config` **[Optional]**: File cấu hình YAML/JSON chứa các thiết lập mô hình, adapter, prompt và inference (mặc định: `configs/infer.yaml`).
+- `--adapter` **[Optional]**: Đường dẫn tới file trọng số LoRA đã huấn luyện (`lora.safetensors` hoặc thư mục checkpoint). Nếu bỏ qua cờ này, hệ thống sẽ đọc từ `adapter.path` trong file config.
+- `--index` **[Optional]**: Index của mẫu hội thoại trong dataset dùng làm ngữ cảnh giọng nói, prompt và input user (mặc định đọc từ config hoặc `0`).
 - `--start` **[Optional]**: Mốc thời gian theo giây trong `conversation.wav`. Khi đặt, inference dùng đúng một cửa sổ `data.window_seconds` (thường 30 giây) từ mốc này; chọn đoạn có user speech để tránh input im lặng. Lệnh sẽ từ chối cửa sổ vượt cuối audio.
+- `--input-file` / `--input-path` **[Optional]**: Đường dẫn file âm thanh WAV/MP3 bên ngoài thay thế cho audio hội thoại của sample.
 - `--output-dir` **[Optional]**: Thư mục lưu kết quả sinh (mặc định: `outputs/smoke`).
 
 Thư mục kết quả có `dialogue_original.wav` (hội thoại nguồn, cắt theo đúng cửa sổ inference; giữ nguyên thứ tự kênh), `user.wav`, audio/text do base model sinh và audio/text do adapter sinh. `finetuned.txt` có thể rỗng nếu lúc sinh tự do mô hình không phát token text hợp lệ; loss train giảm đo khả năng dự đoán target khi có ngữ cảnh teacher-forced, không đảm bảo đầu ra greedy lúc inference sẽ chép lại transcript train.

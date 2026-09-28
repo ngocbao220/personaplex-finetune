@@ -20,6 +20,7 @@ class Config:
     seed: int = 42
     window_seconds: float = 30.0
     shuffle: bool = False
+    randomize_train: bool = True
     max_steps: int = 300
     learning_rate: float = 2e-5
     depformer_learning_rate: float | None = None
@@ -30,6 +31,10 @@ class Config:
     quant_type: str = "nf4"
     device: str = "cuda"
     gradient_accumulation_steps: int = 1
+    per_device_batch_size: int = 2
+    num_workers: int = 4
+    pin_memory: bool = True
+    persistent_workers: bool = True
     warmup_steps: int = 0
     eval_every_steps: int = 0
     save_every_steps: int = 50
@@ -39,6 +44,10 @@ class Config:
     static_chunking: bool = False
     swap_roles_after_pass: bool = False
     val_manifest_path: Path | None = None
+    test_manifest_path: Path | None = None
+    target_window_seconds: float = 25.0
+    min_window_seconds: float = 10.0
+    max_window_seconds: float = 30.0
     gradient_checkpointing: bool = False
     mixed_precision: str = "bf16"
 
@@ -53,6 +62,13 @@ class Config:
             return self.val_manifest_path
         val_default = self.prepared_dir / "val.jsonl"
         return val_default if val_default.is_file() else None
+
+    @property
+    def test_manifest(self) -> Path | None:
+        if self.test_manifest_path is not None:
+            return self.test_manifest_path
+        test_default = self.prepared_dir / "test.jsonl"
+        return test_default if test_default.is_file() else None
 
     def replace(self, **kwargs) -> Config:
         import dataclasses
@@ -165,6 +181,9 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         raise ValueError("lora.quant_type must be nf4 or fp4")
     val_manifest_raw = data.get("val_manifest")
     val_manifest_path = resolve(data, "val_manifest") if isinstance(val_manifest_raw, str) and val_manifest_raw else None
+    test_manifest_key = "test_manifest_path" if data.get("test_manifest_path") else "test_manifest"
+    test_manifest_raw = data.get(test_manifest_key)
+    test_manifest_path = resolve(data, test_manifest_key) if isinstance(test_manifest_raw, str) and test_manifest_raw else None
 
     return Config(
         path=path,
@@ -175,6 +194,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         seed=int(raw.get("seed", 42)),
         window_seconds=float(data.get("window_seconds", 30.0)),
         shuffle=bool(data.get("shuffle", False)),
+        randomize_train=bool(data.get("randomize_train", True)),
         max_steps=int(train.get("max_steps", 300)) if isinstance(train, dict) else 300,
         learning_rate=float(train.get("learning_rate", 2e-5)) if isinstance(train, dict) else 2e-5,
         depformer_learning_rate=float(train["depformer_learning_rate"]) if (isinstance(train, dict) and train.get("depformer_learning_rate") is not None) else None,
@@ -185,6 +205,10 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         quant_type=quant_type,
         device=str(model.get("device", "cuda")),
         gradient_accumulation_steps=max(1, int(train.get("gradient_accumulation_steps", 1))) if isinstance(train, dict) else 1,
+        per_device_batch_size=max(1, int(train.get("per_device_batch_size", 2))) if isinstance(train, dict) else 2,
+        num_workers=max(0, int(train.get("num_workers", 4))) if isinstance(train, dict) else 4,
+        pin_memory=bool(train.get("pin_memory", True)) if isinstance(train, dict) else True,
+        persistent_workers=bool(train.get("persistent_workers", True)) if isinstance(train, dict) else True,
         warmup_steps=max(0, int(train.get("warmup_steps", 0))) if isinstance(train, dict) else 0,
         eval_every_steps=max(0, int(train.get("eval_every_steps", 0))) if isinstance(train, dict) else 0,
         save_every_steps=max(1, int(train.get("save_every_steps", 50))) if isinstance(train, dict) else 50,
@@ -194,6 +218,10 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         static_chunking=bool(data.get("static_chunking", False)),
         swap_roles_after_pass=bool(data.get("swap_roles_after_pass", False)),
         val_manifest_path=val_manifest_path,
+        test_manifest_path=test_manifest_path,
+        target_window_seconds=float(data.get("target_window_seconds", 25.0)),
+        min_window_seconds=float(data.get("min_window_seconds", 10.0)),
+        max_window_seconds=float(data.get("max_window_seconds", 30.0)),
         gradient_checkpointing=bool(train.get("gradient_checkpointing", False)) if isinstance(train, dict) else False,
         mixed_precision=str(train.get("mixed_precision", "bf16")) if isinstance(train, dict) else "bf16",
     )
