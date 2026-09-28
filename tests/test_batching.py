@@ -3,7 +3,9 @@ import tempfile
 import wave
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import numpy as np
 import torch
 
 from personaplex_finetuning.batching import (
@@ -51,6 +53,19 @@ class BatchContractTest(unittest.TestCase):
             item = RawAudioDataset([sample], 24000)[0]
         self.assertEqual(tuple(item.waveform.shape), (2, 12000))
         self.assertEqual(item.valid_samples, 12000)
+
+    def test_raw_dataset_accepts_stereo_decoder_output_with_channels_last_layout(self):
+        audio_path = Path("conversation.wav")
+        sample = PreparedSample(
+            "sample", audio_path, audio_path, (), "prompt", {},
+            AudioInfo(24000, 2, 1.0), 0.0, 1.0,
+        )
+        channels_last = np.array([[1.0, 7.0], [2.0, 8.0], [3.0, 9.0]], dtype=np.float32)
+        fake_sphn = SimpleNamespace(read=lambda *_args, **_kwargs: (channels_last, 24000))
+        with patch.dict("sys.modules", {"sphn": fake_sphn}):
+            item = RawAudioDataset([sample], 24000)[0]
+        self.assertEqual(tuple(item.waveform.shape), (2, 3))
+        self.assertTrue(torch.equal(item.waveform, torch.tensor([[1.0, 2.0, 3.0], [7.0, 8.0, 9.0]])))
 
     def test_mimi_receives_each_unpadded_stereo_item_with_requested_channel_order(self):
         class FakeMimi:

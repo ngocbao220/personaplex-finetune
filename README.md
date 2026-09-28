@@ -28,8 +28,7 @@ pip install torch==2.4.1 torchaudio==2.4.1 --index-url https://download.pytorch.
 # 4. Cài đặt các phụ thuộc dự án từ thư mục personaplex-finetuning
 pip install -r requirements.txt
 
-# 5. Cài đặt gói ở chế độ editable và thiết lập PYTHONPATH
-pip install -e .
+# 5. Thiết lập import path để chạy trực tiếp từ mã nguồn
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
@@ -46,7 +45,6 @@ pip install torch==2.4.1 torchaudio==2.4.1 --index-url https://download.pytorch.
 
 # 3. Cài đặt các thư viện dự án
 pip install -r requirements.txt
-pip install -e .
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
@@ -57,15 +55,12 @@ Trong env Python 3.10/3.11 trên máy B200, cài PyTorch Blackwell trước khi 
 ```bash
 pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
-pip install -e .
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-### Cách C: Script tự động cho GPU Server (1 lệnh duy nhất)
+### Chạy các module Python
 
-```bash
-# Tự động cài ffmpeg, PyTorch CUDA 12.4, dependencies, hf_transfer và kiểm tra GPU
-bash scripts/setup_server_env.sh
-```
+Sau khi kích hoạt môi trường và cài `requirements.txt`, chạy các lệnh `python -m ...` từ thư mục gốc repo. Không cần `pip install -e .`.
 
 ---
 
@@ -257,30 +252,19 @@ python -m personaplex_finetuning.train \
 
 ### 4.2. Huấn luyện Multi-GPU với DDP (Accelerate)
 
-#### Cách 1: Sử dụng launcher script `scripts/train_gpus.sh`
+#### Chạy DDP bằng Python + Accelerate
 
 ```bash
-# Huấn luyện 2 GPU trên server với preset full
-bash scripts/train_gpus.sh \
-  gpus=0,1 \
-  data=otospeech \
-  model=server \
-  train=full
-
-# Chạy 4 GPU nhưng giữ global batch bằng 1 GPU × accumulation 8:
-# 1 sample/GPU × 4 GPU × accumulation 2 = 8 samples/update.
-bash scripts/train_gpus.sh \
-  gpus=0,1,2,3 \
-  data=otospeech \
-  model=server \
-  train=full \
-  train.gradient_accumulation_steps=2
+# Chạy trên 2 GPU vật lý số 0 và 1
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src \
+python -m accelerate.commands.launch \
+  --multi_gpu --num_processes 2 --mixed_precision bf16 \
+  -m personaplex_finetuning.train \
+  --config configs/config.yaml \
+  data=otospeech model=server train=full
 ```
 
-**Chi tiết các đối số (arguments dạng key=value đồng nhất):**
-- `gpus=0,1` / `gpus=0,1,2,3`: Danh sách chỉ số GPU vật lý sử dụng. Script tự động thiết lập `CUDA_VISIBLE_DEVICES` và số tiến trình DDP tương ứng.
-- Các preset `data=...`, `model=...`, `train=...` hoặc tham số override khác được chuyển trực tiếp vào chương trình.
-- `train.max_steps` là số optimizer updates; log `global_batch_size` và `samples_per_second` dùng để so sánh throughput.
+Muốn chạy 4 GPU, đặt `CUDA_VISIBLE_DEVICES=0,1,2,3` và `--num_processes 4`. `CUDA_VISIBLE_DEVICES` chọn GPU vật lý; `--num_processes` phải bằng số GPU được chọn. Các override như `data=...`, `model=...`, `train=...` được truyền cho chương trình huấn luyện.
 
 Preset `otospeech` và `vietnamese` chia mỗi hội thoại thành các cửa sổ liên tiếp 30 giây (chunk cuối được zero-pad), rồi shuffle chunk trong mỗi pass. Sau một pass đầy đủ với speaker LEFT là logical agent, pass kế tiếp dùng speaker RIGHT là logical agent; do đó có hai role views cho mỗi chunk.
 
@@ -289,39 +273,26 @@ Mỗi thư mục mẫu phải có `voice_prompt_left.wav`, `voice_prompt_right.w
 Để tiếp tục một run bị gián đoạn, giữ nguyên topology DDP và accumulation:
 
 ```bash
-bash scripts/train_gpus.sh \
-  gpus=4,5,6,7 \
-  data=otospeech \
-  model=server \
-  train=full \
-  train.gradient_accumulation_steps=2 \
-  --resume-from ../runs/full/train_YYYYMMDD_HHMMSS/checkpoints/checkpoint_000500
-```
-
-#### Cách 2: Gọi trực tiếp qua lệnh `accelerate launch`
-
-```bash
-accelerate launch \
-  --multi_gpu \
-  --num_processes 2 \
-  --mixed_precision bf16 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 PYTHONPATH=src \
+python -m accelerate.commands.launch \
+  --multi_gpu --num_processes 4 --mixed_precision bf16 \
   -m personaplex_finetuning.train \
-  data=otospeech \
-  model=server \
-  train=full
+  --config configs/config.yaml \
+  --resume-from ../runs/full/train_YYYYMMDD_HHMMSS/checkpoints/checkpoint_000500 \
+  data=otospeech model=server train=full train.gradient_accumulation_steps=2
 ```
 
 #### Preset NVIDIA B200
 
-Preset `train=b200` dùng batch 8/GPU × accumulation 2 (global batch 16 trên một GPU), BF16, 8 DataLoader workers, prefetch 4, fused AdamW và tắt gradient checkpointing để tránh tính lại activation. Bắt đầu trên một B200:
+Preset `train=b200` dùng microbatch 1/GPU × accumulation 16 (global batch 16 trên một GPU), khớp với cách chạy đã đạt throughput cao trên nhánh `main` nhưng vẫn tận dụng bucketing/DataLoader của nhánh này. Preset bật BF16, 8 DataLoader workers, prefetch 4, fused AdamW và gradient checkpointing. Bắt đầu trên một B200:
 
 ```bash
-accelerate launch --num_processes 1 --mixed_precision bf16 \
+PYTHONPATH=src python -m accelerate.commands.launch --num_processes 1 --mixed_precision bf16 \
   -m personaplex_finetuning.train \
   data=otospeech model=server train=b200
 ```
 
-Với nhiều GPU, batch 8 áp dụng cho từng GPU; global batch sẽ tăng theo số GPU. Nếu GPU memory vượt ngưỡng, giảm `train.per_device_batch_size` xuống 4 và tăng accumulation lên 4 để giữ global batch 16 trên một GPU.
+Với nhiều GPU, global batch bằng `1 × 16 × số GPU` (ví dụ 32 trên 2 GPU). Giữ `per_device_batch_size=1` khi so sánh throughput với nhánh `main`; chỉ tăng microbatch sau khi benchmark cho thấy GPU còn dư tài nguyên.
 
 ---
 
@@ -334,25 +305,38 @@ Khi huấn luyện thích nghi ngôn ngữ mới (như tiếng Việt), bạn c�
 # Stage 0: Fine-tune thích nghi Mimi Audio Codec (Nếu kiểm tra ở mục 2.8 < 8 dB)
 # Chỉ cần audio WAV mono (không cần text transcript, không cần alignment)
 # --------------------------------------------------------------------------
-bash scripts/train_mimi.sh gpus=0 data_dir=path/to/vietnamese_wavs learning_rate=5e-5 max_steps=5000
+PYTHONPATH=src python -m tools.train_mimi \
+  --data-dir path/to/vietnamese_wavs \
+  --model-root path/to/personaplex-checkpoint \
+  --output-dir ../runs/mimi_finetuned \
+  --learning-rate 5e-5 --max-steps 5000
 
 # --------------------------------------------------------------------------
 # Stage 1: Chỉ huấn luyện khối Temporal 7B (Đóng băng 100% Depth Transformer)
 # Thích hợp cho giai đoạn đầu học ngữ nghĩa hội thoại và turn-taking
 # --------------------------------------------------------------------------
-bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=full stage=temporal_only
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src python -m accelerate.commands.launch \
+  --multi_gpu --num_processes 2 --mixed_precision bf16 \
+  -m personaplex_finetuning.train --config configs/config.yaml \
+  data=otospeech model=server train=full stage=temporal_only
 
 # --------------------------------------------------------------------------
 # Stage 2: Chỉ huấn luyện khối Depth Transformer (Đóng băng 100% Temporal 7B)
 # Thích hợp để tinh chỉnh phát âm âm học và thanh điệu mà không làm lệch tư duy hội thoại
 # --------------------------------------------------------------------------
-bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=full stage=depth_only
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src python -m accelerate.commands.launch \
+  --multi_gpu --num_processes 2 --mixed_precision bf16 \
+  -m personaplex_finetuning.train --config configs/config.yaml \
+  data=otospeech model=server train=full stage=depth_only
 
 # --------------------------------------------------------------------------
 # Stage 3: Huấn luyện liên hợp (Joint) với 2 Learning Rate riêng biệt
 # Temporal học 2e-5, Depth học chậm hơn ở 5e-6 để bảo vệ chất lượng giọng nói
 # --------------------------------------------------------------------------
-bash scripts/train_gpus.sh gpus=0,1 data=otospeech model=server train=full \
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src python -m accelerate.commands.launch \
+  --multi_gpu --num_processes 2 --mixed_precision bf16 \
+  -m personaplex_finetuning.train --config configs/config.yaml \
+  data=otospeech model=server train=full \
   stage=joint \
   learning_rate=2e-5 \
   depformer_lr=5e-6

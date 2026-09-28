@@ -342,7 +342,8 @@ def print_report(results: list[dict], num_codebooks: int, output_dir: Path):
     if mean_si_sdr < 8.0 or (count_poor / total_samples) > 0.25:
         console.print(
             "[bold red]Khuyến nghị:[/bold red] Mimi tái tạo âm thanh chưa đủ độ trung thực đối với tập dữ liệu này. "
-            "Bạn nên thực hiện [bold yellow]Stage 0: Fine-tune Mimi[/bold yellow] (chạy `scripts/train_mimi.sh`) "
+            "Bạn nên thực hiện [bold yellow]Stage 0: Fine-tune Mimi[/bold yellow] "
+            "(xem lệnh `python -m tools.train_mimi` trong README chính) "
             "trước khi huấn luyện PersonaPlex 7B."
         )
     else:

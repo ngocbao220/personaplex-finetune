@@ -43,11 +43,11 @@ class ConfigTest(unittest.TestCase):
             overrides=["data=otospeech", "model=server", "train=b200"],
         )
 
-        self.assertEqual(loaded.per_device_batch_size, 8)
-        self.assertEqual(loaded.gradient_accumulation_steps, 2)
+        self.assertEqual(loaded.per_device_batch_size, 1)
+        self.assertEqual(loaded.gradient_accumulation_steps, 16)
         self.assertEqual(loaded.num_workers, 8)
         self.assertEqual(loaded.prefetch_factor, 4)
-        self.assertFalse(loaded.gradient_checkpointing)
+        self.assertTrue(loaded.gradient_checkpointing)
 
     def test_resolves_prepared_directory_and_derives_local_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

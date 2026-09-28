@@ -37,8 +37,14 @@ class RawAudioDataset(torch.utils.data.Dataset):
             duration_sec=duration, sample_rate=self.sample_rate,
         )
         audio = np.asarray(audio, dtype=np.float32)
+        if audio.ndim == 2 and audio.shape[0] != 2 and audio.shape[1] == 2:
+            # sphn decoders may return stereo as [T, 2]; training uses [2, T].
+            audio = audio.T
         if audio.ndim != 2 or audio.shape[0] != 2 or audio.shape[-1] == 0:
-            raise ValueError(f"{sample.sample_id}: decoded audio must have shape [2, T]")
+            raise ValueError(
+                f"{sample.sample_id}: decoded audio must be stereo with shape [2, T] "
+                f"(or [T, 2]); got shape {audio.shape}"
+            )
         waveform = torch.from_numpy(audio.copy())
         return RawAudioItem(sample, waveform, waveform.shape[-1])
 

@@ -6,6 +6,12 @@ Thư mục chứa các công cụ CLI độc lập phục vụ kiểm tra dữ l
 
 ## Danh sách và Ý nghĩa từng công cụ
 
+Chạy từ thư mục gốc repo. Thiết lập import path một lần trong shell:
+
+```bash
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+```
+
 | Tên File | Mục Đích & Chức Năng | Ví Dụ Lệnh Thực Thi |
 | :--- | :--- | :--- |
 | **`validate_dataset.py`** | Kiểm tra toàn bộ tập dữ liệu đã chuẩn bị: xác thực kênh stereo (LEFT = Agent, RIGHT = User), tần số 24kHz, cấu trúc `words.json`, `metadata.json`, mẫu giọng và văn bản prompt. | `python -m tools.validate_dataset data=otospeech` |
