@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -146,6 +147,25 @@ class TrainTest(unittest.TestCase):
 
         self.assertEqual(model_forward_train(model, "codes"), "lm-output")
         self.assertEqual(model.codes, "codes")
+
+    def test_fsdp_forward_uses_wrapper_call_for_parameter_all_gather(self) -> None:
+        class FakeFSDP:
+            def __init__(self):
+                self.called = False
+
+            def __call__(self, codes):
+                self.called = True
+                return "fsdp-output"
+
+            def forward_train(self, _codes):
+                raise AssertionError("direct forward_train bypasses FSDP hooks")
+
+        model = FakeFSDP()
+        with patch("torch.distributed.fsdp.FullyShardedDataParallel", FakeFSDP):
+            output = model_forward_train(model, "codes")
+
+        self.assertEqual(output, "fsdp-output")
+        self.assertTrue(model.called)
 
     def test_writes_losses_and_training_parameters_to_tensorboard(self) -> None:
         class Writer:

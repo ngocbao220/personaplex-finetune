@@ -230,7 +230,13 @@ def enable_gradient_checkpointing(model: torch.nn.Module) -> None:
 
 def model_forward_train(model, codes: torch.Tensor):
     """LMModel exposes training through forward_train."""
-    if hasattr(model, "forward_train"):
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+    if isinstance(model, FSDP):
+        # Calling forward_train directly bypasses FSDP's pre-forward all-gather;
+        # sharded embedding weights then reach nn.Embedding as 1-D local shards.
+        output = model(codes)
+    elif hasattr(model, "forward_train"):
         output = model.forward_train(codes)
     else:
         output = model(codes)
