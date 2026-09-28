@@ -1,0 +1,50 @@
+# Standalone, fully expanded production configuration.
+# Unlike config.yaml, this file has no Hydra defaults to resolve.
+seed: 42
+
+model:
+  root: /storage-voice/voice/vdt/baottn/personaplex-7b-v1
+  source: ../src
+  device: cuda
+
+data:
+  prepared_dir: /storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared
+  # window_seconds is used only when static_chunking is enabled for smoke/debug.
+  window_seconds: 30
+  # Train chunks are stochastic across epochs but only end at safe boundaries.
+  target_window_seconds: 25
+  min_window_seconds: 10
+  max_window_seconds: 30
+  shuffle: true             # Shuffle length-bucketed batches.
+  randomize_train: true     # Vary safe train chunk boundaries by epoch.
+  random_crop: false        # Arbitrary time crops are disabled.
+  prompt_aug_prob: 0.0
+  static_chunking: false    # Enable only for smoke/debug runs.
+  swap_roles_after_pass: true
+  val_ratio: 0.05           # Split by conversation when val.jsonl is absent.
+  val_manifest: null        # Auto-detect prepared_dir/val.jsonl when present.
+  test_manifest_path: null  # Auto-detect prepared_dir/test.jsonl when present.
+
+lora:
+  rank: 16
+  alpha: 32
+  qlora: false
+  quant_type: nf4
+
+train:
+  output_dir: ../runs/full
+  max_steps: 10000           # Optimizer updates, not micro-steps.
+  learning_rate: 2.0e-5
+  depformer_learning_rate: null
+  stage: joint
+  gradient_accumulation_steps: 8
+  per_device_batch_size: 2
+  num_workers: 4
+  pin_memory: true
+  # Workers are recreated when stochastic chunks are regenerated each epoch.
+  persistent_workers: true
+  warmup_steps: 500
+  eval_every_steps: 500
+  save_every_steps: 500
+  gradient_checkpointing: true
+  mixed_precision: bf16

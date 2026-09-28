@@ -107,6 +107,49 @@ class PreparedDatasetTest(unittest.TestCase):
             with self.assertRaisesRegex(ValidationError, "exactly 2 channels"):
                 PreparedDataset(manifest).load()
 
+    def test_skips_invalid_sample_and_loads_remaining_manifest_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = []
+            for sample_id in ("invalid", "valid"):
+                sample_dir = root / "samples" / sample_id
+                sample_dir.mkdir(parents=True)
+                write_stereo_wav(sample_dir / "conversation.wav")
+                write_stereo_wav(sample_dir / "voice_prompt_left.wav")
+                (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt_left": "Be helpful."}))
+                end = 2.0 if sample_id == "invalid" else 0.2
+                (sample_dir / "words.json").write_text(json.dumps([
+                    {"speaker": "agent", "word": "Hello", "start": 0.0, "end": end},
+                ]))
+                entries.append({"sample_id": sample_id, "sample_dir": f"samples/{sample_id}"})
+            manifest = root / "train.jsonl"
+            manifest.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+
+            with self.assertLogs("personaplex_finetuning.data", level="WARNING") as logs:
+                samples = PreparedDataset(manifest).load()
+
+        self.assertEqual([sample.sample_id for sample in samples], ["valid"])
+        self.assertIn("line 1", logs.output[0])
+        self.assertIn("invalid", logs.output[0])
+        self.assertIn("word 0 is outside audio bounds", logs.output[0])
+
+    def test_reports_validation_reason_when_all_manifest_samples_are_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sample_dir = root / "samples" / "invalid"
+            sample_dir.mkdir(parents=True)
+            write_stereo_wav(sample_dir / "conversation.wav")
+            write_stereo_wav(sample_dir / "voice_prompt_left.wav")
+            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt_left": "Be helpful."}))
+            (sample_dir / "words.json").write_text(json.dumps([
+                {"speaker": "agent", "word": "Hello", "start": 0.0, "end": 2.0},
+            ]))
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps({"sample_id": "invalid", "sample_dir": "samples/invalid"}) + "\n")
+
+            with self.assertRaisesRegex(ValidationError, "invalid.*word 0 is outside audio bounds"):
+                PreparedDataset(manifest).load()
+
     def test_rejects_absolute_sample_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

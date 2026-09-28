@@ -33,6 +33,7 @@ class Config:
     gradient_accumulation_steps: int = 1
     per_device_batch_size: int = 2
     num_workers: int = 4
+    prefetch_factor: int = 2
     pin_memory: bool = True
     persistent_workers: bool = True
     warmup_steps: int = 0
@@ -207,6 +208,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         gradient_accumulation_steps=max(1, int(train.get("gradient_accumulation_steps", 1))) if isinstance(train, dict) else 1,
         per_device_batch_size=max(1, int(train.get("per_device_batch_size", 2))) if isinstance(train, dict) else 2,
         num_workers=max(0, int(train.get("num_workers", 4))) if isinstance(train, dict) else 4,
+        prefetch_factor=max(1, int(train.get("prefetch_factor", 2))) if isinstance(train, dict) else 2,
         pin_memory=bool(train.get("pin_memory", True)) if isinstance(train, dict) else True,
         persistent_workers=bool(train.get("persistent_workers", True)) if isinstance(train, dict) else True,
         warmup_steps=max(0, int(train.get("warmup_steps", 0))) if isinstance(train, dict) else 0,

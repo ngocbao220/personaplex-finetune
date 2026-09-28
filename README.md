@@ -9,7 +9,7 @@ Tài liệu hướng dẫn thiết lập môi trường, toàn bộ **các lện
 > **Lưu ý quan trọng**:
 > - Sử dụng Conda env hoặc virtualenv (`.venv`) cục bộ; không cài đè lên môi trường hệ thống.
 > - Sử dụng **Python 3.10 hoặc 3.11**.
-> - PyTorch yêu cầu phiên bản **Torch 2.4.x** (CUDA 12.1 hoặc 12.4 trên Linux/Windows, hoặc MPS/CPU trên macOS); **không dùng Torch 2.8**.
+> - Máy GPU thông thường dùng PyTorch **2.4.x** (CUDA 12.1/12.4). NVIDIA B200 cần build PyTorch có hỗ trợ Blackwell: dùng **PyTorch 2.8.x + CUDA 12.8** theo lệnh riêng bên dưới. macOS dùng bản PyTorch phù hợp với MPS/CPU.
 > - Bắt buộc cài đặt `ffmpeg` để xử lý audio 24kHz / stereophonic.
 
 ### Cách A: Sử dụng Conda (Khuyên dùng)
@@ -22,7 +22,7 @@ conda activate personaplex
 # 2. Cài đặt ffmpeg qua conda-forge
 conda install -c conda-forge ffmpeg -y
 
-# 3. Cài đặt PyTorch 2.4.1 tương thích CUDA 12.4 (Nếu dùng Mac: pip install torch==2.4.1 torchaudio==2.4.1)
+# 3. Cài đặt PyTorch cho GPU thông thường (CUDA 12.4). Với B200, thay lệnh này bằng lệnh CUDA 12.8 ở phần lưu ý bên dưới.
 pip install torch==2.4.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu124
 
 # 4. Cài đặt các phụ thuộc dự án từ thư mục personaplex-finetuning
@@ -40,7 +40,7 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 python3.11 -m venv .venv
 source .venv/bin/activate
 
-# 2. Cập nhật pip và cài đặt PyTorch với CUDA 12.4
+# 2. Cập nhật pip và cài đặt PyTorch với CUDA 12.4 (B200: dùng lệnh CUDA 12.8 bên dưới)
 pip install --upgrade pip
 pip install torch==2.4.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu124
 
@@ -48,6 +48,16 @@ pip install torch==2.4.1 torchaudio==2.4.1 --index-url https://download.pytorch.
 pip install -r requirements.txt
 pip install -e .
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+#### PyTorch cho NVIDIA B200
+
+Trong env Python 3.10/3.11 trên máy B200, cài PyTorch Blackwell trước khi cài requirements:
+
+```bash
+pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt
+pip install -e .
 ```
 
 ### Cách C: Script tự động cho GPU Server (1 lệnh duy nhất)
@@ -300,6 +310,18 @@ accelerate launch \
   model=server \
   train=full
 ```
+
+#### Preset NVIDIA B200
+
+Preset `train=b200` dùng batch 8/GPU × accumulation 2 (global batch 16 trên một GPU), BF16, 8 DataLoader workers, prefetch 4, fused AdamW và tắt gradient checkpointing để tránh tính lại activation. Bắt đầu trên một B200:
+
+```bash
+accelerate launch --num_processes 1 --mixed_precision bf16 \
+  -m personaplex_finetuning.train \
+  data=otospeech model=server train=b200
+```
+
+Với nhiều GPU, batch 8 áp dụng cho từng GPU; global batch sẽ tăng theo số GPU. Nếu GPU memory vượt ngưỡng, giảm `train.per_device_batch_size` xuống 4 và tăng accumulation lên 4 để giữ global batch 16 trên một GPU.
 
 ---
 

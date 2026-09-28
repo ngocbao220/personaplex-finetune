@@ -18,7 +18,6 @@ scipy>=1.11
 sentencepiece==0.2
 sphn>=0.1.4,<0.2
 tensorboard>=2.17,<2.19
-torch>=2.2,<2.5
-torchaudio>=2.2,<2.5
+torch>=2.2,<2.9
+torchaudio>=2.2,<2.9
 tqdm>=4.66
-

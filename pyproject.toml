@@ -22,8 +22,8 @@ dependencies = [
   "sphn>=0.1.4,<0.2",
   "tensorboard>=2.17,<2.19",
   "pyloudnorm>=0.1.1",
-  "torch>=2.2,<2.5",
-  "torchaudio>=2.2,<2.5",
+  "torch>=2.2,<2.9",
+  "torchaudio>=2.2,<2.9",
   "tqdm>=4.66",
 ]
 

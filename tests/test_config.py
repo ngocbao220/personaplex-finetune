@@ -6,6 +6,21 @@ from personaplex_finetuning.config import load_config
 
 
 class ConfigTest(unittest.TestCase):
+    def test_full_standalone_config_loads_every_feature_setting(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        loaded = load_config(root / "configs" / "config.full.yaml")
+
+        self.assertEqual(loaded.model_root, Path("/storage-voice/voice/vdt/baottn/personaplex-7b-v1"))
+        self.assertEqual(loaded.prepared_dir, Path("/storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared"))
+        self.assertEqual(loaded.target_window_seconds, 25)
+        self.assertEqual(loaded.min_window_seconds, 10)
+        self.assertEqual(loaded.max_window_seconds, 30)
+        self.assertEqual(loaded.per_device_batch_size, 2)
+        self.assertEqual(loaded.num_workers, 4)
+        self.assertTrue(loaded.randomize_train)
+        self.assertTrue(loaded.persistent_workers)
+        self.assertEqual(loaded.max_steps, 10_000)
+
     def test_full_server_hydra_preset_preserves_production_settings(self) -> None:
         root = Path(__file__).resolve().parents[1]
         loaded = load_config(
@@ -20,6 +35,19 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(loaded.static_chunking)
         self.assertTrue(loaded.swap_roles_after_pass)
         self.assertEqual(loaded.per_device_batch_size, 2)
+
+    def test_b200_preset_uses_large_batches_and_prefetch(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        loaded = load_config(
+            root / "configs" / "config.yaml",
+            overrides=["data=otospeech", "model=server", "train=b200"],
+        )
+
+        self.assertEqual(loaded.per_device_batch_size, 8)
+        self.assertEqual(loaded.gradient_accumulation_steps, 2)
+        self.assertEqual(loaded.num_workers, 8)
+        self.assertEqual(loaded.prefetch_factor, 4)
+        self.assertFalse(loaded.gradient_checkpointing)
 
     def test_resolves_prepared_directory_and_derives_local_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

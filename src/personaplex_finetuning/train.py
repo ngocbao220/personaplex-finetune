@@ -112,6 +112,7 @@ def iter_training_batches(config, conversations, runtime, device, rank: int, wor
             collate_fn=collate_raw_audio, num_workers=config.num_workers,
             pin_memory=config.pin_memory,
             persistent_workers=config.persistent_workers and config.num_workers > 0,
+            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None,
         )
         for raw_batch in loader:
             if skip_batches:
@@ -541,6 +542,7 @@ def run(
             "gradient_accumulation_steps": accum_steps,
             "per_device_batch_size": config.per_device_batch_size,
             "num_workers": config.num_workers,
+            "prefetch_factor": config.prefetch_factor,
             "pin_memory": config.pin_memory,
             "persistent_workers": config.persistent_workers,
             "global_batch_size": global_batch_size,
@@ -650,11 +652,11 @@ def run(
             param_groups.append({"params": temp_params, "lr": temp_lr})
         if dep_params:
             param_groups.append({"params": dep_params, "lr": dep_lr})
-        optimizer = torch.optim.AdamW(param_groups, weight_decay=0.0)
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=0.0, fused=device.type == "cuda")
         if accelerator.is_main_process:
             print(f"Using Dual Learning Rates -> Temporal Transformer: {temp_lr:.2e}, Depth Transformer: {dep_lr:.2e}")
     else:
-        optimizer = torch.optim.AdamW(trainable, lr=temp_lr, weight_decay=0.0)
+        optimizer = torch.optim.AdamW(trainable, lr=temp_lr, weight_decay=0.0, fused=device.type == "cuda")
     max_steps = 1 if smoke else config.max_steps
     scheduler = None
     if config.warmup_steps > 0 and not smoke:

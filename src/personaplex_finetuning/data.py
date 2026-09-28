@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import wave
 import dataclasses
 from dataclasses import dataclass
@@ -12,6 +13,9 @@ from typing import Any, Literal
 
 class ValidationError(ValueError):
     """Raised when a prepared sample does not meet the training contract."""
+
+
+logger = logging.getLogger(__name__)
 
 
 Speaker = Literal["agent", "user"]
@@ -283,6 +287,7 @@ class PreparedDataset:
         if not self.manifest.is_file():
             raise ValidationError(f"manifest does not exist: {self.manifest}")
         samples: list[PreparedSample] = []
+        rejected: list[str] = []
         for line_number, line in enumerate(self.manifest.read_text(encoding="utf-8").splitlines(), 1):
             if not line.strip():
                 continue
@@ -290,8 +295,22 @@ class PreparedDataset:
                 entry = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValidationError(f"invalid JSONL at line {line_number}: {exc}") from exc
-            samples.append(self._load_entry(entry, line_number))
+            sample_id = entry.get("sample_id") if isinstance(entry, dict) else None
+            try:
+                samples.append(self._load_entry(entry, line_number))
+            except ValidationError as exc:
+                detail = f"line {line_number}"
+                if sample_id:
+                    detail += f" ({sample_id})"
+                detail += f": {exc}"
+                rejected.append(detail)
+                logger.warning("Skipping invalid prepared sample: %s", detail)
         if not samples:
+            if rejected:
+                raise ValidationError(
+                    f"manifest has no valid samples: {self.manifest}; "
+                    f"rejected entries: {'; '.join(rejected)}"
+                )
             raise ValidationError(f"manifest has no samples: {self.manifest}")
         ids = [sample.sample_id for sample in samples]
         if len(ids) != len(set(ids)):
@@ -331,6 +350,8 @@ class PreparedDataset:
         return train_set, val_set
 
     def _load_entry(self, entry: dict[str, Any], line_number: int) -> PreparedSample:
+        if not isinstance(entry, dict):
+            raise ValidationError(f"line {line_number}: manifest entry must be a JSON object")
         sample_id = str(entry.get("sample_id", "")).strip()
         sample_dir = entry.get("sample_dir")
         if not sample_id or not isinstance(sample_dir, str):
