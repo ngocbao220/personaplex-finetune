@@ -167,6 +167,23 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(output, "fsdp-output")
         self.assertTrue(model.called)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for BF16 autocast regression")
+    def test_cuda_forward_autocasts_fp32_activations_for_bf16_projection(self) -> None:
+        class Model(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.projection = torch.nn.Linear(3, 2, dtype=torch.bfloat16)
+
+            def forward_train(self, codes):
+                return self.projection(codes)
+
+        model = Model().cuda()
+        output = model_forward_train(model, torch.randn(4, 3, device="cuda", dtype=torch.float32))
+
+        self.assertEqual(output.dtype, torch.bfloat16)
+        output.float().sum().backward()
+        self.assertIsNotNone(model.projection.weight.grad)
+
     def test_writes_losses_and_training_parameters_to_tensorboard(self) -> None:
         class Writer:
             def __init__(self) -> None:

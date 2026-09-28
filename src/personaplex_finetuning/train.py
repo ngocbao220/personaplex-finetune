@@ -71,21 +71,22 @@ def rank_stride_indices(sample_count: int, rank: int, world_size: int) -> list[i
     return list(range(rank, sample_count, world_size))
 
 
-def step_optimizer_if_ready(accelerator, optimizer, scheduler, trainable, model=None) -> float:
-    """Commit an update, using FSDP's global-norm implementation when wrapped."""
-    if not accelerator.sync_gradients:
+def step_optimizer_if_ready(sync_state, optimizer, scheduler, trainable, model=None, max_norm=1.0) -> float:
+    if not sync_state.sync_gradients:
         return 0.0
-    is_fsdp = model is not None and hasattr(model, "clip_grad_norm_") and model.__class__.__name__ == "FullyShardedDataParallel"
-    if is_fsdp:
-        grad_norm = float(model.clip_grad_norm_(1.0))
+
+    if model is not None and hasattr(model, "clip_grad_norm_"):
+        # FSDP: global norm across shards
+        grad_norm = model.clip_grad_norm_(max_norm)
     else:
-        grad_norm = float(accelerator.clip_grad_norm_(trainable, 1.0))
+        grad_norm = torch.nn.utils.clip_grad_norm_(trainable, max_norm)
+
+    grad_norm = float(grad_norm)
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
     optimizer.zero_grad(set_to_none=True)
     return grad_norm
-
 
 def deterministic_crop_rng(seed: int, process_index: int, micro_step: int) -> random.Random:
     """Make dynamic crops reproducible across resume without saving Python RNG state."""
@@ -229,17 +230,27 @@ def enable_gradient_checkpointing(model: torch.nn.Module) -> None:
 
 
 def model_forward_train(model, codes: torch.Tensor):
-    """LMModel exposes training through forward_train."""
+    """Run Moshi's training forward with the runtime's CUDA BF16 precision."""
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
-    if isinstance(model, FSDP):
-        # Calling forward_train directly bypasses FSDP's pre-forward all-gather;
-        # sharded embedding weights then reach nn.Embedding as 1-D local shards.
-        output = model(codes)
-    elif hasattr(model, "forward_train"):
-        output = model.forward_train(codes)
-    else:
-        output = model(codes)
+    # FSDP mixed_precision casts managed parameters, but floating activations
+    # produced by unwrapped Moshi operations may remain FP32. CUDA autocast
+    # makes those activations compatible with BF16 projections throughout the
+    # full model, including projections outside transformer FSDP units.
+    precision_context = (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if getattr(getattr(codes, "device", None), "type", None) == "cuda"
+        else nullcontext()
+    )
+    with precision_context:
+        if isinstance(model, FSDP):
+            # Calling forward_train directly bypasses FSDP's pre-forward all-gather;
+            # sharded embedding weights then reach nn.Embedding as 1-D local shards.
+            output = model(codes)
+        elif hasattr(model, "forward_train"):
+            output = model.forward_train(codes)
+        else:
+            output = model(codes)
     if hasattr(output, "logits") and hasattr(output, "text_logits"):
         if output.logits.shape[0] != codes.shape[0] or output.logits.shape[2] != codes.shape[2]:
             raise AssertionError(f"audio logits must align to [B,K,T] codes; got {output.logits.shape} vs {codes.shape}")
