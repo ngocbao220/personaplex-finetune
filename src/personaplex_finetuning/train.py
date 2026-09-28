@@ -8,24 +8,24 @@ import os
 import random
 import sys
 import time
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
 import torch
-from accelerate import Accelerator
-from accelerate.utils import set_seed
 from safetensors.torch import save_file
 from tqdm.auto import tqdm
 
 from .config import Config, load_config
-from .data import PreparedDataset, conversation_group_keys, turn_aware_chunks
+from .data import PreparedDataset, conversation_group_keys, duration_chunks, limit_conversations
 from .batching import (
     DistributedBucketBatchSampler, RawAudioDataset, collate_raw_audio, post_encode_collate,
 )
 from .lora import adapter_state_dict, inject_lora, load_adapter
-from .objective import stream_weights_torch, torch_weighted_cross_entropy
+from .objective import stream_weights_torch, torch_weighted_cross_entropy, torch_weighted_cross_entropy_stats
 from .runtime import RuntimePaths, load_runtime
-from .sequence import PersonaPlexTrainingExampleBuilder
+from .sequence import PersonaPlexTrainingExampleBuilder, pad_training_example
+from .fsdp import fsdp_adapter_state_dict, wrap_model_fsdp
 
 
 def limit_cpu_threads(torch_module) -> int:
@@ -53,9 +53,9 @@ def create_run_dir(output_root: Path, smoke: bool) -> Path:
 
 
 def build_example(config: Config, sample, runtime, random_crop: bool = False, rng=None, dialogue_codes=None):
-    effective_sample = sample
     builder = PersonaPlexTrainingExampleBuilder(runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token)
-    return builder.apply_delays(builder.build(effective_sample, dialogue_codes=dialogue_codes), runtime.delays)
+    # PersonaPlex LMModel.forward_train applies its native per-stream delays.
+    return builder.build(sample, dialogue_codes=dialogue_codes)
 
 
 def effective_global_batch_size(per_process_batch_size: int, num_processes: int, gradient_accumulation_steps: int) -> int:
@@ -65,11 +65,21 @@ def effective_global_batch_size(per_process_batch_size: int, num_processes: int,
     return per_process_batch_size * num_processes * gradient_accumulation_steps
 
 
-def step_optimizer_if_ready(accelerator, optimizer, scheduler, trainable) -> float:
-    """Commit an accumulated DDP update only at Accelerate's sync boundary."""
+def rank_stride_indices(sample_count: int, rank: int, world_size: int) -> list[int]:
+    if sample_count < 0 or world_size < 1 or not 0 <= rank < world_size:
+        raise ValueError("invalid sample count or distributed rank")
+    return list(range(rank, sample_count, world_size))
+
+
+def step_optimizer_if_ready(accelerator, optimizer, scheduler, trainable, model=None) -> float:
+    """Commit an update, using FSDP's global-norm implementation when wrapped."""
     if not accelerator.sync_gradients:
         return 0.0
-    grad_norm = float(accelerator.clip_grad_norm_(trainable, 1.0))
+    is_fsdp = model is not None and hasattr(model, "clip_grad_norm_") and model.__class__.__name__ == "FullyShardedDataParallel"
+    if is_fsdp:
+        grad_norm = float(model.clip_grad_norm_(1.0))
+    else:
+        grad_norm = float(accelerator.clip_grad_norm_(trainable, 1.0))
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
@@ -83,68 +93,69 @@ def deterministic_crop_rng(seed: int, process_index: int, micro_step: int) -> ra
 
 
 def iter_training_batches(config, conversations, runtime, device, rank: int, world_size: int, smoke: bool, skip_batches: int = 0):
-    """Load CPU waveform batches, encode unpadded samples with Mimi, then collate codes."""
-    from torch.utils.data import DataLoader
-    from .data import fixed_chunks
-
+    """Moshi-style iterator: fixed conversation chunks, rank stride, then small batches."""
     epoch = 0
     while True:
-        randomize = config.randomize_train and not smoke and not config.static_chunking
-        if config.static_chunking:
-            samples = fixed_chunks(conversations, config.window_seconds)
-        else:
-            samples = turn_aware_chunks(
-                conversations, config.target_window_seconds, config.min_window_seconds,
-                config.max_window_seconds, randomize=randomize,
-                rng=random.Random(config.seed + epoch),
+        samples = duration_chunks(conversations, config.duration_sec)
+        if config.shuffle and not smoke:
+            random.Random(config.seed + epoch).shuffle(samples)
+        rank_samples = [samples[index] for index in rank_stride_indices(len(samples), rank, world_size)]
+        common_batch_count = min(
+            len(rank_stride_indices(len(samples), worker, world_size)) // config.per_device_batch_size
+            for worker in range(world_size)
+        )
+        if common_batch_count == 0:
+            raise ValueError(
+                f"only {len(samples)} duration chunks for world_size={world_size} and "
+                f"batch_size_per_gpu={config.per_device_batch_size}; use sample_number=null/full data "
+                "or run a one-GPU overfit config with batch_size=1"
             )
-        if config.swap_roles_after_pass and not smoke and epoch % 2:
-            samples = [sample.swapped_roles() for sample in samples]
-        sampler = DistributedBucketBatchSampler(
-            [round((sample.window_end_sec - sample.window_start_sec) * runtime.codec.frame_rate) for sample in samples],
-            config.per_device_batch_size, rank=rank, world_size=world_size,
-            seed=config.seed + epoch, shuffle=config.shuffle and not smoke,
-        )
-        if len(sampler) == 0:
-            raise ValueError("dataset is too small to form one full distributed batch")
-        loader = DataLoader(
-            RawAudioDataset(samples, runtime.codec.sample_rate), batch_sampler=sampler,
-            collate_fn=collate_raw_audio, num_workers=config.num_workers,
-            pin_memory=config.pin_memory,
-            persistent_workers=config.persistent_workers and config.num_workers > 0,
-            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None,
-        )
-        for raw_batch in loader:
+        rank_samples = rank_samples[:common_batch_count * config.per_device_batch_size]
+        for batch_index in range(common_batch_count):
             if skip_batches:
                 skip_batches -= 1
                 continue
+            batch_samples = rank_samples[
+                batch_index * config.per_device_batch_size:
+                (batch_index + 1) * config.per_device_batch_size
+            ]
             examples = []
-            local_audio_frames = 0
-            for index, sample in enumerate(raw_batch["samples"]):
-                if randomize and config.prompt_aug_prob > 0:
+            for sample_index, sample in enumerate(batch_samples):
+                if config.prompt_aug_prob and not smoke:
                     sample = sample.with_window(
                         sample.window_start_sec, sample.window_end_sec,
-                        sample.get_augmented_prompt(config.prompt_aug_prob, rng=random.Random(
-                            config.seed + epoch * 1_000_003 + index
-                        )),
+                        sample.get_augmented_prompt(
+                            config.prompt_aug_prob,
+                            rng=random.Random(
+                                config.seed + epoch * 1_000_003
+                                + batch_index * config.per_device_batch_size + sample_index
+                            ),
+                        ),
                     )
-                valid_samples = int(raw_batch["valid_samples"][index])
-                waveform = raw_batch["waveforms"][index, :, :valid_samples].to(
-                    device, non_blocking=config.pin_memory
-                )
-                dialogue_codes = runtime.codec.encode_stereo_waveform(
-                    waveform, sample.agent_channel, sample.user_channel
-                )
-                local_audio_frames += len(dialogue_codes[0][0])
-                examples.append(build_example(config, sample, runtime, dialogue_codes=dialogue_codes))
+                examples.append(build_example(config, sample, runtime))
+            fixed_frames = round(config.duration_sec * runtime.codec.frame_rate) + max(
+                (example.prompt_frames for example in examples), default=0
+            )
+            examples = [
+                pad_training_example(example, fixed_frames, runtime.tokenizer.padding_id, runtime.zero_token)
+                for example in examples
+            ]
+            if any(
+                len(example.input_codes) != 17
+                or any(len(stream) != fixed_frames for stream in example.input_codes)
+                or any(len(stream) != fixed_frames for stream in example.loss_mask)
+                for example in examples
+            ):
+                raise AssertionError("batch padding produced inconsistent PersonaPlex stream shapes")
             batch = post_encode_collate(
                 examples, runtime.tokenizer.padding_id, runtime.zero_token, device
             )
-            yield (
-                batch, epoch, len(examples),
-                sum(raw_batch["valid_samples"].tolist()) / runtime.codec.sample_rate,
-                local_audio_frames,
+            audio_seconds = sum(
+                max(0.0, min(item.window_end_sec, item.audio.duration_sec) - item.window_start_sec)
+                for item in batch_samples
             )
+            audio_frames = sum(item.dialogue_frames for item in examples)
+            yield batch, epoch, len(examples), audio_seconds, audio_frames
         epoch += 1
 
 
@@ -220,8 +231,15 @@ def enable_gradient_checkpointing(model: torch.nn.Module) -> None:
 def model_forward_train(model, codes: torch.Tensor):
     """LMModel exposes training through forward_train."""
     if hasattr(model, "forward_train"):
-        return model.forward_train(codes)
-    return model(codes)
+        output = model.forward_train(codes)
+    else:
+        output = model(codes)
+    if hasattr(output, "logits") and hasattr(output, "text_logits"):
+        if output.logits.shape[0] != codes.shape[0] or output.logits.shape[2] != codes.shape[2]:
+            raise AssertionError(f"audio logits must align to [B,K,T] codes; got {output.logits.shape} vs {codes.shape}")
+        if output.text_logits.shape[0] != codes.shape[0] or output.text_logits.shape[2] != codes.shape[2]:
+            raise AssertionError(f"text logits must align to [B,1,T] codes; got {output.text_logits.shape} vs {codes.shape}")
+    return output
 
 
 def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_parameters: int, cpu_threads: int) -> None:
@@ -240,7 +258,7 @@ def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_
         writer.add_scalar(name, value, step)
 
 
-def loss_components(model_output, codes, example, text_padding_id, torch_module):
+def loss_components(model_output, codes, example, text_padding_id, torch_module, first_codebook_weight_multiplier=1.0, text_padding_weight=0.3, *, distributed=False):
     """Compute per-stream losses using GPU-native vectorized weights."""
     if isinstance(example, dict):
         labels_tensor = example["labels"]
@@ -248,11 +266,16 @@ def loss_components(model_output, codes, example, text_padding_id, torch_module)
     else:
         labels_tensor = torch_module.tensor(example.labels, dtype=torch_module.long, device=codes.device).unsqueeze(0)
         mask_tensor = torch_module.tensor(example.loss_mask, dtype=torch_module.bool, device=codes.device).unsqueeze(0)
-    weights = stream_weights_torch(labels_tensor, mask_tensor, text_padding_id)
+    weights = stream_weights_torch(
+        labels_tensor, mask_tensor, text_padding_id,
+        first_codebook_weight_multiplier=first_codebook_weight_multiplier,
+        text_padding_weight=text_padding_weight,
+    )
 
     text_target = labels_tensor[:, 0, :]
     text_weight = weights[:, 0, :] * model_output.text_mask[:, 0].to(weights.dtype)
-    text_loss = torch_weighted_cross_entropy(
+    cross_entropy = torch_weighted_cross_entropy_stats if distributed else torch_weighted_cross_entropy
+    text_loss = cross_entropy(
         model_output.text_logits.reshape(-1, model_output.text_logits.shape[-1]),
         text_target.reshape(-1),
         text_weight.reshape(-1),
@@ -261,17 +284,37 @@ def loss_components(model_output, codes, example, text_padding_id, torch_module)
     audio_target = labels_tensor[:, 1:17, :]
     audio_weights = weights[:, 1:17, :] * model_output.mask.to(weights.dtype)
 
-    semantic = torch_weighted_cross_entropy(
+    semantic = cross_entropy(
         model_output.logits[:, 0].reshape(-1, model_output.logits.shape[-1]),
         audio_target[:, 0].reshape(-1),
         audio_weights[:, 0].reshape(-1),
     )
-    nonsemantic = torch_weighted_cross_entropy(
+    nonsemantic = cross_entropy(
         model_output.logits[:, 1:8].reshape(-1, model_output.logits.shape[-1]),
         audio_target[:, 1:8].reshape(-1),
         audio_weights[:, 1:8].reshape(-1),
     )
-    return text_loss + semantic + nonsemantic, {"text": text_loss, "audio_semantic": semantic, "audio_nonsemantic": nonsemantic}
+    components = {"text": text_loss, "audio_semantic": semantic, "audio_nonsemantic": nonsemantic}
+    if distributed:
+        return components["text"] + components["audio_semantic"] + components["audio_nonsemantic"], components
+    return sum(components.values()), components
+
+
+def reduce_distributed_loss(stats, all_reduce_sum, *, preserve_grad: bool = False, world_size: int = 1):
+    """Reduce weighted CE sums/weights globally, then return reference-style means."""
+    components = {}
+    total = None
+    for name, (numerator, denominator) in stats.items():
+        global_values = all_reduce_sum(torch.stack((numerator.detach(), denominator.detach())))
+        if preserve_grad:
+            # FSDP averages gradients across ranks, so scale each local numerator by
+            # world_size/global_weight to obtain a global weighted mean gradient.
+            loss = numerator * world_size / global_values[1].clamp_min(1e-12)
+        else:
+            loss = global_values[0] / global_values[1].clamp_min(1e-12)
+        components[name] = loss
+        total = loss if total is None else total + loss
+    return components, total
 
 
 def one_step(config: Config, runtime, example, optimizer=None):
@@ -348,10 +391,17 @@ def load_training_state(
 
 
 def save_adapter(run_dir: Path, model, config: Config, step: int, optimizer=None, scheduler=None, gradient_accumulation_steps: int = 1, num_processes: int = 1) -> Path:
+    return save_adapter_state(
+        run_dir, adapter_state_dict(model), config, step, optimizer, scheduler,
+        gradient_accumulation_steps, num_processes,
+    )
+
+
+def save_adapter_state(run_dir: Path, state_dict, config: Config, step: int, optimizer=None, scheduler=None, gradient_accumulation_steps: int = 1, num_processes: int = 1) -> Path:
     path = run_dir / "checkpoints" / f"checkpoint_{step:06d}"
     path.mkdir(parents=True, exist_ok=True)
     adapter = path / "lora.safetensors"
-    save_file(adapter_state_dict(model), str(adapter))
+    save_file(state_dict, str(adapter))
     (path / "adapter.json").write_text(
         json.dumps(
             {"step": step, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha,
@@ -369,10 +419,20 @@ def save_best_adapter(
     run_dir: Path, model, config: Config, step: int, val_loss: float,
     optimizer=None, scheduler=None, gradient_accumulation_steps: int = 1, num_processes: int = 1,
 ) -> Path:
+    return save_best_adapter_state(
+        run_dir, adapter_state_dict(model), config, step, val_loss, optimizer, scheduler,
+        gradient_accumulation_steps, num_processes,
+    )
+
+
+def save_best_adapter_state(
+    run_dir: Path, state_dict, config: Config, step: int, val_loss: float,
+    optimizer=None, scheduler=None, gradient_accumulation_steps: int = 1, num_processes: int = 1,
+) -> Path:
     path = run_dir / "checkpoints" / "best"
     path.mkdir(parents=True, exist_ok=True)
     adapter = path / "lora.safetensors"
-    save_file(adapter_state_dict(model), str(adapter))
+    save_file(state_dict, str(adapter))
     (path / "adapter.json").write_text(
         json.dumps(
             {"step": step, "val_loss": val_loss, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha,
@@ -386,32 +446,32 @@ def save_best_adapter(
     return adapter
 
 
-def evaluate_validation(config: Config, runtime, val_samples: list, accelerator: Accelerator) -> dict[str, float]:
+def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, world_size: int, device) -> dict[str, float]:
     if not val_samples:
         return {}
-    unwrapped = accelerator.unwrap_model(runtime.model)
+    unwrapped = runtime.model
     unwrapped.eval()
     totals = {"total": 0.0, "text": 0.0, "semantic": 0.0, "nonsemantic": 0.0}
     count = 0
-    device = accelerator.device
     with torch.no_grad():
-        for sample_index, sample in enumerate(val_samples):
-            if sample_index % accelerator.num_processes != accelerator.process_index:
-                continue
+        local_samples = val_samples[rank::world_size]
+        for sample in local_samples:
             example = build_example(config, sample, runtime, random_crop=False)
             codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
-            output = unwrapped(codes)
-            total, comps = loss_components(output, codes, example, runtime.tokenizer.padding_id, torch)
+            output = model_forward_train(unwrapped, codes)
+            total, comps = loss_components(
+                output, codes, example, runtime.tokenizer.padding_id, torch,
+                config.first_codebook_weight_multiplier, config.text_padding_weight,
+            )
             totals["total"] += float(total.detach())
             totals["text"] += float(comps["text"].detach())
             totals["semantic"] += float(comps["audio_semantic"].detach())
             totals["nonsemantic"] += float(comps["audio_nonsemantic"].detach())
             count += 1
     unwrapped.train()
-    reduced = accelerator.reduce(
-        torch.tensor([totals["total"], totals["text"], totals["semantic"], totals["nonsemantic"], count], device=device),
-        reduction="sum",
-    )
+    reduced = torch.tensor([totals["total"], totals["text"], totals["semantic"], totals["nonsemantic"], count], device=device)
+    if world_size > 1:
+        torch.distributed.all_reduce(reduced, op=torch.distributed.ReduceOp.SUM)
     total_count = float(reduced[4].item())
     if total_count == 0:
         raise RuntimeError("validation has no samples after rank partitioning")
@@ -447,6 +507,9 @@ def run(
     smoke: bool = False,
     resume_from: str | None = None,
 ) -> Path | None:
+    from accelerate import Accelerator
+    # Moshi's lazy compile wrappers can trigger graph/compile shape issues under FSDP.
+    os.environ.setdefault("NO_TORCH_COMPILE", "1")
     for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[variable] = "1"
     try:
@@ -456,25 +519,38 @@ def run(
 
     if smoke and config.shuffle:
         raise ValueError("overfit/smoke configuration must set data.shuffle: false")
-    if config.static_chunking and not smoke:
-        raise ValueError("data.static_chunking is reserved for smoke/debug runs")
-
     accum_steps = max(1, config.gradient_accumulation_steps)
-    accelerator = Accelerator(
-        mixed_precision=config.mixed_precision if torch.cuda.is_available() else "no",
-        gradient_accumulation_steps=accum_steps,
-    )
-    device = accelerator.device
-    global_batch_size = effective_global_batch_size(config.per_device_batch_size, accelerator.num_processes, accum_steps)
+    if "LOCAL_RANK" in os.environ:
+        if not torch.cuda.is_available():
+            raise RuntimeError("torchrun distributed mode requires CUDA")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        torch.distributed.init_process_group(backend="nccl", init_method="env://")
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+    else:
+        rank, world_size, local_rank = 0, 1, 0
+    use_fsdp = world_size > 1
+    if use_fsdp and not torch.cuda.is_available():
+        raise RuntimeError("multi-process training requires CUDA and FSDP FULL_SHARD")
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    global_batch_size = effective_global_batch_size(config.per_device_batch_size, world_size, accum_steps)
     cpu_threads = limit_cpu_threads(torch)
-    set_seed(config.seed + accelerator.process_index)
-
+    seed_everything(config.seed, torch)
+    main_process = rank == 0
+    def barrier():
+        if use_fsdp:
+            torch.distributed.barrier()
+    def all_reduce_sum(value):
+        if use_fsdp:
+            torch.distributed.all_reduce(value, op=torch.distributed.ReduceOp.SUM)
+        return value
     # Dataset loading
     test_samples = []
     if config.val_manifest:
         train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
         val_samples = PreparedDataset(config.val_manifest, config.window_seconds).load()
-    elif config.eval_every_steps > 0:
+    elif config.eval_every_steps > 0 and not config.no_eval:
         train_samples, val_samples = PreparedDataset(config.manifest, config.window_seconds).split(
             val_ratio=config.val_ratio, seed=config.seed
         )
@@ -490,34 +566,14 @@ def run(
     if train_groups & val_groups or train_groups & test_groups or val_groups & test_groups:
         raise ValueError("train/validation/test manifests contain overlapping conversation groups")
 
-    train_conversations = list(train_samples)
-    if config.static_chunking:
-        from .data import fixed_chunks
-        train_samples = fixed_chunks(train_samples, config.window_seconds)
-        val_samples = fixed_chunks(val_samples, config.window_seconds) if val_samples else []
-        test_samples = fixed_chunks(test_samples, config.window_seconds) if test_samples else []
-        if config.swap_roles_after_pass and not smoke:
-            # Fail before model loading, rather than halfway through the first right-speaker pass.
-            for sample in train_samples:
-                sample.swapped_roles()
-    else:
-        train_samples = turn_aware_chunks(
-            train_samples, config.target_window_seconds, config.min_window_seconds,
-            config.max_window_seconds, randomize=config.randomize_train and not smoke,
-            rng=random.Random(config.seed),
-        )
-        val_samples = turn_aware_chunks(
-            val_samples, config.target_window_seconds, config.min_window_seconds,
-            config.max_window_seconds, randomize=False,
-        ) if val_samples else []
-        test_samples = turn_aware_chunks(
-            test_samples, config.target_window_seconds, config.min_window_seconds,
-            config.max_window_seconds, randomize=False,
-        ) if test_samples else []
+    train_conversations = limit_conversations(train_samples, config.sample_number)
+    train_samples = duration_chunks(train_conversations, config.duration_sec)
+    val_samples = duration_chunks(val_samples, config.duration_sec) if val_samples else []
+    test_samples = duration_chunks(test_samples, config.duration_sec) if test_samples else []
 
     # Run directory creation (coordinated across ranks)
     run_dir = None
-    if accelerator.is_main_process:
+    if main_process:
         run_dir = create_run_dir(config.output_dir, smoke)
         config_record = {
             "event": "configuration",
@@ -526,18 +582,27 @@ def run(
             "personaplex_source": str(config.personaplex_source),
             "manifest": str(config.manifest),
             "output_dir": str(run_dir),
-            "window_seconds": config.window_seconds,
-            "target_window_seconds": config.target_window_seconds,
-            "min_window_seconds": config.min_window_seconds,
-            "max_window_seconds": config.max_window_seconds,
+            "duration_sec": config.duration_sec,
+            "sample_number": config.sample_number,
             "max_steps": 1 if smoke else config.max_steps,
             "learning_rate": config.learning_rate,
             "lora_rank": config.lora_rank,
             "lora_alpha": config.lora_alpha,
+            "lora_scaling": config.lora_scaling,
+            "lora_enabled": config.lora_enabled,
+            "ft_embed": config.ft_embed,
+            "weight_decay": config.weight_decay,
+            "pct_start": config.pct_start,
+            "first_codebook_weight_multiplier": config.first_codebook_weight_multiplier,
+            "text_padding_weight": config.text_padding_weight,
+            "log_freq": config.log_freq,
+            "no_eval": config.no_eval,
+            "ckpt_freq": config.ckpt_freq,
+            "torch_compile_disabled": os.environ.get("NO_TORCH_COMPILE", ""),
             "qlora": config.qlora,
             "quant_type": config.quant_type if config.qlora else None,
             "device": str(device),
-            "num_processes": accelerator.num_processes,
+            "num_processes": world_size,
             "cpu_threads": cpu_threads,
             "gradient_accumulation_steps": accum_steps,
             "per_device_batch_size": config.per_device_batch_size,
@@ -559,32 +624,31 @@ def run(
             "num_train_samples": len(train_samples),
             "num_val_samples": len(val_samples),
             "num_test_samples": len(test_samples),
-            "num_train_role_views": len(train_samples) * (2 if config.swap_roles_after_pass else 1),
+            "num_train_conversations": len(train_conversations),
+            "num_train_role_views": len(train_samples),
         }
         (run_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(config_record))
-        print(f"[Main Process] Active across {accelerator.num_processes} process(es) on device {device}")
+        print(f"[Main Process] Active across {world_size} process(es) on device {device}")
 
-    if accelerator.num_processes > 1:
-        run_dir_list = [str(run_dir) if accelerator.is_main_process else ""]
-        if torch.distributed.is_initialized():
-            torch.distributed.broadcast_object_list(run_dir_list, src=0)
+    if world_size > 1:
+        run_dir_list = [str(run_dir) if main_process else ""]
+        torch.distributed.broadcast_object_list(run_dir_list, src=0)
         run_dir = Path(run_dir_list[0])
 
     if run_dir is not None:
-        write_rank_info(run_dir, accelerator.process_index, accelerator.num_processes, device, len(train_samples))
-    accelerator.wait_for_everyone()
+        write_rank_info(run_dir, rank, world_size, device, len(train_samples))
+    if use_fsdp:
+        torch.distributed.barrier()
 
-    # Sequential model loading across ranks to avoid host CPU RAM spikes
-    for i in range(accelerator.num_processes):
-        if accelerator.process_index == i:
-            runtime = load_runtime(
-                RuntimePaths(config.model_root, config.personaplex_source),
-                str(device),
-                config.qlora,
-                config.quant_type,
-            )
-        accelerator.wait_for_everyone()
+    # Only rank zero materializes the base checkpoint; other ranks initialize
+    # the identical architecture on meta tensors for FSDP synchronization.
+    runtime = load_runtime(
+        RuntimePaths(config.model_root, config.personaplex_source),
+        str(device), config.qlora, config.quant_type,
+        model_device=("cpu" if rank == 0 else "meta") if use_fsdp else str(device),
+        load_model_weights=(rank == 0 or not use_fsdp),
+    )
 
     # Inject LoRA with Stage-Wise Freezing support
     stage = getattr(config, "train_stage", "joint").lower()
@@ -592,28 +656,31 @@ def run(
         lora_prefixes = ("transformer",)
         if hasattr(runtime.model, "depformer"):
             runtime.model.depformer.requires_grad_(False)
-        if accelerator.is_main_process:
+        if main_process:
             print("[Stage-Wise Training] Active Stage: TEMPORAL ONLY (Depth Transformer / Depformer is 100% frozen).")
     elif stage in {"depth_only", "freeze_tempformer"}:
         lora_prefixes = ("depformer",)
         if hasattr(runtime.model, "transformer"):
             runtime.model.transformer.requires_grad_(False)
-        if accelerator.is_main_process:
+        if main_process:
             print("[Stage-Wise Training] Active Stage: DEPTH ONLY (Temporal 7B Transformer is 100% frozen).")
     else:
         lora_prefixes = ("transformer", "depformer") if config.depformer_learning_rate is not None else ("transformer",)
-        if accelerator.is_main_process:
+        if main_process:
             print("[Stage-Wise Training] Active Stage: JOINT (Both Temporal & Depth active).")
 
-    targets = inject_lora(runtime.model, config.lora_rank, config.lora_alpha, prefixes=lora_prefixes)
+    if not config.lora_enabled:
+        raise ValueError("this training path requires lora.enable=true")
+    lora_alpha = round(config.lora_rank * config.lora_scaling)
+    targets = inject_lora(runtime.model, config.lora_rank, lora_alpha, prefixes=lora_prefixes)
 
     # Optional gradient checkpointing
     if config.gradient_checkpointing:
         enable_gradient_checkpointing(runtime.model)
-        if accelerator.is_main_process:
+        if main_process:
             print("Gradient checkpointing enabled on transformer layers.")
 
-    # Load LoRA weights before DDP wrapping; optimizer state is restored after wrapping.
+    # Load adapter weights before FSDP wrapping.
     resume_checkpoint_dir = None
     adapter_resume_step = 0
     if resume_from:
@@ -622,14 +689,14 @@ def run(
         if not adapter_file.is_file():
             raise FileNotFoundError(f"resume adapter does not exist: {adapter_file}")
         resume_checkpoint_dir = adapter_file.parent
-        if accelerator.is_main_process:
+        if main_process:
             print(f"Resuming LoRA weights from {adapter_file}")
         load_adapter(runtime.model, adapter_file)
         meta_file = adapter_file.parent / "adapter.json"
         if meta_file.is_file():
             try:
                 adapter_resume_step = int(json.loads(meta_file.read_text(encoding="utf-8")).get("step", 0))
-                if accelerator.is_main_process:
+                if main_process:
                     print(f"Adapter checkpoint is at optimizer step {adapter_resume_step}")
             except Exception:
                 pass
@@ -639,7 +706,15 @@ def run(
     LMModel.forward = LMModel.forward_train
 
     trainable = [p for p in runtime.model.parameters() if p.requires_grad]
-    if accelerator.is_main_process:
+    if not trainable:
+        raise RuntimeError("no trainable LoRA parameters were injected")
+    unexpected_trainable = [
+        name for name, parameter in runtime.model.named_parameters()
+        if parameter.requires_grad and "lora_" not in name
+    ]
+    if unexpected_trainable:
+        raise RuntimeError(f"unexpected non-LoRA trainable parameters: {unexpected_trainable[:5]}")
+    if main_process:
         print(f"LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
 
     temp_lr = config.learning_rate
@@ -652,20 +727,23 @@ def run(
             param_groups.append({"params": temp_params, "lr": temp_lr})
         if dep_params:
             param_groups.append({"params": dep_params, "lr": dep_lr})
-        optimizer = torch.optim.AdamW(param_groups, weight_decay=0.0, fused=device.type == "cuda")
-        if accelerator.is_main_process:
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=config.weight_decay, fused=device.type == "cuda")
+        if main_process:
             print(f"Using Dual Learning Rates -> Temporal Transformer: {temp_lr:.2e}, Depth Transformer: {dep_lr:.2e}")
     else:
-        optimizer = torch.optim.AdamW(trainable, lr=temp_lr, weight_decay=0.0, fused=device.type == "cuda")
+        optimizer = torch.optim.AdamW(trainable, lr=temp_lr, weight_decay=config.weight_decay, fused=device.type == "cuda")
     max_steps = 1 if smoke else config.max_steps
     scheduler = None
-    if config.warmup_steps > 0 and not smoke:
-        scheduler = get_cosine_schedule_with_warmup(optimizer, config.warmup_steps, max_steps)
-
-    # Prepare model, optimizer, scheduler with Accelerator (DDP wrapping)
-    runtime.model, optimizer = accelerator.prepare(runtime.model, optimizer)
-    if scheduler is not None:
-        scheduler = accelerator.prepare(scheduler)
+    if max_steps > 1:
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=[group["lr"] for group in optimizer.param_groups],
+            total_steps=max_steps,
+            pct_start=config.pct_start,
+        )
+    if use_fsdp:
+        runtime.model = wrap_model_fsdp(runtime.model, strategy="full_shard", device=device)
+        torch.distributed.barrier()
 
     start_step = adapter_resume_step
     if resume_checkpoint_dir is not None:
@@ -674,21 +752,22 @@ def run(
             optimizer,
             scheduler,
             accum_steps,
-            accelerator.num_processes,
+            world_size,
             config.per_device_batch_size,
         )
         if restored_step is not None:
             start_step = restored_step
-            if accelerator.is_main_process:
+            if main_process:
                 print(f"Restored optimizer and scheduler state at optimizer step {start_step}")
-        elif accelerator.is_main_process:
+        elif main_process:
             print("Resume checkpoint has no training_state.pt; resuming adapter weights with a fresh optimizer.")
+    start_micro_step = start_step * accum_steps
     if start_step > max_steps:
         raise RuntimeError(f"resume checkpoint step {start_step} exceeds train.max_steps={max_steps}")
 
     writer = None
     log_file = None
-    if accelerator.is_main_process and run_dir is not None:
+    if main_process and run_dir is not None:
         log_path = run_dir / "metrics.jsonl"
         log_file = log_path.open("w", encoding="utf-8")
         tensorboard_dir = run_dir / "tensorboard"
@@ -703,50 +782,65 @@ def run(
     started = time.monotonic()
 
     try:
-        start_micro_step = start_step * accum_steps
         max_micro_steps = max_steps * accum_steps
-        progress = tqdm(total=max_steps, initial=start_step, desc="training (DDP)", unit="update", dynamic_ncols=True) if accelerator.is_main_process else None
+        progress = tqdm(total=max_steps, initial=start_step, desc="training (FSDP)" if use_fsdp else "training", unit="update", dynamic_ncols=True) if main_process else None
         last_update_time = time.monotonic()
         batch_iterator = iter(iter_training_batches(
-            config, train_conversations, runtime, device, accelerator.process_index,
-            accelerator.num_processes, smoke, skip_batches=start_micro_step,
+            config, train_conversations, runtime, device, rank,
+            world_size, smoke, skip_batches=start_micro_step,
         ))
         samples_seen = 0
         audio_seconds_seen = 0.0
         audio_frames_seen = 0
 
+        optimizer_step = start_step
         for micro_step in range(start_micro_step, max_micro_steps):
             try:
                 batch, epoch, local_samples, local_audio_seconds, local_audio_frames = next(batch_iterator)
             except StopIteration as exc:
                 raise RuntimeError("training batch iterator stopped before max_steps") from exc
             codes = batch["codes"]
-            samples_seen += local_samples * accelerator.num_processes
-            global_audio_seconds = accelerator.reduce(
-                torch.tensor([local_audio_seconds, local_audio_frames], dtype=torch.float32, device=device),
-                reduction="sum",
+            samples_seen += local_samples * world_size
+            global_audio_seconds = all_reduce_sum(
+                torch.tensor([local_audio_seconds, local_audio_frames], dtype=torch.float32, device=device)
             )
             audio_seconds_seen += float(global_audio_seconds[0])
             audio_frames_seen += int(global_audio_seconds[1])
 
-            with accelerator.accumulate(runtime.model):
-                output = runtime.model(codes)
-                total, components = loss_components(output, codes, batch, runtime.tokenizer.padding_id, torch)
-                accelerator.backward(total)
+            sync_gradients = (micro_step + 1 - start_micro_step) % accum_steps == 0 or micro_step + 1 == max_micro_steps
+            sync_context = runtime.model.no_sync() if use_fsdp and not sync_gradients else nullcontext()
+            with sync_context:
+                output = model_forward_train(runtime.model, codes)
+                loss_result = loss_components(
+                    output, codes, batch, runtime.tokenizer.padding_id, torch,
+                    config.first_codebook_weight_multiplier, config.text_padding_weight,
+                    distributed=use_fsdp,
+                )
+                if use_fsdp:
+                    _, total = reduce_distributed_loss(
+                        loss_result[1], all_reduce_sum, preserve_grad=True, world_size=world_size
+                    )
+                else:
+                    total = loss_result[0]
+                (total / accum_steps).backward()
+            sync_state = type("SyncState", (), {"sync_gradients": sync_gradients})()
+            grad_norm = step_optimizer_if_ready(sync_state, optimizer, scheduler, trainable, runtime.model)
 
-                grad_norm = step_optimizer_if_ready(accelerator, optimizer, scheduler, trainable)
-
-            if not accelerator.sync_gradients:
+            if not sync_gradients:
                 continue
 
-            optimizer_step = (micro_step + 1) // accum_steps
+            optimizer_step += 1
 
-            reduced_total = accelerator.reduce(total, reduction="mean")
-            reduced_text = accelerator.reduce(components["text"], reduction="mean")
-            reduced_sem = accelerator.reduce(components["audio_semantic"], reduction="mean")
-            reduced_nonsem = accelerator.reduce(components["audio_nonsemantic"], reduction="mean")
+            if use_fsdp:
+                components, total = reduce_distributed_loss(loss_result[1], all_reduce_sum)
+            else:
+                total, components = loss_result
+            reduced_total = total.detach()
+            reduced_text = components["text"].detach()
+            reduced_sem = components["audio_semantic"].detach()
+            reduced_nonsem = components["audio_nonsemantic"].detach()
 
-            if accelerator.is_main_process:
+            if main_process and (optimizer_step % config.log_freq == 0 or optimizer_step == max_steps):
                 record = {
                     "step": optimizer_step,
                     "micro_step": micro_step + 1,
@@ -778,40 +872,40 @@ def run(
                     tqdm.write(json.dumps({"event": "training_step", **record}))
 
             # Validation evaluation
-            if val_samples and config.eval_every_steps > 0 and (optimizer_step % config.eval_every_steps == 0 or optimizer_step == max_steps):
-                accelerator.wait_for_everyone()
-                val_metrics = evaluate_validation(config, runtime, val_samples, accelerator)
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
+            if val_samples and config.eval_every_steps > 0 and not config.no_eval and (optimizer_step % config.eval_every_steps == 0 or optimizer_step == max_steps):
+                barrier()
+                val_metrics = evaluate_validation(config, runtime, val_samples, rank, world_size, device)
+                barrier()
+                best_state = fsdp_adapter_state_dict(runtime.model) if use_fsdp else adapter_state_dict(runtime.model)
+                if main_process:
                     for k, v in val_metrics.items():
                         if writer:
                             writer.add_scalar(k, v, optimizer_step)
                     val_loss = val_metrics.get("val/loss_total", float("inf"))
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
-                        unwrapped = accelerator.unwrap_model(runtime.model)
-                        best_saved = save_best_adapter(
-                            run_dir, unwrapped, config, optimizer_step, val_loss, optimizer, scheduler,
-                            gradient_accumulation_steps=accum_steps, num_processes=accelerator.num_processes,
+                        best_saved = save_best_adapter_state(
+                            run_dir, best_state, config, optimizer_step, val_loss, optimizer, scheduler,
+                            gradient_accumulation_steps=accum_steps, num_processes=world_size,
                         )
                         tqdm.write(json.dumps({"event": "new_best_val_loss", "step": optimizer_step, "val_loss": val_loss}))
 
             # Periodic saving & smoke reload verification
-            save_interval = 1 if smoke else config.save_every_steps
+            save_interval = 1 if smoke else config.ckpt_freq
             if optimizer_step % save_interval == 0 or optimizer_step == max_steps:
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    unwrapped = accelerator.unwrap_model(runtime.model)
-                    saved = save_adapter(
-                        run_dir, unwrapped, config, optimizer_step, optimizer, scheduler,
-                        gradient_accumulation_steps=accum_steps, num_processes=accelerator.num_processes,
+                barrier()
+                checkpoint_state = fsdp_adapter_state_dict(runtime.model) if use_fsdp else adapter_state_dict(runtime.model)
+                if main_process:
+                    saved = save_adapter_state(
+                        run_dir, checkpoint_state, config, optimizer_step, optimizer, scheduler,
+                        accum_steps, world_size,
                     )
                     if smoke:
                         reload_loss = verify_reloaded_adapter(config, train_samples[micro_step % len(train_samples)], saved)
                         if abs(reload_loss - record["loss/total"]) > 0.05:
                             raise RuntimeError(f"reloaded adapter loss drifted: {reload_loss} vs {record['loss/total']}")
                         reload_checks.append({"step": optimizer_step, "loss": reload_loss})
-                accelerator.wait_for_everyone()
+                barrier()
 
         if log_file:
             log_file.close()
@@ -823,10 +917,10 @@ def run(
 
     if run_dir is not None:
         rank_peak = torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0
-        write_rank_info(run_dir, accelerator.process_index, accelerator.num_processes, device, len(train_samples), rank_peak)
-    accelerator.wait_for_everyone()
+        write_rank_info(run_dir, rank, world_size, device, len(train_samples), rank_peak)
+    barrier()
 
-    if accelerator.is_main_process and run_dir is not None:
+    if main_process and run_dir is not None:
         peak = torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0
         run_info = {
             "seconds": time.monotonic() - started,
@@ -841,9 +935,9 @@ def run(
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(
             "# PersonaPlex Training Report\n\n"
-            "Status: PASS\n\n"
+            "Status: INCOMPLETE — trainer run completed; overfit and inference criteria require separate verification.\n\n"
             f"- Dataset: {config.manifest}\n- Model: {config.model_root}\n- LoRA: rank={config.lora_rank}, alpha={config.lora_alpha}\n"
-            f"- Processes (GPUs): {accelerator.num_processes}\n"
+            f"- Processes (GPUs): {world_size}\n"
             f"- Steps: {max_steps}\n- Final loss: {last_record['loss/total'] if last_record else 'n/a'}\n"
             f"- Best val loss: {best_val_loss if best_val_loss < float('inf') else 'n/a'}\n"
             f"- Peak GPU bytes: {peak}\n- Checkpoint: {saved}\n"
@@ -852,13 +946,14 @@ def run(
             encoding="utf-8",
         )
 
-    accelerator.wait_for_everyone()
+    barrier()
     return best_saved or saved
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PersonaPlex Fine-Tuning with Accelerate and DDP")
-    parser.add_argument("--config", type=str, default=None, help="Path to YAML/JSON configuration file")
+    parser = argparse.ArgumentParser(description="PersonaPlex Fine-Tuning with Moshi-style training")
+    parser.add_argument("config_file", nargs="?", help="Path to Hydra YAML configuration file")
+    parser.add_argument("--config", type=str, default=None, help="Path to Hydra YAML configuration file")
     parser.add_argument("--config-name", type=str, default=None, help="Name of config in configs/ directory (Hydra style)")
     parser.add_argument("--smoke", action="store_true", help="Run 1-step smoke test with verification")
     parser.add_argument("--qlora", action="store_true", default=None, help="Enable 4-bit QLoRA")
@@ -868,7 +963,9 @@ def main() -> int:
     args, unknown = parser.parse_known_args()
     overrides = [arg for arg in unknown if "=" in arg]
 
-    config_path = args.config
+    if args.config and args.config_file:
+        parser.error("pass the config either positionally or with --config, not both")
+    config_path = args.config or args.config_file
     if config_path is None:
         if args.config_name:
             config_path = Path("configs") / f"{args.config_name}.yaml"

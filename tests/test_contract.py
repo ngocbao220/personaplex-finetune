@@ -10,6 +10,8 @@ from personaplex_finetuning.data import (
     PreparedDataset,
     ValidationError,
     contiguous_chunks,
+    duration_chunks,
+    limit_conversations,
     sample_for_training_position,
     turn_aware_chunks,
     Word,
@@ -26,6 +28,33 @@ def write_stereo_wav(path: Path, frames: int = 24000) -> None:
 
 
 class PreparedDatasetTest(unittest.TestCase):
+    def test_sample_number_caps_raw_conversations_and_none_keeps_all(self) -> None:
+        samples = [
+            PreparedSample(
+                f"conv_{index}", Path(f"conv_{index}.wav"), Path("voice.wav"), (), "prompt",
+                {"conversation_id": f"id_{index}"}, AudioInfo(24000, 2, 30.0), 0.0, 30.0,
+            )
+            for index in range(12)
+        ]
+
+        self.assertEqual([sample.sample_id for sample in limit_conversations(samples, 10)], [
+            f"conv_{index}" for index in range(10)
+        ])
+        self.assertEqual(limit_conversations(samples, None), samples)
+
+    def test_duration_chunks_are_contiguous_and_pad_the_last_timeline_window(self) -> None:
+        sample = PreparedSample(
+            "conversation", Path("conversation.wav"), Path("voice.wav"), (), "prompt", {},
+            AudioInfo(24000, 2, 250.0), 0.0, 250.0,
+        )
+
+        chunks = duration_chunks([sample], 100.0)
+
+        self.assertEqual(
+            [(chunk.window_start_sec, chunk.window_end_sec) for chunk in chunks],
+            [(0.0, 100.0), (100.0, 200.0), (200.0, 300.0)],
+        )
+
     def test_turn_aware_chunks_use_safe_boundaries_and_clip_to_real_audio(self) -> None:
         sample = PreparedSample(
             "conversation", Path("conversation.wav"), Path("voice.wav"),

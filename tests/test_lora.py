@@ -36,7 +36,7 @@ class LoRATest(unittest.TestCase):
         inject_lora(model, rank=2, alpha=4)
         projection = model.transformer.projection
         self.assertEqual(projection.base.__class__.__name__, "Linear4bit")
-        self.assertEqual(projection.lora_a.weight.dtype, torch.bfloat16)
+        self.assertEqual(projection.lora_a.weight.dtype, torch.float32)
 
     def test_replacement_exposes_effective_linear_weight_for_direct_access(self) -> None:
         from personaplex_finetuning.lora import inject_lora

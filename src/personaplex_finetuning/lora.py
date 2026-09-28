@@ -52,9 +52,9 @@ def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0, prefixes: 
             self.base = base
             self.scale = alpha / rank
             self.dropout = torch.nn.Dropout(dropout)
-            adapter_dtype = getattr(base, "compute_dtype", None) or base.weight.dtype
-            if not adapter_dtype.is_floating_point:
-                adapter_dtype = torch.bfloat16
+            # Keep trainable adapter weights and Adam moments in FP32; FSDP's
+            # mixed-precision policy casts them for BF16 forward/backward.
+            adapter_dtype = torch.float32
             self.lora_a = torch.nn.Linear(base.in_features, rank, bias=False, device=base.weight.device, dtype=adapter_dtype)
             self.lora_b = torch.nn.Linear(rank, base.out_features, bias=False, device=base.weight.device, dtype=adapter_dtype)
             torch.nn.init.kaiming_uniform_(self.lora_a.weight, a=5**0.5)
@@ -63,7 +63,9 @@ def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0, prefixes: 
                 parameter.requires_grad = False
 
         def forward(self, value):
-            return self.base(value) + self.lora_b(self.lora_a(self.dropout(value))) * self.scale
+            base_output = self.base(value)
+            delta = self.lora_b(self.lora_a(self.dropout(value.to(self.lora_a.weight.dtype))))
+            return base_output + (delta * self.scale).to(base_output.dtype)
 
         @property
         def weight(self):
@@ -126,4 +128,3 @@ def load_adapter(model, path) -> None:
     missing, unexpected = model.load_state_dict(filtered_state, strict=False)
     if any("lora_" in name for name in missing):
         raise RuntimeError(f"adapter mismatch; missing required LoRA keys: {missing}")
-

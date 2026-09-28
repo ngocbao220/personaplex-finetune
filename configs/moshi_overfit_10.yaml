@@ -1,0 +1,36 @@
+# Deterministic single-GPU overfit config; uses ten conversations, no shuffle.
+defaults:
+  - model: local
+  - data: otospeech
+  - lora: default
+  - _self_
+
+seed: 42
+duration_sec: 100
+sample_number: 10
+batch_size: 1
+max_steps: 2000
+
+lora:
+  enable: true
+  rank: 128
+  scaling: 2.0
+  ft_embed: false
+
+optim:
+  lr: 2.0e-6
+  weight_decay: 0.1
+  pct_start: 0.05
+
+first_codebook_weight_multiplier: 1.0
+text_padding_weight: 0.3
+log_freq: 1
+no_eval: true
+ckpt_freq: 100
+gradient_checkpointing: true
+
+train:
+  output_dir: ../runs/personaplex-overfit-10
+  gradient_accumulation_steps: 1
+  eval_every_steps: 0
+  mixed_precision: bf16

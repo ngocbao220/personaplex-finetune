@@ -67,6 +67,25 @@ class BatchContractTest(unittest.TestCase):
         self.assertEqual(tuple(item.waveform.shape), (2, 3))
         self.assertTrue(torch.equal(item.waveform, torch.tensor([[1.0, 2.0, 3.0], [7.0, 8.0, 9.0]])))
 
+    def test_raw_dataset_retries_empty_time_slice_by_decoding_and_cropping_full_audio(self):
+        audio_path = Path("conversation.wav")
+        sample = PreparedSample(
+            "sample", audio_path, audio_path, (), "prompt", {},
+            AudioInfo(100, 2, 1.0), 0.25, 0.5,
+        )
+        full_audio = np.stack([np.arange(100), 100 + np.arange(100)]).astype(np.float32)
+
+        def read_audio(_path, **kwargs):
+            if "start_sec" in kwargs:
+                return np.empty((2, 0), dtype=np.float32), 100
+            return full_audio, 100
+
+        fake_sphn = SimpleNamespace(read=read_audio)
+        with patch.dict("sys.modules", {"sphn": fake_sphn}):
+            item = RawAudioDataset([sample], 100)[0]
+        expected = torch.from_numpy(full_audio[:, 25:50].copy())
+        self.assertTrue(torch.equal(item.waveform, expected))
+
     def test_mimi_receives_each_unpadded_stereo_item_with_requested_channel_order(self):
         class FakeMimi:
             def encode(self, audio):

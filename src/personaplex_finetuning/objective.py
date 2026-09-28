@@ -11,6 +11,7 @@ def stream_weights(
     text_padding_id: int,
     nonsemantic_audio_weight: float = 0.02,
     text_padding_weight: float = 0.3,
+    first_codebook_weight_multiplier: float = 1.0,
 ) -> tuple[tuple[float, ...], ...]:
     """Return explicit per-token weights for [text, agent audio x8, user audio x8].
 
@@ -19,7 +20,7 @@ def stream_weights(
     """
     if len(codes) != 17 or len(loss_mask) != 17:
         raise ValueError("PersonaPlex objective requires exactly 17 streams")
-    if not 0 <= nonsemantic_audio_weight <= 1 or not 0 <= text_padding_weight <= 1:
+    if not 0 <= nonsemantic_audio_weight <= 1 or not 0 <= text_padding_weight <= 1 or first_codebook_weight_multiplier < 0:
         raise ValueError("loss weights must be within [0, 1]")
 
     import numpy as np
@@ -46,7 +47,7 @@ def stream_weights(
             ).astype(np.float64)
         elif stream_index == 1:
             # First (semantic) audio codebook: full weight
-            values = np.ones(len(stream), dtype=np.float64)
+            values = np.full(len(stream), first_codebook_weight_multiplier, dtype=np.float64)
         else:
             # Non-semantic audio codebooks (2-8): downweighted
             values = np.full(len(stream), nonsemantic_audio_weight, dtype=np.float64)
@@ -64,6 +65,7 @@ def stream_weights_torch(
     text_padding_id: int,
     nonsemantic_audio_weight: float = 0.02,
     text_padding_weight: float = 0.3,
+    first_codebook_weight_multiplier: float = 1.0,
 ) -> "torch.Tensor":
     """GPU-native weight computation for use inside the training loop.
 
@@ -99,7 +101,7 @@ def stream_weights_torch(
     )
 
     # Agent semantic audio (index 1): full weight where unmasked
-    weights[:, 1] = loss_mask[:, 1].float()
+    weights[:, 1] = loss_mask[:, 1].float() * first_codebook_weight_multiplier
 
     # Agent non-semantic audio (indices 2-8): downweighted
     weights[:, 2:9] = loss_mask[:, 2:9].float() * nonsemantic_audio_weight
@@ -131,3 +133,16 @@ def torch_weighted_cross_entropy(logits, targets, weights):
     safe_logits = logits.float().masked_fill(ignored.unsqueeze(1), 0.0)
     per_token = functional.cross_entropy(safe_logits, safe_targets, reduction="none")
     return (per_token * weights).sum() / denominator
+
+
+def torch_weighted_cross_entropy_stats(logits, targets, weights):
+    """Return a weighted CE numerator and denominator for global-rank reduction."""
+    import torch.nn.functional as functional
+
+    if logits.ndim != 2 or targets.ndim != 1 or weights.ndim != 1:
+        raise ValueError("expected flattened logits [N,V], targets [N], weights [N]")
+    ignored = weights == 0
+    safe_targets = targets.masked_fill(ignored, 0)
+    safe_logits = logits.float().masked_fill(ignored.unsqueeze(1), 0.0)
+    per_token = functional.cross_entropy(safe_logits, safe_targets, reduction="none")
+    return (per_token * weights).sum(), weights.sum()

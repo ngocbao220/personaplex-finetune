@@ -202,7 +202,15 @@ class PersonaPlexRuntime:
     delays: tuple[int, ...]
 
 
-def load_runtime(paths: RuntimePaths, device: str = "cuda", qlora: bool = False, quant_type: str = "nf4") -> PersonaPlexRuntime:
+def load_runtime(
+    paths: RuntimePaths,
+    device: str = "cuda",
+    qlora: bool = False,
+    quant_type: str = "nf4",
+    *,
+    model_device: str | None = None,
+    load_model_weights: bool = True,
+) -> PersonaPlexRuntime:
     """Load from explicit local assets only. No Hugging Face function is imported."""
     resolved = paths.validate()
     source = str(resolved.source)
@@ -219,6 +227,8 @@ def load_runtime(paths: RuntimePaths, device: str = "cuda", qlora: bool = False,
         if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
             torch.backends.cuda.enable_mem_efficient_sdp(True)
     mimi = loaders.get_mimi(resolved.mimi_weight, device=device)
+    mimi.eval()
+    mimi.requires_grad_(False)
     lm_dtype = torch.bfloat16
     dev_type = getattr(device, "type", str(device))
     if dev_type == "mps":
@@ -227,12 +237,16 @@ def load_runtime(paths: RuntimePaths, device: str = "cuda", qlora: bool = False,
         except Exception:
             lm_dtype = torch.float16
 
+    target_model_device = model_device or device
     if qlora:
+        if not load_model_weights or target_model_device == "meta":
+            raise ValueError("QLoRA cannot be combined with meta-device distributed initialization")
         from .lora import quantize_model_4bit
         model = loaders.get_moshi_lm(resolved.moshi_weight, device="cpu", dtype=lm_dtype)
         model = quantize_model_4bit(model, device=device, quant_type=quant_type)
     else:
-        model = loaders.get_moshi_lm(resolved.moshi_weight, device=device, dtype=lm_dtype)
+        model_path = resolved.moshi_weight if load_model_weights else None
+        model = loaders.get_moshi_lm(model_path, device=target_model_device, dtype=lm_dtype)
 
     import gc
     gc.collect()

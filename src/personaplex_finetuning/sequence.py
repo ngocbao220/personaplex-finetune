@@ -52,6 +52,30 @@ class TrainingExample:
         return len(self.input_codes[0])
 
 
+def pad_training_example(example: TrainingExample, total_frames: int, text_padding_id: int, zero_token: int) -> TrainingExample:
+    """Pad complete stream sequences and mask synthetic tail positions."""
+    if total_frames < example.total_frames:
+        raise ValueError("target sequence length cannot truncate a training example")
+    padding = total_frames - example.total_frames
+    if padding == 0:
+        return example
+    codes = tuple(
+        stream + ((text_padding_id if index == 0 else zero_token),) * padding
+        for index, stream in enumerate(example.input_codes)
+    )
+    labels = tuple(
+        stream + ((text_padding_id if index == 0 else zero_token),) * padding
+        for index, stream in enumerate(example.labels)
+    )
+    masks = tuple(mask + (False,) * padding for mask in example.loss_mask)
+    return TrainingExample(
+        input_codes=codes, labels=labels, loss_mask=masks,
+        stream_names=example.stream_names, prompt_frames=example.prompt_frames,
+        dialogue_frames=example.dialogue_frames, voice_prompt_frames=example.voice_prompt_frames,
+        text_prompt_frames=example.text_prompt_frames, word_alignments=example.word_alignments,
+    )
+
+
 class PersonaPlexTrainingExampleBuilder:
     """Builds only the agent target contract; user audio remains conditioning."""
 
@@ -110,10 +134,18 @@ class PersonaPlexTrainingExampleBuilder:
         if any(len(stream) != len(agent_text) for stream in streams):
             raise AssertionError("hybrid streams have unequal lengths")
         prompt_mask = (False,) * prompt_audio_frames
-        dialogue_text_mask = (True,) * dialogue_frames
+        valid_duration = max(
+            0.0,
+            min(sample.window_end_sec, sample.audio.duration_sec) - sample.window_start_sec,
+        )
+        valid_dialogue_frames = min(
+            dialogue_frames, round(valid_duration * self.codec.frame_rate)
+        )
+        dialogue_validity = (True,) * valid_dialogue_frames + (False,) * (dialogue_frames - valid_dialogue_frames)
+        dialogue_text_mask = dialogue_validity
         loss_mask = (
             (prompt_mask + dialogue_text_mask),
-            *((prompt_mask + (True,) * dialogue_frames) for _ in range(8)),
+            *((prompt_mask + dialogue_validity) for _ in range(8)),
             *((False,) * len(agent_text) for _ in range(8)),
         )
         return TrainingExample(

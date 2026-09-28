@@ -250,128 +250,21 @@ python -m personaplex_finetuning.train \
 
 ---
 
-### 4.2. Huấn luyện Multi-GPU với DDP (Accelerate)
+### 4.2. Moshi-style fixed-duration training
 
-#### Chạy DDP bằng Python + Accelerate
-
-```bash
-# Chạy trên 2 GPU vật lý số 0 và 1
-CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src \
-python -m accelerate.commands.launch \
-  --multi_gpu --num_processes 2 --mixed_precision bf16 \
-  -m personaplex_finetuning.train \
-  --config configs/config.yaml \
-  data=otospeech model=server train=full
-```
-
-Muốn chạy 4 GPU, đặt `CUDA_VISIBLE_DEVICES=0,1,2,3` và `--num_processes 4`. `CUDA_VISIBLE_DEVICES` chọn GPU vật lý; `--num_processes` phải bằng số GPU được chọn. Các override như `data=...`, `model=...`, `train=...` được truyền cho chương trình huấn luyện.
-
-Preset `otospeech` và `vietnamese` chia mỗi hội thoại thành các cửa sổ liên tiếp 30 giây (chunk cuối được zero-pad), rồi shuffle chunk trong mỗi pass. Sau một pass đầy đủ với speaker LEFT là logical agent, pass kế tiếp dùng speaker RIGHT là logical agent; do đó có hai role views cho mỗi chunk.
-
-Mỗi thư mục mẫu phải có `voice_prompt_left.wav`, `voice_prompt_right.wav`, `metadata.text_prompt_left`, và `metadata.text_prompt_right`. Hai cặp prompt là persona tương ứng của LEFT và RIGHT; training fail-fast trước khi load model nếu thiếu một trường. Không dùng lại voice/text prompt giữa hai speaker.
-
-Để tiếp tục một run bị gián đoạn, giữ nguyên topology DDP và accumulation:
+Run the deterministic 10-conversation overfit on one GPU first:
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 PYTHONPATH=src \
-python -m accelerate.commands.launch \
-  --multi_gpu --num_processes 4 --mixed_precision bf16 \
-  -m personaplex_finetuning.train \
-  --config configs/config.yaml \
-  --resume-from ../runs/full/train_YYYYMMDD_HHMMSS/checkpoints/checkpoint_000500 \
-  data=otospeech model=server train=full train.gradient_accumulation_steps=2
+python -m train configs/moshi_overfit_10.yaml
 ```
 
-#### Preset NVIDIA B200
-
-Preset `train=b200` dùng microbatch 1/GPU × accumulation 16 (global batch 16 trên một GPU), khớp với cách chạy đã đạt throughput cao trên nhánh `main` nhưng vẫn tận dụng bucketing/DataLoader của nhánh này. Preset bật BF16, 8 DataLoader workers, prefetch 4, fused AdamW và gradient checkpointing. Bắt đầu trên một B200:
+After verifying decreasing loss, adapter reload, and inference, run FSDP `FULL_SHARD` on eight GPUs with the full training split:
 
 ```bash
-PYTHONPATH=src python -m accelerate.commands.launch --num_processes 1 --mixed_precision bf16 \
-  -m personaplex_finetuning.train \
-  data=otospeech model=server train=b200
+torchrun --nproc-per-node 8 -m train configs/moshi_code_style.yaml sample_number=null
 ```
 
-Với nhiều GPU, global batch bằng `1 × 16 × số GPU` (ví dụ 32 trên 2 GPU). Giữ `per_device_batch_size=1` khi so sánh throughput với nhánh `main`; chỉ tăng microbatch sau khi benchmark cho thấy GPU còn dư tài nguyên.
-
----
-
-### 4.3. Huấn luyện theo Stage (Stage-Wise Freezing & Dual Learning Rate)
-
-Khi huấn luyện thích nghi ngôn ngữ mới (như tiếng Việt), bạn có thể chia thành các giai đoạn tối ưu hóa từng thành phần:
-
-```bash
-# --------------------------------------------------------------------------
-# Stage 0: Fine-tune thích nghi Mimi Audio Codec (Nếu kiểm tra ở mục 2.8 < 8 dB)
-# Chỉ cần audio WAV mono (không cần text transcript, không cần alignment)
-# --------------------------------------------------------------------------
-PYTHONPATH=src python -m tools.train_mimi \
-  --data-dir path/to/vietnamese_wavs \
-  --model-root path/to/personaplex-checkpoint \
-  --output-dir ../runs/mimi_finetuned \
-  --learning-rate 5e-5 --max-steps 5000
-
-# --------------------------------------------------------------------------
-# Stage 1: Chỉ huấn luyện khối Temporal 7B (Đóng băng 100% Depth Transformer)
-# Thích hợp cho giai đoạn đầu học ngữ nghĩa hội thoại và turn-taking
-# --------------------------------------------------------------------------
-CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src python -m accelerate.commands.launch \
-  --multi_gpu --num_processes 2 --mixed_precision bf16 \
-  -m personaplex_finetuning.train --config configs/config.yaml \
-  data=otospeech model=server train=full stage=temporal_only
-
-# --------------------------------------------------------------------------
-# Stage 2: Chỉ huấn luyện khối Depth Transformer (Đóng băng 100% Temporal 7B)
-# Thích hợp để tinh chỉnh phát âm âm học và thanh điệu mà không làm lệch tư duy hội thoại
-# --------------------------------------------------------------------------
-CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src python -m accelerate.commands.launch \
-  --multi_gpu --num_processes 2 --mixed_precision bf16 \
-  -m personaplex_finetuning.train --config configs/config.yaml \
-  data=otospeech model=server train=full stage=depth_only
-
-# --------------------------------------------------------------------------
-# Stage 3: Huấn luyện liên hợp (Joint) với 2 Learning Rate riêng biệt
-# Temporal học 2e-5, Depth học chậm hơn ở 5e-6 để bảo vệ chất lượng giọng nói
-# --------------------------------------------------------------------------
-CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src python -m accelerate.commands.launch \
-  --multi_gpu --num_processes 2 --mixed_precision bf16 \
-  -m personaplex_finetuning.train --config configs/config.yaml \
-  data=otospeech model=server train=full \
-  stage=joint \
-  learning_rate=2e-5 \
-  depformer_lr=5e-6
-```
-
----
-
-### 4.4. Chạy Thử Nghiệm Suy Luận File (Inference Smoke Test)
-
-Thực hiện nạp lại adapter LoRA trên base model gốc, tái tạo luồng Hybrid System Prompt (Voice prompt + Text prompt) và sinh phản hồi âm thanh/văn bản từ 1 mẫu trong dataset hoặc từ file âm thanh đầu vào tuỳ ý:
-
-```bash
-# Cách 1: Chạy trực tiếp với file cấu hình infer.yaml (Khuyên dùng)
-python -m tools.inference_smoke --config configs/infer.yaml
-
-# Cách 2: Truyền đầy đủ flags hoặc override tham số từ dòng lệnh
-python -m tools.inference_smoke \
-  --config configs/infer.yaml \
-  --adapter runs/hf_overfit_10/checkpoints/checkpoint_000300 \
-  --index 0 \
-  --start 42.5 \
-  --output-dir outputs/smoke
-```
-
-**Chi tiết các đối số (arguments):**
-- `--config` **[Optional]**: File cấu hình YAML/JSON chứa các thiết lập mô hình, adapter, prompt và inference (mặc định: `configs/infer.yaml`).
-- `--adapter` **[Optional]**: Đường dẫn tới file trọng số LoRA đã huấn luyện (`lora.safetensors` hoặc thư mục checkpoint). Nếu bỏ qua cờ này, hệ thống sẽ đọc từ `adapter.path` trong file config.
-- `--index` **[Optional]**: Index của mẫu hội thoại trong dataset dùng làm ngữ cảnh giọng nói, prompt và input user (mặc định đọc từ config hoặc `0`).
-- `--start` **[Optional]**: Mốc thời gian theo giây trong `conversation.wav`. Khi đặt, inference dùng đúng một cửa sổ `data.window_seconds` (thường 30 giây) từ mốc này; chọn đoạn có user speech để tránh input im lặng. Lệnh sẽ từ chối cửa sổ vượt cuối audio.
-- `--input-file` / `--input-path` **[Optional]**: Đường dẫn file âm thanh WAV/MP3 bên ngoài thay thế cho audio hội thoại của sample.
-- `--output-dir` **[Optional]**: Thư mục lưu kết quả sinh (mặc định: `outputs/smoke`).
-
-Thư mục kết quả có `dialogue_original.wav` (hội thoại nguồn, cắt theo đúng cửa sổ inference; giữ nguyên thứ tự kênh), `user.wav`, audio/text do base model sinh và audio/text do adapter sinh. `finetuned.txt` có thể rỗng nếu lúc sinh tự do mô hình không phát token text hợp lệ; loss train giảm đo khả năng dự đoán target khi có ngữ cảnh teacher-forced, không đảm bảo đầu ra greedy lúc inference sẽ chép lại transcript train.
-
----
+`configs/moshi_code_style.yaml` retains the requested `duration_sec=100`, `sample_number=10`, `batch_size=16`, and `max_steps=2000`. This batch size cannot form batches from only ten chunks across eight ranks, so the full-run command explicitly sets `sample_number=null`. Use the same FSDP topology when resuming a distributed checkpoint. Training sets `NO_TORCH_COMPILE=1` by default to avoid Moshi compile failures reported with FSDP padding; opt in to compile by setting it to `0`.
 
 ## 5. Giám Sát Quá Trình Huấn Luyện (TensorBoard)
 

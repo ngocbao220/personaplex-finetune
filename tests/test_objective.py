@@ -52,3 +52,23 @@ class ObjectiveTest(unittest.TestCase):
             text_padding_id=3,
         )
         self.assertEqual(weights[0], (0.0,))
+
+    def test_first_codebook_multiplier_and_text_padding_are_configurable(self) -> None:
+        weights = stream_weights(
+            ((3, 4),) + tuple((8, 8) for _ in range(8)) + tuple((9, 9) for _ in range(8)),
+            tuple((True, True) for _ in range(17)),
+            text_padding_id=3, first_codebook_weight_multiplier=2.5, text_padding_weight=0.4,
+        )
+        self.assertEqual(weights[0], (0.4, 1.0))
+        self.assertEqual(weights[1], (2.5, 2.5))
+
+    def test_torch_weights_match_configured_reference_weights(self) -> None:
+        import torch
+        from personaplex_finetuning.objective import stream_weights_torch
+
+        codes = torch.full((1, 17, 2), 4, dtype=torch.long)
+        codes[:, 0, 0] = 3
+        mask = torch.ones_like(codes, dtype=torch.bool)
+        weights = stream_weights_torch(codes, mask, 3, 0.02, 0.4, 2.5)
+        self.assertTrue(torch.allclose(weights[0, 0], torch.tensor([0.4, 1.0])))
+        self.assertTrue(torch.allclose(weights[0, 1], torch.tensor([2.5, 2.5])))

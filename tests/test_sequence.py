@@ -1,8 +1,9 @@
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
-from personaplex_finetuning.sequence import PersonaPlexTrainingExampleBuilder
+from personaplex_finetuning.sequence import PersonaPlexTrainingExampleBuilder, pad_training_example
 
 
 class FakeCodec:
@@ -49,6 +50,25 @@ def sample() -> PreparedSample:
 
 
 class SequenceBuilderTest(unittest.TestCase):
+    def test_final_chunk_padding_is_masked_while_real_silence_remains_valid(self) -> None:
+        codec = FakeCodec()
+        codec.frame_rate = 0.5
+        short_conversation = replace(
+            sample(), words=(), audio=AudioInfo(24000, 2, 2.0),
+            window_start_sec=0.0, window_end_sec=100.0,
+        )
+        builder = PersonaPlexTrainingExampleBuilder(
+            codec=codec, tokenizer=FakeTokenizer(), initial_tokens=[1] * 17, zero_token=-1
+        )
+
+        example = builder.build(short_conversation)
+
+        self.assertEqual(example.dialogue_frames, 4)
+        self.assertTrue(example.loss_mask[0][example.prompt_frames])
+        self.assertFalse(example.loss_mask[0][example.prompt_frames + 1])
+        self.assertTrue(example.loss_mask[1][example.prompt_frames])
+        self.assertFalse(example.loss_mask[1][example.prompt_frames + 1])
+
     def test_builds_17_streams_with_masked_hybrid_prompt_and_agent_targets(self) -> None:
         builder = PersonaPlexTrainingExampleBuilder(
             codec=FakeCodec(), tokenizer=FakeTokenizer(), initial_tokens=[1] * 17, zero_token=-1
@@ -77,3 +97,15 @@ class SequenceBuilderTest(unittest.TestCase):
         self.assertEqual(delayed.total_frames, example.total_frames + 2)
         self.assertFalse(delayed.loss_mask[2][0])
         self.assertFalse(delayed.loss_mask[1][-1])
+
+    def test_batch_padding_adds_equal_shape_and_zero_loss_tail(self) -> None:
+        builder = PersonaPlexTrainingExampleBuilder(
+            codec=FakeCodec(), tokenizer=FakeTokenizer(), initial_tokens=[1] * 17, zero_token=-1
+        )
+        example = builder.build(sample())
+        padded = pad_training_example(example, example.total_frames + 5, 3, -1)
+
+        self.assertEqual(padded.total_frames, example.total_frames + 5)
+        self.assertTrue(all(not mask[-5:].count(True) for mask in padded.loss_mask))
+        self.assertEqual(padded.input_codes[0][-5:], (3,) * 5)
+        self.assertEqual(padded.input_codes[1][-5:], (-1,) * 5)

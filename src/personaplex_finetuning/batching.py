@@ -32,7 +32,7 @@ class RawAudioDataset(torch.utils.data.Dataset):
         duration = min(sample.window_end_sec, sample.audio.duration_sec) - sample.window_start_sec
         if duration <= 0:
             raise ValueError(f"{sample.sample_id}: empty audio window")
-        audio, _ = sphn.read(
+        audio, decoded_sample_rate = sphn.read(
             str(sample.conversation_wav), start_sec=sample.window_start_sec,
             duration_sec=duration, sample_rate=self.sample_rate,
         )
@@ -40,6 +40,20 @@ class RawAudioDataset(torch.utils.data.Dataset):
         if audio.ndim == 2 and audio.shape[0] != 2 and audio.shape[1] == 2:
             # sphn decoders may return stereo as [T, 2]; training uses [2, T].
             audio = audio.T
+        if audio.ndim == 2 and audio.shape[0] == 2 and audio.shape[-1] == 0:
+            # Some WAVs decode correctly in full but sphn's time-slice path can
+            # return an empty clip at duration boundaries. Retry only that case.
+            full_audio, decoded_sample_rate = sphn.read(
+                str(sample.conversation_wav), sample_rate=self.sample_rate,
+            )
+            full_audio = np.asarray(full_audio, dtype=np.float32)
+            if full_audio.ndim == 2 and full_audio.shape[0] != 2 and full_audio.shape[1] == 2:
+                full_audio = full_audio.T
+            if decoded_sample_rate <= 0:
+                raise ValueError(f"{sample.sample_id}: decoder returned invalid sample rate {decoded_sample_rate}")
+            start_frame = round(sample.window_start_sec * decoded_sample_rate)
+            frame_count = round(duration * decoded_sample_rate)
+            audio = full_audio[..., start_frame:start_frame + frame_count]
         if audio.ndim != 2 or audio.shape[0] != 2 or audio.shape[-1] == 0:
             raise ValueError(
                 f"{sample.sample_id}: decoded audio must be stereo with shape [2, T] "

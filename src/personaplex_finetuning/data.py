@@ -167,6 +167,25 @@ def conversation_group_keys(sample: PreparedSample) -> tuple[str, ...]:
     return tuple(keys)
 
 
+def limit_conversations(samples: list[PreparedSample], sample_number: int | None) -> list[PreparedSample]:
+    """Select the first N already-split training conversations, before chunking."""
+    if sample_number is None:
+        return list(samples)
+    if sample_number < 1:
+        raise ValueError("sample_number must be positive or None")
+    selected: list[PreparedSample] = []
+    seen_keys: set[str] = set()
+    for sample in samples:
+        keys = conversation_group_keys(sample)
+        if any(key in seen_keys for key in keys):
+            continue
+        seen_keys.update(keys)
+        selected.append(sample)
+        if len(selected) == sample_number:
+            break
+    return selected
+
+
 def turn_aware_chunks(
     samples: list[PreparedSample], target_seconds: float = 25.0,
     min_seconds: float = 10.0, max_seconds: float = 30.0,
@@ -238,6 +257,28 @@ def fixed_chunks(samples: list[PreparedSample], window_seconds: float) -> list[P
             start = end
     if not chunks:
         raise ValidationError("no chunks were created")
+    return chunks
+
+
+def duration_chunks(samples: list[PreparedSample], duration_sec: float) -> list[PreparedSample]:
+    """Split each full conversation into contiguous fixed-duration windows.
+
+    The final window retains its target end beyond the source audio duration so
+    the audio reader can zero-pad it to the same Mimi frame length as other
+    chunks. Valid-audio masks are derived from the source duration downstream.
+    """
+    if duration_sec <= 0:
+        raise ValueError("duration_sec must be positive")
+    chunks: list[PreparedSample] = []
+    for sample in samples:
+        if sample.audio.duration_sec <= 0:
+            raise ValidationError(f"{sample.sample_id}: conversation audio is empty")
+        start = 0.0
+        while start < sample.audio.duration_sec:
+            chunks.append(sample.with_window(start, start + duration_sec))
+            start += duration_sec
+    if not chunks:
+        raise ValidationError("no fixed-duration chunks were created")
     return chunks
 
 

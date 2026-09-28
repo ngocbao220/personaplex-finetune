@@ -10,6 +10,7 @@ from personaplex_finetuning.train import (
     effective_global_batch_size,
     load_training_state,
     model_forward_train,
+    rank_stride_indices,
     sample_index_for_rank,
     step_optimizer_if_ready,
     save_training_state,
@@ -19,6 +20,11 @@ from personaplex_finetuning.train import (
 
 
 class TrainTest(unittest.TestCase):
+    def test_moshi_rank_stride_partition_is_disjoint_and_complete(self) -> None:
+        partitions = [rank_stride_indices(11, rank, 4) for rank in range(4)]
+        self.assertEqual(partitions, [[0, 4, 8], [1, 5, 9], [2, 6, 10], [3, 7]])
+        self.assertEqual(sorted(index for partition in partitions for index in partition), list(range(11)))
+
     def test_global_batch_multiplies_processes_and_accumulation(self) -> None:
         self.assertEqual(effective_global_batch_size(1, 4, 2), 8)
 

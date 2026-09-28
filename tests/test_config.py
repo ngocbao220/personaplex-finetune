@@ -6,6 +6,57 @@ from personaplex_finetuning.config import load_config
 
 
 class ConfigTest(unittest.TestCase):
+    def test_reads_moshi_duration_sample_limit_and_optimizer_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.json"
+            config.write_text(
+                '{"model":{"root":"/models/base","source":"/source"},'
+                '"data":{"prepared_dir":"/data"},"duration_sec":100,'
+                '"sample_number":10,"batch_size":16,"max_steps":2000,'
+                '"lora":{"enable":true,"rank":128,"scaling":2.0,"ft_embed":false},'
+                '"optim":{"lr":2e-6,"weight_decay":0.1,"pct_start":0.05}}'
+            )
+
+            loaded = load_config(config)
+
+            self.assertEqual(loaded.duration_sec, 100)
+            self.assertEqual(loaded.sample_number, 10)
+            self.assertEqual(loaded.per_device_batch_size, 16)
+            self.assertEqual(loaded.max_steps, 2000)
+            self.assertEqual(loaded.lora_rank, 128)
+            self.assertEqual(loaded.lora_scaling, 2.0)
+            self.assertFalse(loaded.ft_embed)
+            self.assertAlmostEqual(loaded.learning_rate, 2e-6)
+            self.assertEqual(loaded.weight_decay, 0.1)
+            self.assertEqual(loaded.pct_start, 0.05)
+
+    def test_reads_moshi_loss_and_logging_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.json"
+            config.write_text(
+                '{"model":{"root":"/models/base","source":"/source"},'
+                '"data":{"prepared_dir":"/data"},"first_codebook_weight_multiplier":2.0,'
+                '"text_padding_weight":0.25,"log_freq":10,"ckpt_freq":100,"no_eval":true}'
+            )
+
+            loaded = load_config(config)
+
+            self.assertEqual(loaded.first_codebook_weight_multiplier, 2.0)
+            self.assertEqual(loaded.text_padding_weight, 0.25)
+            self.assertEqual(loaded.log_freq, 10)
+            self.assertEqual(loaded.ckpt_freq, 100)
+            self.assertTrue(loaded.no_eval)
+
+    def test_null_sample_number_means_no_training_sample_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.json"
+            config.write_text(
+                '{"model":{"root":"/models/base","source":"/source"},'
+                '"data":{"prepared_dir":"/data"},"sample_number":null}'
+            )
+
+            self.assertIsNone(load_config(config).sample_number)
+
     def test_full_standalone_config_loads_every_feature_setting(self) -> None:
         root = Path(__file__).resolve().parents[1]
         loaded = load_config(root / "configs" / "config.full.yaml")

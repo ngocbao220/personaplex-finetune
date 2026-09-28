@@ -51,6 +51,18 @@ class Config:
     max_window_seconds: float = 30.0
     gradient_checkpointing: bool = False
     mixed_precision: str = "bf16"
+    duration_sec: float = 100.0
+    sample_number: int | None = None
+    lora_enabled: bool = True
+    lora_scaling: float = 2.0
+    ft_embed: bool = False
+    weight_decay: float = 0.1
+    pct_start: float = 0.05
+    first_codebook_weight_multiplier: float = 1.0
+    text_padding_weight: float = 0.3
+    log_freq: int = 1
+    no_eval: bool = False
+    ckpt_freq: int = 50
 
     @property
     def manifest(self) -> Path:
@@ -155,8 +167,11 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     data = raw.get("data", {})
     train = raw.get("train", {})
     lora = raw.get("lora", {})
+    optim = raw.get("optim", {})
     if not isinstance(model, dict) or not isinstance(data, dict):
         raise ValueError("model and data config sections must be mappings")
+    if not isinstance(train, dict) or not isinstance(lora, dict) or not isinstance(optim, dict):
+        raise ValueError("train, lora, and optim config sections must be mappings")
     root = path.parent
 
     def resolve(section: dict[str, Any], key: str, default: str | None = None) -> Path:
@@ -180,6 +195,19 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     quant_type = str(lora.get("quant_type", "nf4")).lower() if isinstance(lora, dict) else "nf4"
     if quant_type not in {"nf4", "fp4"}:
         raise ValueError("lora.quant_type must be nf4 or fp4")
+    sample_number_raw = raw.get("sample_number")
+    sample_number = None if sample_number_raw is None else int(sample_number_raw)
+    if sample_number is not None and sample_number < 1:
+        raise ValueError("sample_number must be null or a positive integer")
+    duration_sec = float(raw.get("duration_sec", data.get("duration_sec", 100.0)))
+    if duration_sec <= 0:
+        raise ValueError("duration_sec must be positive")
+    first_codebook_weight_multiplier = float(raw.get("first_codebook_weight_multiplier", 1.0))
+    text_padding_weight = float(raw.get("text_padding_weight", 0.3))
+    if first_codebook_weight_multiplier < 0:
+        raise ValueError("first_codebook_weight_multiplier must be non-negative")
+    if not 0 <= text_padding_weight <= 1:
+        raise ValueError("text_padding_weight must be within [0, 1]")
     val_manifest_raw = data.get("val_manifest")
     val_manifest_path = resolve(data, "val_manifest") if isinstance(val_manifest_raw, str) and val_manifest_raw else None
     test_manifest_key = "test_manifest_path" if data.get("test_manifest_path") else "test_manifest"
@@ -196,17 +224,17 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         window_seconds=float(data.get("window_seconds", 30.0)),
         shuffle=bool(data.get("shuffle", False)),
         randomize_train=bool(data.get("randomize_train", True)),
-        max_steps=int(train.get("max_steps", 300)) if isinstance(train, dict) else 300,
-        learning_rate=float(train.get("learning_rate", 2e-5)) if isinstance(train, dict) else 2e-5,
+        max_steps=int(raw.get("max_steps", train.get("max_steps", 300))),
+        learning_rate=float(optim.get("lr", train.get("learning_rate", 2e-5))),
         depformer_learning_rate=float(train["depformer_learning_rate"]) if (isinstance(train, dict) and train.get("depformer_learning_rate") is not None) else None,
         train_stage=str(train.get("stage") or train.get("train_stage") or "joint").lower() if isinstance(train, dict) else "joint",
-        lora_rank=int(lora.get("rank", 16)) if isinstance(lora, dict) else 16,
-        lora_alpha=int(lora.get("alpha", 32)) if isinstance(lora, dict) else 32,
+        lora_rank=int(lora.get("rank", 128)),
+        lora_alpha=int(lora.get("alpha", 256)),
         qlora=qlora,
         quant_type=quant_type,
         device=str(model.get("device", "cuda")),
         gradient_accumulation_steps=max(1, int(train.get("gradient_accumulation_steps", 1))) if isinstance(train, dict) else 1,
-        per_device_batch_size=max(1, int(train.get("per_device_batch_size", 2))) if isinstance(train, dict) else 2,
+        per_device_batch_size=max(1, int(raw.get("batch_size", train.get("per_device_batch_size", 16)))),
         num_workers=max(0, int(train.get("num_workers", 4))) if isinstance(train, dict) else 4,
         prefetch_factor=max(1, int(train.get("prefetch_factor", 2))) if isinstance(train, dict) else 2,
         pin_memory=bool(train.get("pin_memory", True)) if isinstance(train, dict) else True,
@@ -224,6 +252,18 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         target_window_seconds=float(data.get("target_window_seconds", 25.0)),
         min_window_seconds=float(data.get("min_window_seconds", 10.0)),
         max_window_seconds=float(data.get("max_window_seconds", 30.0)),
-        gradient_checkpointing=bool(train.get("gradient_checkpointing", False)) if isinstance(train, dict) else False,
-        mixed_precision=str(train.get("mixed_precision", "bf16")) if isinstance(train, dict) else "bf16",
+gradient_checkpointing=bool(raw.get("gradient_checkpointing", train.get("gradient_checkpointing", False))),
+        mixed_precision=str(train.get("mixed_precision", "bf16")),
+        duration_sec=duration_sec,
+        sample_number=sample_number,
+        lora_enabled=bool(lora.get("enable", True)),
+        lora_scaling=float(lora.get("scaling", 2.0)),
+        ft_embed=bool(lora.get("ft_embed", False)),
+        weight_decay=float(optim.get("weight_decay", train.get("weight_decay", 0.1))),
+        pct_start=float(optim.get("pct_start", train.get("pct_start", 0.05))),
+        first_codebook_weight_multiplier=first_codebook_weight_multiplier,
+        text_padding_weight=text_padding_weight,
+        log_freq=max(1, int(raw.get("log_freq", 1))),
+        no_eval=bool(raw.get("no_eval", True)),
+        ckpt_freq=max(1, int(raw.get("ckpt_freq", train.get("save_every_steps", 50)))),
     )
