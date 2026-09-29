@@ -16,6 +16,8 @@ from personaplex_finetuning.config import load_config
 from personaplex_finetuning.data import PreparedDataset
 from personaplex_finetuning.inference import generation_from_config, smoke
 
+import torch
+torch.backends.cudnn.enabled = False
 
 def select_inference_window(sample, start: float | None, window_seconds: float):
     """Optionally replace the dataset default with an exact inference window."""

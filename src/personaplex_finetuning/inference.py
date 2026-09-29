@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -142,6 +143,57 @@ def _prepare_input_audio(input_file: Path, output_dir: Path) -> Path:
     return normalized_path
 
 
+def resolve_adapter_checkpoint(adapter: Path) -> tuple[Path, int, int]:
+    """Resolve adapter weights and LoRA dimensions from the saved checkpoint."""
+    adapter = Path(adapter).expanduser()
+    if adapter.is_dir():
+        checkpoint_dir = adapter
+        adapter_file = checkpoint_dir / "lora.safetensors"
+    else:
+        adapter_file = adapter
+        checkpoint_dir = adapter.parent
+    if not adapter_file.is_file():
+        raise FileNotFoundError(f"LoRA adapter weights not found: {adapter_file}")
+
+    metadata_file = checkpoint_dir / "adapter.json"
+    if not metadata_file.is_file():
+        raise FileNotFoundError(f"LoRA checkpoint metadata not found: {metadata_file}")
+    try:
+        metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read LoRA checkpoint metadata: {metadata_file}") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError(f"LoRA checkpoint metadata must be a JSON object: {metadata_file}")
+
+    dimensions = {}
+    for name in ("rank", "alpha"):
+        value = metadata.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"LoRA checkpoint metadata must contain a positive integer '{name}': {metadata_file}")
+        dimensions[name] = value
+    scaling = metadata.get("scaling")
+    if scaling is not None:
+        if isinstance(scaling, bool) or not isinstance(scaling, (int, float)) or scaling <= 0:
+            raise ValueError(f"LoRA checkpoint metadata must contain a positive 'scaling': {metadata_file}")
+        dimensions["alpha"] = round(dimensions["rank"] * scaling)
+    else:
+        # Older checkpoints wrote config.lora_alpha into adapter.json even
+        # though training injected alpha=rank*lora_scaling. Their run-level
+        # config.json records the effective scaling needed to recover alpha.
+        run_config_file = checkpoint_dir.parent.parent / "config.json"
+        if run_config_file.is_file():
+            try:
+                run_config = json.loads(run_config_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                run_config = None
+            if isinstance(run_config, dict):
+                run_rank = run_config.get("lora_rank")
+                run_scaling = run_config.get("lora_scaling")
+                if run_rank == dimensions["rank"] and isinstance(run_scaling, (int, float)) and run_scaling > 0:
+                    dimensions["alpha"] = round(dimensions["rank"] * run_scaling)
+    return adapter_file, dimensions["rank"], dimensions["alpha"]
+
+
 def generate(
     config: Config,
     sample: PreparedSample,
@@ -156,15 +208,27 @@ def generate(
     import sphn
     import torch
 
+    # Mimi's streaming decoder uses ConvTranspose1d shapes that have failed in
+    # Moshi's lazy torch.compile path on deployed CUDA/cuDNN stacks. Set this
+    # before load_runtime imports any Moshi modules so the native eager path is
+    # selected for both model and codec.
+    os.environ.setdefault("NO_TORCH_COMPILE", "1")
+
     settings = GenerationSettings() if generation is None else generation
+    adapter_file = None
+    adapter_rank = None
+    adapter_alpha = None
+    if adapter is not None:
+        adapter_file, adapter_rank, adapter_alpha = resolve_adapter_checkpoint(adapter)
     if settings.use_sampling and seed is not None:
         # Sampling is only reproducible with a pinned RNG (AGENTS.md: seed all randomness).
         torch.manual_seed(int(seed))
         logger.info("seeded torch RNG with %s for reproducible sampling", seed)
     runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
-    if adapter is not None:
-        inject_lora(runtime.model, config.lora_rank, config.lora_alpha)
-        load_adapter(runtime.model, adapter)
+    if adapter_file is not None:
+        assert adapter_rank is not None and adapter_alpha is not None
+        inject_lora(runtime.model, adapter_rank, adapter_alpha)
+        load_adapter(runtime.model, adapter_file)
     runtime.model.eval()
     lm_module = importlib.import_module("moshi.models.lm")
     generator = lm_module.LMGen(

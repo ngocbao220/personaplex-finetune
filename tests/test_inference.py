@@ -1,6 +1,7 @@
 import contextlib
 import importlib
 import json
+import os
 import sys
 import tempfile
 import types
@@ -90,7 +91,7 @@ class _Generator:
 
 class InferenceStreamingTest(unittest.TestCase):
     @contextlib.contextmanager
-    def _generate_with_fakes(self, generation=None, seed=1234):
+    def _generate_with_fakes(self, generation=None, seed=1234, adapter=None):
         mimi = _Mimi()
         seeded = []
         runtime = SimpleNamespace(
@@ -126,13 +127,16 @@ class InferenceStreamingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              patch.dict(sys.modules, {"torch": fake_torch, "sphn": fake_sphn}), \
              patch.object(inference, "load_runtime", return_value=runtime), \
+             patch.object(inference, "inject_lora") as inject_lora, \
+             patch.object(inference, "load_adapter") as load_adapter, \
              patch.object(importlib, "import_module", return_value=fake_lm):
             inference.generate(
-                config, sample, Path(directory) / "agent.wav", Path(directory) / "agent.txt", None,
+                config, sample, Path(directory) / "agent.wav", Path(directory) / "agent.txt", adapter,
                 generation=generation, seed=seed,
             )
             yield SimpleNamespace(
                 mimi=mimi, config=config, seeded=seeded, generator=_Generator.instances[0],
+                model=runtime.model, inject_lora=inject_lora, load_adapter=load_adapter,
             )
 
     def test_generate_keeps_mimi_decoder_streaming_across_generated_frames(self):
@@ -140,6 +144,71 @@ class InferenceStreamingTest(unittest.TestCase):
             self.assertEqual(fakes.mimi.streaming_calls, [1])
             self.assertEqual(fakes.generator.streaming_calls, [1])
             self.assertEqual(fakes.mimi.decode_calls, 2)
+
+    def test_generate_disables_moshi_compile_before_loading_runtime(self):
+        with patch.dict(os.environ):
+            os.environ.pop("NO_TORCH_COMPILE", None)
+            with self._generate_with_fakes():
+                self.assertEqual(os.environ.get("NO_TORCH_COMPILE"), "1")
+
+    def test_generate_reads_lora_rank_and_alpha_from_checkpoint_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "checkpoint_000123"
+            checkpoint.mkdir()
+            adapter_file = checkpoint / "lora.safetensors"
+            adapter_file.write_bytes(b"test")
+            (checkpoint / "adapter.json").write_text(
+                json.dumps({"rank": 64, "alpha": 128}), encoding="utf-8",
+            )
+
+            with self._generate_with_fakes(adapter=checkpoint) as fakes:
+                fakes.inject_lora.assert_called_once_with(fakes.model, 64, 128)
+                fakes.load_adapter.assert_called_once_with(fakes.model, adapter_file)
+
+    def test_resolve_adapter_requires_valid_checkpoint_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            adapter_file = checkpoint / "lora.safetensors"
+            adapter_file.write_bytes(b"test")
+            (checkpoint / "adapter.json").write_text(
+                json.dumps({"rank": 8, "alpha": 16}), encoding="utf-8",
+            )
+
+            self.assertEqual(
+                inference.resolve_adapter_checkpoint(checkpoint),
+                (adapter_file, 8, 16),
+            )
+            (checkpoint / "adapter.json").write_text(
+                json.dumps({"rank": 8}), encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "alpha"):
+                inference.resolve_adapter_checkpoint(adapter_file)
+
+    def test_resolve_adapter_recovers_legacy_alpha_from_run_scaling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run"
+            checkpoint = run_dir / "checkpoints" / "checkpoint_000123"
+            checkpoint.mkdir(parents=True)
+            adapter_file = checkpoint / "lora.safetensors"
+            adapter_file.write_bytes(b"test")
+            (checkpoint / "adapter.json").write_text(
+                json.dumps({"rank": 128, "alpha": 32}), encoding="utf-8",
+            )
+            (run_dir / "config.json").write_text(
+                json.dumps({"lora_rank": 128, "lora_scaling": 2.0}), encoding="utf-8",
+            )
+
+            self.assertEqual(
+                inference.resolve_adapter_checkpoint(checkpoint),
+                (adapter_file, 128, 256),
+            )
+            (checkpoint / "adapter.json").write_text(
+                json.dumps({"rank": 128, "alpha": 32, "scaling": 2.0}), encoding="utf-8",
+            )
+            self.assertEqual(
+                inference.resolve_adapter_checkpoint(checkpoint),
+                (adapter_file, 128, 256),
+            )
 
     def test_generate_without_settings_keeps_the_previous_hard_coded_values(self):
         # Regression guard for the milestone: an absent generation block must not change

@@ -24,6 +24,7 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(loaded.per_device_batch_size, 16)
             self.assertEqual(loaded.max_steps, 2000)
             self.assertEqual(loaded.lora_rank, 128)
+            self.assertEqual(loaded.lora_alpha, 256)
             self.assertEqual(loaded.lora_scaling, 2.0)
             self.assertFalse(loaded.ft_embed)
             self.assertAlmostEqual(loaded.learning_rate, 2e-6)

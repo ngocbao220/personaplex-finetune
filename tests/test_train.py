@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -12,9 +13,11 @@ from personaplex_finetuning.train import (
     load_training_state,
     model_forward_train,
     rank_stride_indices,
+    reduce_distributed_loss,
     sample_index_for_rank,
     step_optimizer_if_ready,
     save_training_state,
+    save_adapter_state,
     write_rank_info,
     write_tensorboard_scalars,
 )
@@ -28,6 +31,32 @@ class TrainTest(unittest.TestCase):
 
     def test_global_batch_multiplies_processes_and_accumulation(self) -> None:
         self.assertEqual(effective_global_batch_size(1, 4, 2), 8)
+
+    def test_distributed_loss_reduces_components_in_one_collective_and_preserves_gradient(self) -> None:
+        parameter = torch.nn.Parameter(torch.tensor(2.0))
+        local_stats = {
+            "text": (parameter * 4, torch.tensor(2.0)),
+            "audio": (parameter * 3, torch.tensor(1.0)),
+        }
+        remote_values = torch.tensor([2.0, 3.0, 6.0, 3.0])
+        calls = []
+
+        def all_reduce(value):
+            calls.append(value.clone())
+            value.add_(remote_values)
+            return value
+
+        components, total = reduce_distributed_loss(
+            local_stats, all_reduce, preserve_grad=True, world_size=2,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].numel(), 4)
+        self.assertAlmostEqual(float(components["text"]), 2.0)
+        self.assertAlmostEqual(float(components["audio"]), 3.0)
+        self.assertAlmostEqual(float(total), 5.0)
+        total.backward()
+        self.assertAlmostEqual(float(parameter.grad), 3.1, places=6)
 
     def test_each_rank_receives_a_different_sample_before_dataset_wraparound(self) -> None:
         indices = {sample_index_for_rank(3, rank, 4, 393) for rank in range(4)}
@@ -43,14 +72,9 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(info["first_sample_index"], 1)
 
     def test_optimizer_only_steps_at_accumulation_sync_boundary(self) -> None:
-        class Accelerator:
+        class SyncState:
             def __init__(self, sync_gradients: bool) -> None:
                 self.sync_gradients = sync_gradients
-                self.clip_calls = 0
-
-            def clip_grad_norm_(self, _parameters, _max_norm):
-                self.clip_calls += 1
-                return 0.75
 
         class Optimizer:
             def __init__(self) -> None:
@@ -72,13 +96,16 @@ class TrainTest(unittest.TestCase):
 
         optimizer = Optimizer()
         scheduler = Scheduler()
-        unsynced = Accelerator(sync_gradients=False)
-        synced = Accelerator(sync_gradients=True)
+        unsynced = SyncState(sync_gradients=False)
+        synced = SyncState(sync_gradients=True)
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        parameter.grad = torch.tensor(0.75)
+        trainable = [parameter]
 
-        self.assertEqual(step_optimizer_if_ready(unsynced, optimizer, scheduler, []), 0.0)
-        self.assertEqual((optimizer.steps, optimizer.zeroes, scheduler.steps, unsynced.clip_calls), (0, 0, 0, 0))
-        self.assertEqual(step_optimizer_if_ready(synced, optimizer, scheduler, []), 0.75)
-        self.assertEqual((optimizer.steps, optimizer.zeroes, scheduler.steps, synced.clip_calls), (1, 1, 1, 1))
+        self.assertEqual(step_optimizer_if_ready(unsynced, optimizer, scheduler, trainable), 0.0)
+        self.assertEqual((optimizer.steps, optimizer.zeroes, scheduler.steps), (0, 0, 0))
+        self.assertAlmostEqual(step_optimizer_if_ready(synced, optimizer, scheduler, trainable), 0.75)
+        self.assertEqual((optimizer.steps, optimizer.zeroes, scheduler.steps), (1, 1, 1))
 
     def test_training_state_restores_optimizer_scheduler_and_step(self) -> None:
         parameter = torch.nn.Parameter(torch.tensor(1.0))
@@ -100,6 +127,19 @@ class TrainTest(unittest.TestCase):
             self.assertEqual(restored_step, 12)
             self.assertEqual(restored_scheduler.last_epoch, scheduler.last_epoch)
             self.assertTrue(restored_optimizer.state_dict()["state"])
+
+    def test_adapter_metadata_records_effective_lora_alpha_and_scaling(self) -> None:
+        config = SimpleNamespace(
+            model_root=Path("/models/personaplex"), lora_rank=128,
+            lora_alpha=256, lora_scaling=2.0, per_device_batch_size=1,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = save_adapter_state(
+                Path(tmp), {"lora.weight": torch.ones(1)}, config, step=7,
+            )
+            metadata = json.loads((adapter.parent / "adapter.json").read_text())
+
+        self.assertEqual((metadata["rank"], metadata["alpha"], metadata["scaling"]), (128, 256, 2.0))
 
     def test_resume_rejects_changed_ddp_topology(self) -> None:
         parameter = torch.nn.Parameter(torch.tensor(1.0))

@@ -1,16 +1,12 @@
 defaults:
   - model: server
   - data: otospeech
-  - lora: default
   - _self_
 
 seed: 42
 
 adapter:
   path: ../runs/hf_overfit_10/checkpoints/checkpoint_000300
-  rank: 16
-  alpha: 32
-  qlora: false
 
 prompt:
   voice_prompt: ../prepared/samples/conv_0001/voice_prompt_left.wav

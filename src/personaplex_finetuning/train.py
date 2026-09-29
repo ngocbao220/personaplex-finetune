@@ -318,17 +318,28 @@ def loss_components(model_output, codes, example, text_padding_id, torch_module,
 
 
 def reduce_distributed_loss(stats, all_reduce_sum, *, preserve_grad: bool = False, world_size: int = 1):
-    """Reduce weighted CE sums/weights globally, then return reference-style means."""
+    """Reduce weighted CE sums/weights in one collective and return global means."""
+    names = tuple(stats)
+    packed = torch.stack([
+        value
+        for name in names
+        for value in stats[name]
+    ]).detach()
+    global_values = all_reduce_sum(packed)
     components = {}
     total = None
-    for name, (numerator, denominator) in stats.items():
-        global_values = all_reduce_sum(torch.stack((numerator.detach(), denominator.detach())))
+    for index, name in enumerate(names):
+        numerator, denominator = stats[name]
+        global_numerator = global_values[index * 2]
+        global_denominator = global_values[index * 2 + 1].clamp_min(1e-12)
+        global_mean = global_numerator / global_denominator
         if preserve_grad:
-            # FSDP averages gradients across ranks, so scale each local numerator by
-            # world_size/global_weight to obtain a global weighted mean gradient.
-            loss = numerator * world_size / global_values[1].clamp_min(1e-12)
+            # FSDP averages gradients across ranks; scale each local numerator
+            # so the averaged gradient equals the global weighted-mean gradient.
+            local_gradient = numerator * world_size / global_denominator
+            loss = local_gradient + (global_mean - local_gradient.detach())
         else:
-            loss = global_values[0] / global_values[1].clamp_min(1e-12)
+            loss = global_mean
         components[name] = loss
         total = loss if total is None else total + loss
     return components, total
@@ -422,6 +433,7 @@ def save_adapter_state(run_dir: Path, state_dict, config: Config, step: int, opt
     (path / "adapter.json").write_text(
         json.dumps(
             {"step": step, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha,
+             "scaling": config.lora_scaling,
              "gradient_accumulation_steps": gradient_accumulation_steps, "num_processes": num_processes,
              "per_device_batch_size": config.per_device_batch_size},
             indent=2,
@@ -453,6 +465,7 @@ def save_best_adapter_state(
     (path / "adapter.json").write_text(
         json.dumps(
             {"step": step, "val_loss": val_loss, "model_root": str(config.model_root), "rank": config.lora_rank, "alpha": config.lora_alpha,
+             "scaling": config.lora_scaling,
              "gradient_accumulation_steps": gradient_accumulation_steps, "num_processes": num_processes,
              "per_device_batch_size": config.per_device_batch_size},
             indent=2,
@@ -688,7 +701,7 @@ def run(
 
     if not config.lora_enabled:
         raise ValueError("this training path requires lora.enable=true")
-    lora_alpha = round(config.lora_rank * config.lora_scaling)
+    lora_alpha = config.lora_alpha
     targets = inject_lora(runtime.model, config.lora_rank, lora_alpha, prefixes=lora_prefixes)
 
     # Optional gradient checkpointing
@@ -834,11 +847,12 @@ def run(
                     distributed=use_fsdp,
                 )
                 if use_fsdp:
-                    _, total = reduce_distributed_loss(
+                    components, total = reduce_distributed_loss(
                         loss_result[1], all_reduce_sum, preserve_grad=True, world_size=world_size
                     )
                 else:
                     total = loss_result[0]
+                    components = loss_result[1]
                 (total / accum_steps).backward()
             sync_state = type("SyncState", (), {"sync_gradients": sync_gradients})()
             grad_norm = step_optimizer_if_ready(sync_state, optimizer, scheduler, trainable, runtime.model)
@@ -848,10 +862,6 @@ def run(
 
             optimizer_step += 1
 
-            if use_fsdp:
-                components, total = reduce_distributed_loss(loss_result[1], all_reduce_sum)
-            else:
-                total, components = loss_result
             reduced_total = total.detach()
             reduced_text = components["text"].detach()
             reduced_sem = components["audio_semantic"].detach()

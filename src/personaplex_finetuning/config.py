@@ -213,6 +213,11 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     test_manifest_key = "test_manifest_path" if data.get("test_manifest_path") else "test_manifest"
     test_manifest_raw = data.get(test_manifest_key)
     test_manifest_path = resolve(data, test_manifest_key) if isinstance(test_manifest_raw, str) and test_manifest_raw else None
+    lora_rank = int(lora.get("rank", 128))
+    lora_scaling = float(lora.get("scaling", 2.0))
+    # Training injects LoRA with alpha = rank * scaling. Keep the recorded
+    # alpha consistent with the value that is actually used at runtime.
+    lora_alpha = round(lora_rank * lora_scaling)
 
     return Config(
         path=path,
@@ -228,8 +233,8 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         learning_rate=float(optim.get("lr", train.get("learning_rate", 2e-5))),
         depformer_learning_rate=float(train["depformer_learning_rate"]) if (isinstance(train, dict) and train.get("depformer_learning_rate") is not None) else None,
         train_stage=str(train.get("stage") or train.get("train_stage") or "joint").lower() if isinstance(train, dict) else "joint",
-        lora_rank=int(lora.get("rank", 128)),
-        lora_alpha=int(lora.get("alpha", 256)),
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha,
         qlora=qlora,
         quant_type=quant_type,
         device=str(model.get("device", "cuda")),
@@ -257,7 +262,7 @@ gradient_checkpointing=bool(raw.get("gradient_checkpointing", train.get("gradien
         duration_sec=duration_sec,
         sample_number=sample_number,
         lora_enabled=bool(lora.get("enable", True)),
-        lora_scaling=float(lora.get("scaling", 2.0)),
+        lora_scaling=lora_scaling,
         ft_embed=bool(lora.get("ft_embed", False)),
         weight_decay=float(optim.get("weight_decay", train.get("weight_decay", 0.1))),
         pct_start=float(optim.get("pct_start", train.get("pct_start", 0.05))),
