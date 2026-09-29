@@ -7,6 +7,7 @@ import logging
 import os
 import copy
 import unicodedata
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,6 +20,15 @@ from .lora import inject_lora, load_adapter
 from .runtime import RuntimePaths, load_runtime
 
 logger = logging.getLogger(__name__)
+
+
+def inference_autocast_context(device):
+    """Match BF16 PersonaPlex weights with autocast during CUDA generation."""
+    import torch
+
+    if torch.device(device).type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
 
 
 def _normalize_text_for_metrics(text: str) -> tuple[list[str], str]:
@@ -228,7 +238,12 @@ def generate(
     text_token_ids: list[int] = []
     # Mimi's decoder is causal/streaming: resetting it for every 80 ms frame
     # inserts boundary transients that sound like clicks and clipped syllables.
-    with torch.no_grad(), runtime.codec.mimi.streaming(1), generator.streaming(1):
+    with (
+        torch.no_grad(),
+        inference_autocast_context(config.device),
+        runtime.codec.mimi.streaming(1),
+        generator.streaming(1),
+    ):
         generator.step_system_prompts(runtime.codec.mimi)
         for frame in range(user.shape[-1]):
             tokens = generator.step(input_tokens=user[:, :, frame : frame + 1])
@@ -289,7 +304,12 @@ def generate_text_with_runtime(
         )
         user = torch.tensor(user_codes, device=device).unsqueeze(0)
         token_ids: list[int] = []
-        with torch.no_grad(), runtime.codec.mimi.streaming(1), generator.streaming(1):
+        with (
+            torch.no_grad(),
+            inference_autocast_context(device),
+            runtime.codec.mimi.streaming(1),
+            generator.streaming(1),
+        ):
             generator.step_system_prompts(runtime.codec.mimi)
             for frame in range(user.shape[-1]):
                 tokens = generator.step(input_tokens=user[:, :, frame : frame + 1])

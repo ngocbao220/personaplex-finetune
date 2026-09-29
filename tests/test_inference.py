@@ -100,6 +100,14 @@ class _Generator:
 
 
 class InferenceStreamingTest(unittest.TestCase):
+    def test_cuda_generation_uses_bfloat16_autocast(self):
+        marker = object()
+        with patch.object(torch, "autocast", return_value=marker) as autocast:
+            context = inference.inference_autocast_context("cuda:0")
+
+        self.assertIs(context, marker)
+        autocast.assert_called_once_with(device_type="cuda", dtype=torch.bfloat16)
+
     @contextlib.contextmanager
     def _generate_with_fakes(self, generation=None, seed=1234, adapter=None):
         mimi = _Mimi()
