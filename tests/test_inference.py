@@ -11,10 +11,19 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import torch
+from safetensors.torch import save_file
 
 from personaplex_finetuning import inference
 from tools import inference_smoke
 from tools.inference_smoke import select_inference_window
+
+
+def _write_lora_weights(path: Path, rank: int) -> None:
+    save_file({
+        "transformer.layers.0.linear.lora_a.weight": torch.zeros((rank, 3)),
+        "transformer.layers.0.linear.lora_b.weight": torch.zeros((2, rank)),
+    }, str(path))
 
 
 class _UserTokens:
@@ -108,11 +117,6 @@ class InferenceStreamingTest(unittest.TestCase):
                 _processor=SimpleNamespace(id_to_piece=lambda _token: "hello"),
             ),
         )
-        fake_torch = types.SimpleNamespace(
-            no_grad=contextlib.nullcontext,
-            tensor=lambda *_args, **_kwargs: _UserTokens(),
-            manual_seed=lambda value: seeded.append(value),
-        )
         fake_sphn = types.SimpleNamespace(
             write_wav=lambda path, _audio, _sample_rate: Path(path).write_bytes(b"wav"),
         )
@@ -125,7 +129,8 @@ class InferenceStreamingTest(unittest.TestCase):
 
         _Generator.instances = []
         with tempfile.TemporaryDirectory() as directory, \
-             patch.dict(sys.modules, {"torch": fake_torch, "sphn": fake_sphn}), \
+             patch.dict(sys.modules, {"sphn": fake_sphn}), \
+             patch.object(torch, "manual_seed", side_effect=seeded.append), \
              patch.object(inference, "load_runtime", return_value=runtime), \
              patch.object(inference, "inject_lora") as inject_lora, \
              patch.object(inference, "load_adapter") as load_adapter, \
@@ -156,7 +161,7 @@ class InferenceStreamingTest(unittest.TestCase):
             checkpoint = Path(directory) / "checkpoint_000123"
             checkpoint.mkdir()
             adapter_file = checkpoint / "lora.safetensors"
-            adapter_file.write_bytes(b"test")
+            _write_lora_weights(adapter_file, rank=64)
             (checkpoint / "adapter.json").write_text(
                 json.dumps({"rank": 64, "alpha": 128}), encoding="utf-8",
             )
@@ -169,7 +174,7 @@ class InferenceStreamingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory)
             adapter_file = checkpoint / "lora.safetensors"
-            adapter_file.write_bytes(b"test")
+            _write_lora_weights(adapter_file, rank=8)
             (checkpoint / "adapter.json").write_text(
                 json.dumps({"rank": 8, "alpha": 16}), encoding="utf-8",
             )
@@ -190,7 +195,7 @@ class InferenceStreamingTest(unittest.TestCase):
             checkpoint = run_dir / "checkpoints" / "checkpoint_000123"
             checkpoint.mkdir(parents=True)
             adapter_file = checkpoint / "lora.safetensors"
-            adapter_file.write_bytes(b"test")
+            _write_lora_weights(adapter_file, rank=128)
             (checkpoint / "adapter.json").write_text(
                 json.dumps({"rank": 128, "alpha": 32}), encoding="utf-8",
             )
@@ -209,6 +214,21 @@ class InferenceStreamingTest(unittest.TestCase):
                 inference.resolve_adapter_checkpoint(checkpoint),
                 (adapter_file, 128, 256),
             )
+
+    def test_resolve_adapter_uses_tensor_rank_when_metadata_is_stale(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            adapter_file = checkpoint / "lora.safetensors"
+            _write_lora_weights(adapter_file, rank=128)
+            (checkpoint / "adapter.json").write_text(
+                json.dumps({"rank": 16, "alpha": 32, "scaling": 2.0}), encoding="utf-8",
+            )
+
+            with self.assertLogs(inference.logger, level="WARNING") as logged:
+                resolved = inference.resolve_adapter_checkpoint(checkpoint)
+
+        self.assertEqual(resolved, (adapter_file, 128, 256))
+        self.assertIn("using tensor rank", logged.output[0])
 
     def test_generate_without_settings_keeps_the_previous_hard_coded_values(self):
         # Regression guard for the milestone: an absent generation block must not change

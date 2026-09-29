@@ -144,7 +144,7 @@ def _prepare_input_audio(input_file: Path, output_dir: Path) -> Path:
 
 
 def resolve_adapter_checkpoint(adapter: Path) -> tuple[Path, int, int]:
-    """Resolve adapter weights and LoRA dimensions from the saved checkpoint."""
+    """Resolve adapter weights and LoRA dimensions from checkpoint contents."""
     adapter = Path(adapter).expanduser()
     if adapter.is_dir():
         checkpoint_dir = adapter
@@ -165,17 +165,38 @@ def resolve_adapter_checkpoint(adapter: Path) -> tuple[Path, int, int]:
     if not isinstance(metadata, dict):
         raise ValueError(f"LoRA checkpoint metadata must be a JSON object: {metadata_file}")
 
-    dimensions = {}
-    for name in ("rank", "alpha"):
-        value = metadata.get(name)
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ValueError(f"LoRA checkpoint metadata must contain a positive integer '{name}': {metadata_file}")
-        dimensions[name] = value
+    # Rank is encoded directly in adapter tensor shapes and is more reliable
+    # than metadata from older runs, which could record the config default.
+    from safetensors import safe_open
+
+    ranks = set()
+    with safe_open(str(adapter_file), framework="pt", device="cpu") as checkpoint:
+        for name in checkpoint.keys():
+            shape = checkpoint.get_slice(name).get_shape()
+            if name.endswith(".lora_a.weight") and len(shape) == 2:
+                ranks.add(shape[0])
+            elif name.endswith(".lora_b.weight") and len(shape) == 2:
+                ranks.add(shape[1])
+    if not ranks:
+        raise ValueError(f"adapter file contains no LoRA A/B weight tensors: {adapter_file}")
+    if len(ranks) != 1 or next(iter(ranks)) <= 0:
+        raise ValueError(f"adapter tensors contain inconsistent LoRA ranks {sorted(ranks)}: {adapter_file}")
+    rank = next(iter(ranks))
+    metadata_rank = metadata.get("rank")
+    if metadata_rank != rank:
+        logger.warning(
+            "LoRA rank metadata (%r) disagrees with adapter tensor shapes (rank=%d); using tensor rank",
+            metadata_rank, rank,
+        )
+
+    alpha = metadata.get("alpha")
+    if isinstance(alpha, bool) or not isinstance(alpha, int) or alpha <= 0:
+        raise ValueError(f"LoRA checkpoint metadata must contain a positive integer 'alpha': {metadata_file}")
     scaling = metadata.get("scaling")
     if scaling is not None:
         if isinstance(scaling, bool) or not isinstance(scaling, (int, float)) or scaling <= 0:
             raise ValueError(f"LoRA checkpoint metadata must contain a positive 'scaling': {metadata_file}")
-        dimensions["alpha"] = round(dimensions["rank"] * scaling)
+        alpha = round(rank * scaling)
     else:
         # Older checkpoints wrote config.lora_alpha into adapter.json even
         # though training injected alpha=rank*lora_scaling. Their run-level
@@ -189,9 +210,9 @@ def resolve_adapter_checkpoint(adapter: Path) -> tuple[Path, int, int]:
             if isinstance(run_config, dict):
                 run_rank = run_config.get("lora_rank")
                 run_scaling = run_config.get("lora_scaling")
-                if run_rank == dimensions["rank"] and isinstance(run_scaling, (int, float)) and run_scaling > 0:
-                    dimensions["alpha"] = round(dimensions["rank"] * run_scaling)
-    return adapter_file, dimensions["rank"], dimensions["alpha"]
+                if run_rank == rank and isinstance(run_scaling, (int, float)) and run_scaling > 0:
+                    alpha = round(rank * run_scaling)
+    return adapter_file, rank, alpha
 
 
 def generate(
