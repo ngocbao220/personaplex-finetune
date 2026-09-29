@@ -81,13 +81,13 @@ class ConfigTest(unittest.TestCase):
             self.assertTrue(load_config(config).profile_steps)
 
     def test_hydra_moshi_overrides_target_the_effective_top_level_parameters(self) -> None:
-        config = Path(__file__).resolve().parents[1] / "configs" / "moshi_code_style.yaml"
+        config = Path(__file__).resolve().parents[1] / "configs" / "config.yaml"
 
         loaded = load_config(
             config,
             overrides=[
                 "model=server", "max_steps=20", "learning_rate=1e-5", "profile_steps=true",
-                "batch_size=4", "train.gradient_accumulation_steps=2", "lora.rank=64",
+                "batch_size=4", "train.gradient_accumulation_steps=2", "train.warmup_steps=0", "lora.rank=64",
                 "no_eval=false", "train.eval_every_steps=100",
                 "free_running_eval_every_steps=200", "validation_max_samples=8",
                 "generation.audio_silence_frame_cnt=4",
@@ -106,7 +106,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(loaded.generation_settings.audio_silence_frame_cnt, 4)
 
     def test_default_training_config_runs_heldout_generation_validation(self) -> None:
-        config = Path(__file__).resolve().parents[1] / "configs" / "moshi_code_style.yaml"
+        config = Path(__file__).resolve().parents[1] / "configs" / "config.yaml"
         loaded = load_config(config)
 
         self.assertFalse(loaded.no_eval)
@@ -121,7 +121,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(loaded.generation_settings, inference_config.generation_settings)
 
     def test_ten_sample_overfit_is_deterministic_and_monitors_generation_on_train_set(self) -> None:
-        config = Path(__file__).resolve().parents[1] / "configs" / "moshi_overfit_10.yaml"
+        config = Path(__file__).resolve().parents[1] / "configs" / "overfit.yaml"
         loaded = load_config(config)
 
         self.assertEqual(loaded.sample_number, 10)
@@ -131,7 +131,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(loaded.free_running_eval_every_steps, 100)
 
     def test_ten_conversation_overfit_config_disables_dataset_shuffling(self) -> None:
-        config = Path(__file__).resolve().parents[1] / "configs" / "moshi_overfit_10.yaml"
+        config = Path(__file__).resolve().parents[1] / "configs" / "overfit.yaml"
 
         loaded = load_config(config)
 
@@ -149,7 +149,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(loaded.max_window_seconds, 30)
         self.assertEqual(loaded.per_device_batch_size, 2)
         self.assertEqual(loaded.num_workers, 4)
-        self.assertTrue(loaded.randomize_train)
+        self.assertFalse(loaded.randomize_train)
         self.assertTrue(loaded.persistent_workers)
         self.assertEqual(loaded.max_steps, 10_000)
 
@@ -157,7 +157,7 @@ class ConfigTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         loaded = load_config(
             root / "configs" / "config.yaml",
-            overrides=["data=otospeech", "model=server", "train=full"],
+            overrides=["data=vietnamese", "model=server", "train=full"],
         )
 
         self.assertEqual(loaded.max_steps, 10_000)
@@ -172,7 +172,7 @@ class ConfigTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         loaded = load_config(
             root / "configs" / "config.yaml",
-            overrides=["data=otospeech", "model=server", "train=b200"],
+            overrides=["data=vietnamese", "model=server", "train=b200"],
         )
 
         self.assertEqual(loaded.per_device_batch_size, 1)

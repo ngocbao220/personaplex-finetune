@@ -1,0 +1,56 @@
+# Deterministic single-GPU overfit config: exactly 1 sample, first 100 seconds window.
+defaults:
+  - model: server
+  - data: vietnamese
+  - lora: default
+  - _self_
+
+seed: 42
+duration_sec: 100
+sample_index: 0              # Index of the single sample in dataset to overfit (0 = first conversation)
+sample_number: null
+batch_size: 1
+max_steps: 1000
+
+data:
+  shuffle: false
+
+lora:
+  enable: true
+  rank: 128
+  scaling: 2.0
+  ft_embed: false
+
+# Dual Learning Rates
+optim:
+  lr: 2.0e-5                 # Temporal Transformer (7B) learning rate
+  weight_decay: 0.1
+  pct_start: 0.05
+
+train:
+  output_dir: ../runs/personaplex-overfit-1
+  learning_rate: 2.0e-5             # Temporal Transformer (7B) learning rate
+  depformer_learning_rate: 5.0e-5   # Depth Transformer (0.1B) learning rate
+  stage: joint
+  gradient_accumulation_steps: 1
+  eval_every_steps: 0
+  eval_on_train_samples: false      # No validation loss needed
+  mixed_precision: bf16
+
+first_codebook_weight_multiplier: 1.0
+text_padding_weight: 0.3
+log_freq: 1
+no_eval: true                       # Skip all evaluation / val loss
+free_running_eval_every_steps: 0    # No periodic free-running eval during training
+ckpt_freq: 100
+gradient_checkpointing: true
+
+# Settings for free-running generation / inference on this overfit sample:
+# greedy search (temperature=0.0) ensures exact recall of the memorized sample.
+generation:
+  use_sampling: false
+  temp: 0.0
+  temp_text: 0.0
+  top_k: 250
+  top_k_text: 25
+  audio_silence_frame_cnt: 6

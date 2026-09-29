@@ -13,6 +13,7 @@ from personaplex_finetuning.data import (
     duration_chunks,
     limit_conversations,
     sample_for_training_position,
+    samples_for_role_pass,
     turn_aware_chunks,
     Word,
 )
@@ -251,11 +252,25 @@ class PreparedDatasetTest(unittest.TestCase):
             manifest.write_text(json.dumps({"sample_id": "conv_0001", "sample_dir": "samples/conv_0001"}) + "\n")
             chunks = contiguous_chunks(PreparedDataset(manifest).load(), 30.0)
             first_right_pass = sample_for_training_position(chunks, position=2, seed=42, shuffle=False, swap_roles=True)
+            epoch_one = samples_for_role_pass(chunks, pass_index=1, swap_roles=True)[0]
 
         self.assertEqual(first_right_pass.voice_prompt_wav.name, "voice_prompt_right.wav")
         self.assertEqual(first_right_pass.text_prompt, "right persona")
         self.assertEqual((first_right_pass.agent_channel, first_right_pass.user_channel), (1, 0))
         self.assertEqual([word.speaker for word in first_right_pass.words], ["user", "agent"])
+        self.assertEqual(epoch_one.voice_prompt_wav.name, "voice_prompt_right.wav")
+        self.assertEqual(epoch_one.text_prompt, "right persona")
+        self.assertEqual((epoch_one.agent_channel, epoch_one.user_channel), (1, 0))
+
+    def test_role_pass_helper_preserves_left_view_when_disabled_or_even(self) -> None:
+        sample = PreparedSample(
+            "conv", Path("conversation.wav"), Path("voice_prompt_left.wav"), (), "left prompt",
+            {}, AudioInfo(24000, 2, 30.0), 0.0, 30.0,
+            voice_prompt_right_wav=Path("voice_prompt_right.wav"), text_prompt_right="right prompt",
+        )
+
+        self.assertIs(samples_for_role_pass([sample], pass_index=0, swap_roles=True)[0], sample)
+        self.assertIs(samples_for_role_pass([sample], pass_index=1, swap_roles=False)[0], sample)
 
     def test_right_role_pass_rejects_missing_right_voice_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

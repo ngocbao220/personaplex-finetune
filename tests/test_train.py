@@ -31,12 +31,130 @@ from personaplex_finetuning.train import (
     save_training_state,
     save_adapter_state,
     write_rank_info,
+    validate_resume_step,
+    validate_resume_checkpoint,
+    training_contract,
     write_tensorboard_scalars,
     verify_reloaded_adapter,
 )
 
 
 class TrainTest(unittest.TestCase):
+    def test_resume_requires_complete_matching_checkpoint(self) -> None:
+        from safetensors.torch import save_file
+        from personaplex_finetuning.config import Config
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared = root / "prepared"
+            prepared.mkdir()
+            (prepared / "train.jsonl").write_text('{"sample_id":"one"}\n')
+            config = Config(
+                path=root / "config.yaml", model_root=Path("/models/personaplex"),
+                personaplex_source=root / "src", prepared_dir=prepared, output_dir=root,
+                lora_rank=2, lora_alpha=4,
+            )
+            checkpoint = root / "run" / "checkpoints" / "checkpoint_000007"
+            checkpoint.mkdir(parents=True)
+            save_file({
+                "transformer.projection.lora_a.weight": torch.zeros(2, 3),
+                "transformer.projection.lora_b.weight": torch.zeros(4, 2),
+            }, str(checkpoint / "lora.safetensors"))
+            (checkpoint / "adapter.json").write_text(json.dumps({
+                "step": 7, "rank": 2, "alpha": 4,
+                "model_root": "/models/personaplex",
+            }))
+            with self.assertRaisesRegex(RuntimeError, "training_state.pt"):
+                validate_resume_checkpoint(config, str(checkpoint), ("transformer",), [])
+
+            (checkpoint / "training_state.pt").write_bytes(b"placeholder")
+            run_config = root / "run" / "config.json"
+            run_config.write_text(json.dumps({"training_contract": training_contract(config, [])}))
+            adapter, step = validate_resume_checkpoint(config, str(checkpoint), ("transformer",), [])
+            self.assertEqual((adapter, step), (checkpoint / "lora.safetensors", 7))
+            with self.assertRaisesRegex(RuntimeError, "LoRA configuration differs"):
+                validate_resume_checkpoint(config, str(checkpoint), ("depformer",), [])
+            with self.assertRaisesRegex(RuntimeError, "base model differs"):
+                validate_resume_checkpoint(
+                    config.replace(model_root=Path("/other")),
+                    str(checkpoint), ("transformer",), [],
+                )
+            (prepared / "train.jsonl").write_text('{"sample_id":"changed"}\n')
+            with self.assertRaisesRegex(RuntimeError, "manifest_sha256"):
+                validate_resume_checkpoint(config, str(checkpoint), ("transformer",), [])
+
+    def test_training_contract_detects_changed_prepared_text(self) -> None:
+        from personaplex_finetuning.config import Config
+        from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "train.jsonl").write_text("{}\n")
+            (root / "conversation.wav").write_bytes(b"audio")
+            (root / "voice.wav").write_bytes(b"prompt")
+            config = Config(root / "config.yaml", root, root, root, root)
+            sample = PreparedSample(
+                "sample", root / "conversation.wav", root / "voice.wav",
+                (Word("agent", "xin", 0.0, 0.2),), "Trò chuyện tiếng Việt.", {},
+                AudioInfo(24000, 2, 1.0), 0.0, 1.0,
+            )
+            original = training_contract(config, [sample])
+            changed = training_contract(config, [sample.with_window(0.0, 1.0, "Speak English.")])
+            self.assertNotEqual(original["prepared_sources_sha256"], changed["prepared_sources_sha256"])
+
+    def test_training_iterator_switches_voice_text_and_channels_on_role_epoch(self) -> None:
+        from personaplex_finetuning.data import AudioInfo, PreparedSample
+        from personaplex_finetuning.train import iter_training_batches
+
+        class FakeCodec:
+            frame_rate = 12.5
+            codebooks = 8
+
+            def encode_conversation(self, *_args):
+                return ((1,) * 25,) * 8
+
+            def encode_voice_prompt(self, *_args):
+                return ((1,),) * 8
+
+            def sine(self, frames):
+                return ((1,) * frames,) * 8
+
+            def silence(self, frames):
+                return ((0,) * frames,) * 8
+
+        sample = PreparedSample(
+            sample_id="swap", conversation_wav=Path("conversation.wav"),
+            voice_prompt_wav=Path("voice_prompt_left.wav"), words=(),
+            text_prompt="left prompt", metadata={}, audio=AudioInfo(24_000, 2, 4.0),
+            window_start_sec=0.0, window_end_sec=4.0,
+            voice_prompt_right_wav=Path("voice_prompt_right.wav"),
+            text_prompt_right="right prompt",
+        )
+        runtime = SimpleNamespace(
+            codec=FakeCodec(), tokenizer=SimpleNamespace(padding_id=3),
+            initial_tokens=[0] * 17, zero_token=-1,
+        )
+        config = SimpleNamespace(
+            duration_sec=2.0, per_device_batch_size=1, shuffle=False, seed=42,
+            prompt_aug_prob=0.0, swap_roles_after_pass=True,
+        )
+        example = SimpleNamespace(
+            prompt_frames=0, dialogue_frames=25,
+            input_codes=tuple((0,) * 25 for _ in range(17)),
+            loss_mask=tuple((False,) * 25 for _ in range(17)),
+        )
+        with patch("personaplex_finetuning.train.build_example", return_value=example), \
+             patch("personaplex_finetuning.train.pad_training_example", side_effect=lambda item, *_args: item), \
+             patch("personaplex_finetuning.train.post_encode_collate", return_value={"codes": "batch"}):
+            batches = iter_training_batches(config, [sample], runtime, "cpu", 0, 1, smoke=True)
+            left_pass = [next(batches)[-1][0] for _ in range(2)]
+            right_pass = next(batches)[-1][0]
+
+        self.assertTrue(all(item.voice_prompt_wav.name == "voice_prompt_left.wav" for item in left_pass))
+        self.assertEqual(right_pass.voice_prompt_wav.name, "voice_prompt_right.wav")
+        self.assertEqual(right_pass.text_prompt, "right prompt")
+        self.assertEqual((right_pass.agent_channel, right_pass.user_channel), (1, 0))
+
     def test_training_iterator_prefetches_audio_and_batches_mimi_in_loader_order(self) -> None:
         from personaplex_finetuning.data import AudioInfo, PreparedSample
 
@@ -336,6 +454,12 @@ class TrainTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, r"max_steps \(8\).*\(12\)"):
                 load_training_state(checkpoint, optimizer, scheduler, 1, 1, total_steps=12)
 
+    def test_resume_rejects_a_checkpoint_already_at_max_steps(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "already complete"):
+            validate_resume_step(start_step=2000, max_steps=2000)
+        with self.assertRaisesRegex(RuntimeError, "exceeds"):
+            validate_resume_step(start_step=2001, max_steps=2000)
+
     def test_adapter_metadata_records_effective_lora_alpha_and_scaling(self) -> None:
         config = SimpleNamespace(
             model_root=Path("/models/personaplex"), lora_rank=128,
@@ -505,17 +629,17 @@ class TrainTest(unittest.TestCase):
 
     def test_text_supervision_counts_separate_real_targets_from_padding(self) -> None:
         batch = {
-            "labels": torch.tensor([[[4, 3, 3]] + [[0, 0, 0]] * 16]),
-            "loss_mask": torch.tensor([[[True, True, False]] + [[False, False, False]] * 16]),
+            "labels": torch.tensor([[[4, 3, 0, 3]] + [[0, 0, 0, 0]] * 16]),
+            "loss_mask": torch.tensor([[[True, True, True, False]] + [[False, False, False, False]] * 16]),
         }
-        output = SimpleNamespace(text_mask=torch.tensor([[[True, True, True]]]))
-        tokens, padding = text_supervision_counts(batch, output, padding_id=3)
-        self.assertEqual((int(tokens), int(padding)), (1, 1))
+        output = SimpleNamespace(text_mask=torch.tensor([[[True, True, True, True]]]))
+        tokens, padding = text_supervision_counts(batch, output, padding_id=(3, 0))
+        self.assertEqual((int(tokens), int(padding)), (1, 2))
 
     def test_nonpadding_text_loss_measures_only_valid_target_tokens(self) -> None:
         logits = torch.tensor([[[[0.0, 2.0, 0.0, 0.0, 0.0], [100.0] * 5, [0.0] * 5]]])
         batch = {
-            "labels": torch.tensor([[[1, 3, 3]] + [[0, 0, 0]] * 16]),
+            "labels": torch.tensor([[[1, 3, 0]] + [[0, 0, 0]] * 16]),
             "loss_mask": torch.tensor([[[True, True, False]] + [[False, False, False]] * 16]),
         }
         output = SimpleNamespace(
@@ -523,7 +647,7 @@ class TrainTest(unittest.TestCase):
             text_mask=torch.tensor([[[True, True, True]]]),
         )
 
-        loss_sum, token_count = text_target_token_loss_stats(batch, output, padding_id=3)
+        loss_sum, token_count = text_target_token_loss_stats(batch, output, padding_id=(3, 0))
         expected = torch.nn.functional.cross_entropy(logits[0, 0, 0].reshape(1, -1), torch.tensor([1]), reduction="sum")
         self.assertEqual(int(token_count), 1)
         self.assertTrue(torch.allclose(loss_sum, expected))

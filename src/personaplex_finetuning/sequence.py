@@ -196,6 +196,11 @@ class PersonaPlexTrainingExampleBuilder:
         for word in sample.words:
             if not sample.window_start_sec <= word.start < sample.window_end_sec:
                 continue
+            if word.start >= sample.audio.duration_sec:
+                raise ValueError(
+                    f"{sample.sample_id}: word {word.word!r} starts beyond decoded conversation audio "
+                    f"at {word.start:.3f}s"
+                )
             frame = min(frames - 1, int((word.start - sample.window_start_sec) * self.codec.frame_rate))
             start_frame = frame
             if word.speaker != "agent":
@@ -204,11 +209,18 @@ class PersonaPlexTrainingExampleBuilder:
                 ))
                 continue
             token_frames: list[int] = []
-            for token in self.tokenizer.encode(" " + word.word):
+            word_tokens = self.tokenizer.encode(" " + word.word)
+            if not word_tokens:
+                raise ValueError(f"{sample.sample_id}: word {word.word!r} has no tokenizer tokens")
+            for token in word_tokens:
                 while frame < frames and text[frame] != self.tokenizer.padding_id:
                     frame += 1
                 if frame >= frames:
-                    break
+                    raise ValueError(
+                        f"{sample.sample_id}: text target for word {word.word!r} at "
+                        f"{word.start:.3f}s overflows the {sample.window_start_sec:.3f}-"
+                        f"{sample.window_end_sec:.3f}s chunk; transcript tokens would be lost"
+                    )
                 if frame > 0 and text[frame - 1] == self.tokenizer.padding_id:
                     text[frame - 1] = self.tokenizer.end_padding_id
                 text[frame] = token

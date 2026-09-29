@@ -2,9 +2,22 @@
 # Sub-configs are located in modular directories: model/, data/, lora/, train/
 defaults:
   - model: server
-  - data: otospeech
+  - data: vietnamese
   - lora: default
-  - train: 104h
+  - train: full
   - _self_
 
 seed: 42
+profile_steps: false
+no_eval: false
+free_running_eval_every_steps: 500
+free_running_eval_samples: 3
+validation_max_samples: 32
+
+generation:
+  use_sampling: true
+  temp: 0.8
+  temp_text: 0.7
+  top_k: 250
+  top_k_text: 25
+  audio_silence_frame_cnt: 6

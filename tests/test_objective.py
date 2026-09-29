@@ -72,3 +72,14 @@ class ObjectiveTest(unittest.TestCase):
         weights = stream_weights_torch(codes, mask, 3, 0.02, 0.4, 2.5)
         self.assertTrue(torch.allclose(weights[0, 0], torch.tensor([0.4, 1.0])))
         self.assertTrue(torch.allclose(weights[0, 1], torch.tensor([2.5, 2.5])))
+
+    def test_both_text_padding_tokens_receive_padding_weight(self) -> None:
+        import torch
+        from personaplex_finetuning.objective import stream_weights_torch
+
+        codes = torch.full((1, 17, 3), 4, dtype=torch.long)
+        codes[:, 0] = torch.tensor([3, 0, 4])  # PAD, END_PAD, regular token.
+        mask = torch.ones_like(codes, dtype=torch.bool)
+        weights = stream_weights_torch(codes, mask, (3, 0), text_padding_weight=0.3)
+
+        self.assertTrue(torch.allclose(weights[0, 0], torch.tensor([0.3, 0.3, 1.0])))

@@ -37,9 +37,9 @@ def sample() -> PreparedSample:
         conversation_wav=Path("conversation.wav"),
         voice_prompt_wav=Path("voice_prompt.wav"),
         words=(
-            Word("agent", "Hello", 10.0, 10.4),
-            Word("user", "Hi", 10.5, 10.7),
-            Word("agent", "there", 10.8, 11.0),
+            Word("agent", "Hello", 10.0, 10.08),
+            Word("user", "Hi", 10.08, 10.16),
+            Word("agent", "there", 10.16, 10.32),
         ),
         text_prompt="Be helpful.",
         metadata={},

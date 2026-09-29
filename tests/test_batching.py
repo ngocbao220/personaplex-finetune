@@ -20,7 +20,7 @@ from personaplex_finetuning.data import AudioInfo, PreparedSample
 from personaplex_finetuning.objective import stream_weights_torch
 from personaplex_finetuning.runtime import MimiCodec
 from personaplex_finetuning.sequence import PersonaPlexTrainingExampleBuilder, TrainingExample
-from personaplex_finetuning.train import loss_components
+from personaplex_finetuning.train import loss_components, reduce_distributed_loss
 
 
 def example(length, padding_id=3):
@@ -133,6 +133,32 @@ class BatchContractTest(unittest.TestCase):
         expected = torch.from_numpy(full_audio[:, 25:50].copy())
         self.assertTrue(torch.equal(item.waveform, expected))
 
+    def test_direct_mimi_encoding_retries_empty_time_slice(self):
+        class FakeMimi:
+            def encode(self, audio):
+                self.audio = audio.clone()
+                return torch.zeros((2, 8, 1), dtype=torch.long)
+
+        full_audio = np.stack([np.arange(100), 100 + np.arange(100)]).astype(np.float32)
+
+        def read_audio(_path, **kwargs):
+            if "start_sec" in kwargs:
+                return np.empty((2, 0), dtype=np.float32), 100
+            return full_audio, 100
+
+        mimi = FakeMimi()
+        codec = MimiCodec(mimi, 100, 12.5, "cpu", None)
+        with patch.dict("sys.modules", {"sphn": SimpleNamespace(read=read_audio)}):
+            codec.encode_conversation_stereo_batch([(Path("conversation.wav"), 0, 1, 0.25, 0.5)])
+        self.assertTrue(torch.equal(mimi.audio[:, 0], torch.from_numpy(full_audio[:, 25:50])))
+
+    def test_empty_window_beyond_decoded_duration_is_not_padded_as_silence(self):
+        fake_sphn = SimpleNamespace(read=lambda *_args, **_kwargs: (np.empty((2, 0), dtype=np.float32), 100))
+        codec = MimiCodec(object(), 100, 12.5, "cpu", None)
+        with patch.dict("sys.modules", {"sphn": fake_sphn}):
+            with self.assertRaisesRegex(ValueError, "beyond decoded audio"):
+                codec.encode_conversation_stereo_batch([(Path("conversation.wav"), 0, 1, 0.25, 0.5)])
+
     def test_mimi_receives_each_unpadded_stereo_item_with_requested_channel_order(self):
         class FakeMimi:
             def encode(self, audio):
@@ -200,6 +226,39 @@ class BatchContractTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(text_logits.grad).all())
         self.assertTrue(torch.isfinite(audio_logits.grad).all())
         self.assertGreater(float(components["audio_semantic"]), 0.0)
+
+    def test_audio_codebook_multipliers_remain_effective_in_combined_audio_loss(self):
+        labels = torch.zeros((1, 17, 1), dtype=torch.long)
+        loss_mask = torch.zeros_like(labels, dtype=torch.bool)
+        loss_mask[:, 1:9] = True
+        batch = {"labels": labels, "loss_mask": loss_mask}
+        audio_logits = torch.zeros((1, 16, 1, 2))
+        audio_logits[:, 1:8, :, 1] = torch.log(torch.tensor(3.0))
+        output = SimpleNamespace(
+            text_logits=torch.zeros((1, 1, 1, 5)),
+            logits=audio_logits,
+            text_mask=torch.zeros((1, 1, 1), dtype=torch.bool),
+            mask=torch.ones((1, 16, 1), dtype=torch.bool),
+        )
+
+        total, components = loss_components(output, labels, batch, (3, 0), torch)
+        weighted_expected = (
+            torch.log(torch.tensor(2.0)) + 7 * 0.02 * torch.log(torch.tensor(4.0))
+        ) / (1 + 7 * 0.02)
+        _, stronger_semantic = loss_components(
+            output, labels, batch, (3, 0), torch, first_codebook_weight_multiplier=2.5,
+        )
+        _, distributed_stats = loss_components(output, labels, batch, (3, 0), torch, distributed=True)
+        distributed_components, distributed_total = reduce_distributed_loss(
+            distributed_stats, lambda value: value, preserve_grad=False, world_size=1,
+        )
+
+        self.assertTrue(torch.allclose(total, weighted_expected))
+        self.assertTrue(torch.allclose(components["audio_semantic"] + components["audio_nonsemantic"], weighted_expected))
+        self.assertTrue(torch.allclose(distributed_total, total))
+        self.assertTrue(torch.allclose(distributed_components["audio_nonsemantic"], components["audio_nonsemantic"]))
+        self.assertGreater(float(stronger_semantic["audio_semantic"]), float(components["audio_semantic"]))
+        self.assertLess(float(stronger_semantic["audio_nonsemantic"]), float(components["audio_nonsemantic"]))
 
     def test_actual_delay_transform_masks_each_stream_boundary_before_batch_padding(self):
         class Codec:

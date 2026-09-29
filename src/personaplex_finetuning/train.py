@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -18,14 +19,25 @@ from safetensors.torch import save_file
 from tqdm.auto import tqdm
 
 from .config import Config, load_config
-from .data import PreparedDataset, conversation_group_keys, duration_chunks, limit_conversations
+from .data import (
+    PreparedDataset,
+    conversation_group_keys,
+    duration_chunks,
+    limit_conversations,
+    samples_for_role_pass,
+)
 from .batching import (
     RankStrideBatchSampler, RawAudioDataset, collate_raw_audio, post_encode_collate,
 )
 from .lora import adapter_state_dict, inject_lora, load_adapter
 from .generation import GenerationSettings
-from .inference import generate_text_with_runtime, text_error_metrics
-from .objective import stream_weights_torch, torch_weighted_cross_entropy, torch_weighted_cross_entropy_stats
+from .inference import generate_text_with_runtime, resolve_adapter_checkpoint, text_error_metrics
+from .objective import (
+    normalize_text_padding_ids,
+    stream_weights_torch,
+    text_padding_mask_torch,
+    torch_weighted_cross_entropy_stats,
+)
 from .runtime import RuntimePaths, load_runtime
 from .sequence import PersonaPlexTrainingExampleBuilder, pad_training_example
 
@@ -69,6 +81,110 @@ def effective_global_batch_size(per_process_batch_size: int, num_processes: int,
     if min(per_process_batch_size, num_processes, gradient_accumulation_steps) < 1:
         raise ValueError("batch size, process count, and accumulation steps must all be positive")
     return per_process_batch_size * num_processes * gradient_accumulation_steps
+
+
+def validate_resume_step(start_step: int, max_steps: int) -> None:
+    if start_step > max_steps:
+        raise RuntimeError(f"resume checkpoint step {start_step} exceeds train.max_steps={max_steps}")
+    if start_step == max_steps:
+        raise RuntimeError(
+            f"resume checkpoint is already complete at train.max_steps={max_steps}; "
+            "resume from an earlier checkpoint or start a new run with a new schedule"
+        )
+
+
+def validate_resume_checkpoint(
+    config: Config, resume_from: str, prefixes: tuple[str, ...], train_conversations: list,
+) -> tuple[Path, int]:
+    """Require a complete checkpoint compatible with this exact LoRA run."""
+    adapter, rank, alpha, model_root, adapter_prefixes = resolve_adapter_checkpoint(Path(resume_from))
+    metadata_file = adapter.parent / "adapter.json"
+    metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+    step = metadata.get("step")
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        raise ValueError(f"resume checkpoint has invalid optimizer step: {metadata_file}")
+    if not (adapter.parent / "training_state.pt").is_file():
+        raise RuntimeError(
+            f"resume requires training_state.pt alongside {adapter}; "
+            "adapter-only weights cannot restore optimizer, scheduler, or data position"
+        )
+    if rank != config.lora_rank or alpha != config.lora_alpha or adapter_prefixes != prefixes:
+        raise RuntimeError(
+            f"resume LoRA configuration differs: checkpoint rank={rank}, alpha={alpha}, "
+            f"prefixes={adapter_prefixes}; current rank={config.lora_rank}, "
+            f"alpha={config.lora_alpha}, prefixes={prefixes}"
+        )
+    if model_root is not None and model_root != Path(config.model_root).expanduser().resolve():
+        raise RuntimeError(f"resume base model differs: checkpoint={model_root}, current={config.model_root}")
+    run_config_file = adapter.parent.parent.parent / "config.json"
+    if not run_config_file.is_file():
+        raise RuntimeError(f"resume checkpoint has no run config to verify training data/objective: {run_config_file}")
+    saved_run = json.loads(run_config_file.read_text(encoding="utf-8"))
+    expected_contract = training_contract(config, train_conversations)
+    saved_contract = saved_run.get("training_contract")
+    if saved_contract != expected_contract:
+        differing = sorted(
+            key for key in set(expected_contract) | set(saved_contract or {})
+            if expected_contract.get(key) != (saved_contract or {}).get(key)
+        )
+        raise RuntimeError(
+            f"resume training data/objective differs or cannot be verified: {differing}; "
+            f"source={run_config_file}"
+        )
+    return adapter, step
+
+
+def training_contract(config: Config, train_conversations: list) -> dict:
+    """Inputs that must remain fixed to resume the same batch and loss trajectory."""
+    manifest = Path(config.manifest).expanduser().resolve()
+    digest = hashlib.sha256()
+    with manifest.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    source_digest = hashlib.sha256()
+    for sample in train_conversations:
+        def file_stamp(path):
+            if path is None:
+                return None
+            resolved = Path(path).expanduser().resolve()
+            stat = resolved.stat()
+            return [str(resolved), stat.st_size, stat.st_mtime_ns]
+
+        item = {
+            "sample_id": sample.sample_id,
+            "conversation": file_stamp(sample.conversation_wav),
+            "voice_prompt_left": file_stamp(sample.voice_prompt_wav),
+            "voice_prompt_right": file_stamp(sample.voice_prompt_right_wav),
+            "text_prompt_left": sample.text_prompt,
+            "text_prompt_right": sample.text_prompt_right,
+            "metadata": sample.metadata,
+            "audio_duration_sec": sample.audio.duration_sec,
+            "agent_channel": sample.agent_channel,
+            "user_channel": sample.user_channel,
+            "words": [(word.speaker, word.word, word.start, word.end) for word in sample.words],
+        }
+        source_digest.update(json.dumps(item, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+        source_digest.update(b"\n")
+    return {
+        "manifest": str(manifest), "manifest_sha256": digest.hexdigest(),
+        "prepared_sources_sha256": source_digest.hexdigest(),
+        "seed": config.seed, "duration_sec": config.duration_sec,
+        "sample_number": config.sample_number, "shuffle": config.shuffle,
+        "val_ratio": config.val_ratio,
+        "val_manifest": str(config.val_manifest) if config.val_manifest else None,
+        "eval_on_train_samples": config.eval_on_train_samples,
+        "no_eval": config.no_eval,
+        "swap_roles_after_pass": config.swap_roles_after_pass,
+        "prompt_aug_prob": config.prompt_aug_prob,
+        "learning_rate": config.learning_rate, "weight_decay": config.weight_decay,
+        "depformer_learning_rate": config.depformer_learning_rate,
+        "pct_start": config.pct_start,
+        "first_codebook_weight_multiplier": config.first_codebook_weight_multiplier,
+        "text_padding_weight": config.text_padding_weight,
+        "train_stage": config.train_stage,
+        "qlora": config.qlora, "quant_type": config.quant_type if config.qlora else None,
+        "gradient_checkpointing": config.gradient_checkpointing,
+    }
 
 
 def rank_stride_indices(sample_count: int, rank: int, world_size: int) -> list[int]:
@@ -131,7 +247,16 @@ def text_supervision_counts(batch, model_output, padding_id: int):
     """Count valid non-padding text targets and weighted padding positions."""
     labels = batch["labels"][:, 0, :]
     valid = batch["loss_mask"][:, 0, :] & model_output.text_mask[:, 0]
-    return ((labels != padding_id) & valid).sum(), ((labels == padding_id) & valid).sum()
+    is_padding = text_padding_mask_torch(labels, padding_id)
+    return ((~is_padding) & valid).sum(), (is_padding & valid).sum()
+
+
+def tokenizer_text_padding_ids(tokenizer) -> tuple[int, ...]:
+    ids = [int(tokenizer.padding_id)]
+    end_padding_id = getattr(tokenizer, "end_padding_id", None)
+    if end_padding_id is not None and int(end_padding_id) not in ids:
+        ids.append(int(end_padding_id))
+    return normalize_text_padding_ids(ids)
 
 
 def text_target_token_loss_stats(batch, model_output, padding_id: int):
@@ -140,7 +265,7 @@ def text_target_token_loss_stats(batch, model_output, padding_id: int):
     valid_targets = (
         batch["loss_mask"][:, 0, :]
         & model_output.text_mask[:, 0]
-        & (labels != padding_id)
+        & ~text_padding_mask_torch(labels, padding_id)
     )
     with torch.no_grad():
         selected_logits = model_output.text_logits[:, 0][valid_targets].float()
@@ -149,6 +274,60 @@ def text_target_token_loss_stats(batch, model_output, padding_id: int):
             selected_logits, selected_targets, reduction="sum"
         )
     return loss_sum, valid_targets.sum()
+
+
+def codebook_diagnostic_stats(batch, model_output, padding_id: int):
+    """Compute per-codebook loss and argmax accuracy on valid (unmasked) positions.
+
+    Returns:
+        text_correct, text_count, text_loss_sum,
+        audio_correct (shape 8), audio_count (shape 8), audio_loss_sum (shape 8)
+    """
+    with torch.no_grad():
+        # 1. Text stream
+        text_labels = batch["labels"][:, 0, :]
+        text_valid = (
+            batch["loss_mask"][:, 0, :]
+            & model_output.text_mask[:, 0]
+            & ~text_padding_mask_torch(text_labels, padding_id)
+        )
+        if text_valid.any():
+            text_logits = model_output.text_logits[:, 0][text_valid].float()
+            text_targets = text_labels[text_valid]
+            text_preds = text_logits.argmax(dim=-1)
+            t_correct = (text_preds == text_targets).sum()
+            t_count = text_valid.sum()
+            t_loss = torch.nn.functional.cross_entropy(text_logits, text_targets, reduction="sum")
+        else:
+            t_correct = torch.zeros((), dtype=torch.int64, device=text_labels.device)
+            t_count = torch.zeros((), dtype=torch.int64, device=text_labels.device)
+            t_loss = torch.zeros((), dtype=torch.float32, device=text_labels.device)
+
+        # 2. Audio streams (8 codebooks for Agent: indices 1..8 in labels, 0..7 in logits)
+        audio_labels = batch["labels"][:, 1:9, :]  # [B, 8, T]
+        audio_mask = batch["loss_mask"][:, 1:9, :] & model_output.mask[:, :8, :]  # [B, 8, T]
+
+        cb_correct = []
+        cb_count = []
+        cb_loss = []
+        for i in range(8):
+            valid_i = audio_mask[:, i, :]
+            if valid_i.any():
+                logits_i = model_output.logits[:, i][valid_i].float()  # [N, vocab]
+                targets_i = audio_labels[:, i][valid_i]                # [N]
+                preds_i = logits_i.argmax(dim=-1)
+                cb_correct.append((preds_i == targets_i).sum())
+                cb_count.append(valid_i.sum())
+                cb_loss.append(torch.nn.functional.cross_entropy(logits_i, targets_i, reduction="sum"))
+            else:
+                cb_correct.append(torch.zeros((), dtype=torch.int64, device=audio_labels.device))
+                cb_count.append(torch.zeros((), dtype=torch.int64, device=audio_labels.device))
+                cb_loss.append(torch.zeros((), dtype=torch.float32, device=audio_labels.device))
+
+        return (
+            t_correct, t_count, t_loss,
+            torch.stack(cb_correct), torch.stack(cb_count), torch.stack(cb_loss)
+        )
 
 
 def step_optimizer_if_ready(sync_state, optimizer, scheduler, trainable, model=None, max_norm=1.0) -> float:
@@ -244,6 +423,12 @@ def iter_training_batches(config, conversations, runtime, device, rank: int, wor
             else:
                 raw_audio = None
                 batch_samples = batch_value
+            if getattr(config, "swap_roles_after_pass", False) and epoch % 2:
+                # Keep the same audio chunks and timestamps; swap the speaker
+                # interpretation before channel encoding and target alignment.
+                # The prepared prompt assets must describe each corresponding
+                # side (voice_prompt_left/right.wav and text_prompt_left/right).
+                batch_samples = samples_for_role_pass(batch_samples, epoch, True)
             prepared_batch = []
             for sample_index, sample in enumerate(batch_samples):
                 if config.prompt_aug_prob and not smoke:
@@ -400,14 +585,20 @@ def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_
         ("loss/total", record["loss/total"]),
         ("loss/text", record["loss/text"]),
         ("loss/text_nonpadding", record["loss/text_nonpadding"]),
+        ("loss/audio_total", record.get("loss/audio_total", 0.0)),
         ("loss/audio_semantic", record["loss/audio_semantic"]),
         ("loss/audio_nonsemantic", record["loss/audio_nonsemantic"]),
+        ("accuracy/text", record.get("accuracy/text", 0.0)),
+        ("accuracy/audio_total", record.get("accuracy/audio_total", 0.0)),
+        ("train/valid_token_pct", record.get("valid_token_pct", 0.0)),
         ("train/learning_rate", record["lr"]),
         ("train/gradient_norm", record["grad_norm"]),
         ("system/gpu_peak_bytes", record["gpu_peak_bytes"]),
         ("system/trainable_parameters", trainable_parameters),
         ("system/cpu_threads", cpu_threads),
         *((name, value) for name, value in record.items() if name.startswith("timing/")),
+        *((name, value) for name, value in record.items() if name.startswith("accuracy/audio_cb")),
+        *((name, value) for name, value in record.items() if name.startswith("loss/audio_cb")),
     ):
         writer.add_scalar(name, value, step)
 
@@ -428,8 +619,7 @@ def loss_components(model_output, codes, example, text_padding_id, torch_module,
 
     text_target = labels_tensor[:, 0, :]
     text_weight = weights[:, 0, :] * model_output.text_mask[:, 0].to(weights.dtype)
-    cross_entropy = torch_weighted_cross_entropy_stats if distributed else torch_weighted_cross_entropy
-    text_loss = cross_entropy(
+    text_stats = torch_weighted_cross_entropy_stats(
         model_output.text_logits.reshape(-1, model_output.text_logits.shape[-1]),
         text_target.reshape(-1),
         text_weight.reshape(-1),
@@ -438,19 +628,32 @@ def loss_components(model_output, codes, example, text_padding_id, torch_module,
     audio_target = labels_tensor[:, 1:17, :]
     audio_weights = weights[:, 1:17, :] * model_output.mask.to(weights.dtype)
 
-    semantic = cross_entropy(
+    semantic_stats = torch_weighted_cross_entropy_stats(
         model_output.logits[:, 0].reshape(-1, model_output.logits.shape[-1]),
         audio_target[:, 0].reshape(-1),
         audio_weights[:, 0].reshape(-1),
     )
-    nonsemantic = cross_entropy(
+    nonsemantic_stats = torch_weighted_cross_entropy_stats(
         model_output.logits[:, 1:8].reshape(-1, model_output.logits.shape[-1]),
         audio_target[:, 1:8].reshape(-1),
         audio_weights[:, 1:8].reshape(-1),
     )
-    components = {"text": text_loss, "audio_semantic": semantic, "audio_nonsemantic": nonsemantic}
+    audio_denominator = semantic_stats[1] + nonsemantic_stats[1]
+    audio_denominator = audio_denominator.clamp_min(1e-12)
     if distributed:
-        return components["text"] + components["audio_semantic"] + components["audio_nonsemantic"], components
+        # Each logged component is a contribution to the same weighted audio
+        # mean. Sharing its denominator keeps 0.02 and first-codebook weights
+        # effective after the cross-rank reduction.
+        stats = {
+            "text": text_stats,
+            "audio_semantic": (semantic_stats[0], audio_denominator),
+            "audio_nonsemantic": (nonsemantic_stats[0], audio_denominator),
+        }
+        return None, stats
+    text_loss = text_stats[0] / text_stats[1].clamp_min(1e-12)
+    semantic = semantic_stats[0] / audio_denominator
+    nonsemantic = nonsemantic_stats[0] / audio_denominator
+    components = {"text": text_loss, "audio_semantic": semantic, "audio_nonsemantic": nonsemantic}
     return sum(components.values()), components
 
 
@@ -485,7 +688,7 @@ def reduce_distributed_loss(stats, all_reduce_sum, *, preserve_grad: bool = Fals
 def one_step(config: Config, runtime, example, optimizer=None):
     codes = torch.tensor(example.input_codes, dtype=torch.long, device=config.device).unsqueeze(0)
     output = model_forward_train(runtime.model, codes)
-    total, components = loss_components(output, codes, example, runtime.tokenizer.padding_id, torch)
+    total, components = loss_components(output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer), torch)
     if optimizer is not None:
         optimizer.zero_grad(set_to_none=True)
         total.backward()
@@ -654,7 +857,7 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
             codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
             output = model_forward_train(unwrapped, codes)
             total, comps = loss_components(
-                output, codes, example, runtime.tokenizer.padding_id, torch,
+                output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer), torch,
                 config.first_codebook_weight_multiplier, config.text_padding_weight,
             )
             totals["total"] += float(total.detach())
@@ -664,7 +867,7 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
             labels = torch.tensor(example.labels, dtype=torch.long, device=device).unsqueeze(0)
             loss_mask = torch.tensor(example.loss_mask, dtype=torch.bool, device=device).unsqueeze(0)
             text_loss_sum, text_token_count = text_target_token_loss_stats(
-                {"labels": labels, "loss_mask": loss_mask}, output, runtime.tokenizer.padding_id,
+                {"labels": labels, "loss_mask": loss_mask}, output, tokenizer_text_padding_ids(runtime.tokenizer),
             )
             nonpadding_text_loss_sum += float(text_loss_sum)
             nonpadding_text_token_count += int(text_token_count)
@@ -858,6 +1061,14 @@ def run(
     smoke: bool = False,
     resume_from: str | None = None,
 ) -> Path | None:
+    if config.ft_embed:
+        raise ValueError("lora.ft_embed=true is not implemented by this LoRA-only trainer")
+    if config.random_crop:
+        raise ValueError("data.random_crop=true conflicts with fixed duration_sec chunks and is not implemented")
+    if config.randomize_train:
+        raise ValueError("data.randomize_train=true is not implemented; fixed chunks may be shuffled with data.shuffle")
+    if config.mixed_precision.lower() != "bf16":
+        raise ValueError("train.mixed_precision must be bf16; this trainer uses BF16 CUDA autocast")
     # Moshi's lazy compile wrappers can trigger graph/compile shape issues on
     # the fixed, padded sequences used by distributed training.
     os.environ.setdefault("NO_TORCH_COMPILE", "1")
@@ -928,14 +1139,34 @@ def run(
     ):
         raise ValueError("train/validation/test manifests contain overlapping conversation groups")
 
-    train_conversations = limit_conversations(train_samples, config.sample_number)
+    train_conversations = limit_conversations(
+        train_samples,
+        sample_number=config.sample_number,
+        sample_index=config.sample_index,
+    )
     train_samples = duration_chunks(train_conversations, config.duration_sec)
+    if config.sample_index is not None:
+        # User specified an exact sample index to overfit: train on exactly the first 100s window of that sample
+        train_samples = train_samples[:1]
+    if config.swap_roles_after_pass:
+        # Fail before model allocation if any training item lacks the RIGHT
+        # speaker's prepared conditioning assets.
+        for sample in train_samples:
+            sample.swapped_roles()
     val_samples = duration_chunks(val_samples, config.duration_sec) if val_samples else []
     if config.eval_on_train_samples:
         # Explicitly scoped overfit gate: monitor autoregressive behavior on the
         # exact fixed training examples. Full runs continue using disjoint splits.
         val_samples = list(train_samples)
     test_samples = duration_chunks(test_samples, config.duration_sec) if test_samples else []
+
+    resume_adapter_file = None
+    adapter_resume_step = 0
+    if resume_from:
+        resume_adapter_file, adapter_resume_step = validate_resume_checkpoint(
+            config, resume_from, lora_prefixes_for_stage(config), train_conversations,
+        )
+        validate_resume_step(adapter_resume_step, 1 if smoke else config.max_steps)
 
     # Run directory creation (coordinated across ranks)
     run_dir = None
@@ -947,6 +1178,7 @@ def run(
             "model_root": str(config.model_root),
             "personaplex_source": str(config.personaplex_source),
             "manifest": str(config.manifest),
+            "training_contract": training_contract(config, train_conversations),
             "codec_cache_dir": str(config.codec_cache_dir) if config.codec_cache_dir else None,
             "output_dir": str(run_dir),
             "duration_sec": config.duration_sec,
@@ -1067,24 +1299,13 @@ def run(
 
     # Load adapter weights before DDP wrapping.
     resume_checkpoint_dir = None
-    adapter_resume_step = 0
-    if resume_from:
-        resume_path = Path(resume_from)
-        adapter_file = resume_path if resume_path.is_file() else resume_path / "lora.safetensors"
-        if not adapter_file.is_file():
-            raise FileNotFoundError(f"resume adapter does not exist: {adapter_file}")
-        resume_checkpoint_dir = adapter_file.parent
+    if resume_adapter_file is not None:
+        resume_checkpoint_dir = resume_adapter_file.parent
         if main_process:
-            print(f"Resuming LoRA weights from {adapter_file}")
-        load_adapter(runtime.model, adapter_file)
-        meta_file = adapter_file.parent / "adapter.json"
-        if meta_file.is_file():
-            try:
-                adapter_resume_step = int(json.loads(meta_file.read_text(encoding="utf-8")).get("step", 0))
-                if main_process:
-                    print(f"Adapter checkpoint is at optimizer step {adapter_resume_step}")
-            except Exception:
-                pass
+            print(f"Resuming LoRA weights and optimizer state from {resume_adapter_file}")
+        load_adapter(runtime.model, resume_adapter_file)
+        if main_process:
+            print(f"Adapter checkpoint is at optimizer step {adapter_resume_step}")
 
     # Alias LMModel.forward to forward_train for training execution
     from moshi.models.lm import LMModel
@@ -1148,14 +1369,16 @@ def run(
             total_steps=max_steps if max_steps > 1 else None,
         )
         if restored_step is not None:
+            if restored_step != adapter_resume_step:
+                raise RuntimeError(
+                    f"resume checkpoint step mismatch: adapter.json={adapter_resume_step}, "
+                    f"training_state.pt={restored_step}"
+                )
             start_step = restored_step
             if main_process:
                 print(f"Restored optimizer and scheduler state at optimizer step {start_step}")
-        elif main_process:
-            print("Resume checkpoint has no training_state.pt; resuming adapter weights with a fresh optimizer.")
     start_micro_step = start_step * accum_steps
-    if start_step > max_steps:
-        raise RuntimeError(f"resume checkpoint step {start_step} exceeds train.max_steps={max_steps}")
+    validate_resume_step(start_step, max_steps)
 
     writer = None
     log_file = None
@@ -1231,6 +1454,10 @@ def run(
         pending_text_padding_positions = torch.zeros((), dtype=torch.int64, device=device)
         pending_text_target_ce_sum = torch.zeros((), dtype=torch.float32, device=device)
         pending_text_target_ce_count = torch.zeros((), dtype=torch.int64, device=device)
+        pending_text_target_correct = torch.zeros((), dtype=torch.int64, device=device)
+        pending_audio_cb_correct = torch.zeros(8, dtype=torch.int64, device=device)
+        pending_audio_cb_count = torch.zeros(8, dtype=torch.int64, device=device)
+        pending_audio_cb_loss_sum = torch.zeros(8, dtype=torch.float32, device=device)
         pending_profile_times = torch.zeros(3, dtype=torch.float64, device=device)
 
         def profile_sync() -> None:
@@ -1266,17 +1493,24 @@ def run(
                 forward_started = time.monotonic() if config.profile_steps else 0.0
                 output = model_forward_train(runtime.model, codes)
                 text_targets, text_padding = text_supervision_counts(
-                    batch, output, runtime.tokenizer.padding_id
+                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
                 )
                 pending_text_target_tokens += text_targets.detach()
                 pending_text_padding_positions += text_padding.detach()
                 target_ce_sum, target_ce_count = text_target_token_loss_stats(
-                    batch, output, runtime.tokenizer.padding_id
+                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
                 )
                 pending_text_target_ce_sum += target_ce_sum
-                pending_text_target_ce_count += target_ce_count
+                diag_t_corr, diag_t_cnt, diag_t_loss, diag_cb_corr, diag_cb_cnt, diag_cb_loss = codebook_diagnostic_stats(
+                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
+                )
+                pending_text_target_correct += diag_t_corr
+                pending_audio_cb_correct += diag_cb_corr
+                pending_audio_cb_count += diag_cb_cnt
+                pending_audio_cb_loss_sum += diag_cb_loss
+
                 loss_result = loss_components(
-                    output, codes, batch, runtime.tokenizer.padding_id, torch,
+                    output, codes, batch, tokenizer_text_padding_ids(runtime.tokenizer), torch,
                     config.first_codebook_weight_multiplier, config.text_padding_weight,
                     distributed=distributed,
                 )
@@ -1309,16 +1543,48 @@ def run(
             global_text_stats = all_reduce_sum(torch.stack([
                 pending_text_target_tokens.float(), pending_text_padding_positions.float(),
                 pending_text_target_ce_sum, pending_text_target_ce_count.float(),
+                pending_text_target_correct.float(),
             ]))
+            global_audio_cb_stats = all_reduce_sum(torch.stack([
+                pending_audio_cb_correct.float(),
+                pending_audio_cb_count.float(),
+                pending_audio_cb_loss_sum,
+            ]))  # shape [3, 8]
             text_target_tokens_seen += int(global_text_stats[0])
             text_padding_positions_seen += int(global_text_stats[1])
             text_nonpadding_loss = float(
                 global_text_stats[2] / global_text_stats[3].clamp_min(1.0)
             )
+            text_token_acc = float(
+                global_text_stats[4] / global_text_stats[3].clamp_min(1.0)
+            ) if global_text_stats[3] > 0 else 0.0
+
+            audio_cb_corr_reduced = global_audio_cb_stats[0]
+            audio_cb_cnt_reduced = global_audio_cb_stats[1]
+            audio_cb_loss_reduced = global_audio_cb_stats[2]
+
+            cb_losses = [
+                float(audio_cb_loss_reduced[i] / audio_cb_cnt_reduced[i].clamp_min(1.0))
+                for i in range(8)
+            ]
+            cb_accuracies = [
+                float(audio_cb_corr_reduced[i] / audio_cb_cnt_reduced[i].clamp_min(1.0))
+                for i in range(8)
+            ]
+            mean_audio_loss = sum(cb_losses) / 8.0
+            mean_audio_acc = (
+                float(audio_cb_corr_reduced.sum() / audio_cb_cnt_reduced.sum().clamp_min(1.0))
+                if audio_cb_cnt_reduced.sum() > 0 else 0.0
+            )
+
             pending_text_target_tokens.zero_()
             pending_text_padding_positions.zero_()
             pending_text_target_ce_sum.zero_()
             pending_text_target_ce_count.zero_()
+            pending_text_target_correct.zero_()
+            pending_audio_cb_correct.zero_()
+            pending_audio_cb_count.zero_()
+            pending_audio_cb_loss_sum.zero_()
 
             pending_train_seconds += time.monotonic() - update_started_at
             pending_train_updates += 1
@@ -1342,6 +1608,9 @@ def run(
             reduced_nonsem = components["audio_nonsemantic"].detach()
 
             if main_process and (optimizer_step % config.log_freq == 0 or optimizer_step == max_steps):
+                total_target_positions = text_target_tokens_seen + text_padding_positions_seen
+                valid_token_pct = (text_target_tokens_seen / max(1, total_target_positions)) * 100.0
+
                 record = {
                     "step": optimizer_step,
                     "micro_step": micro_step + 1,
@@ -1351,15 +1620,18 @@ def run(
                     "audio_frames_seen": audio_frames_seen,
                     "text_target_tokens_seen": text_target_tokens_seen,
                     "text_padding_positions_seen": text_padding_positions_seen,
-                    "text_target_fraction": text_target_tokens_seen / max(
-                        1, text_target_tokens_seen + text_padding_positions_seen
-                    ),
+                    "valid_token_pct": valid_token_pct,
                     "global_batch_size": global_batch_size,
                     "loss/total": float(reduced_total.detach()),
                     "loss/text": float(reduced_text.detach()),
                     "loss/text_nonpadding": text_nonpadding_loss,
+                    "loss/audio_total": mean_audio_loss,
                     "loss/audio_semantic": float(reduced_sem.detach()),
                     "loss/audio_nonsemantic": float(reduced_nonsem.detach()),
+                    "accuracy/text": text_token_acc,
+                    "accuracy/audio_total": mean_audio_acc,
+                    **{f"loss/audio_cb{i}": cb_losses[i] for i in range(8)},
+                    **{f"accuracy/audio_cb{i}": cb_accuracies[i] for i in range(8)},
                     "lr": optimizer.param_groups[0]["lr"],
                     "grad_norm": grad_norm,
                     "samples_per_second": (
@@ -1387,7 +1659,13 @@ def run(
                     write_tensorboard_scalars(writer, record, sum(p.numel() for p in trainable), cpu_threads)
                 if progress is not None:
                     progress.update(1)
-                    progress.set_postfix(loss=f"{record['loss/total']:.4f}", grad=f"{grad_norm:.3f}")
+                    progress.set_postfix(
+                        loss=f"{record['loss/total']:.3f}",
+                        t_acc=f"{text_token_acc * 100:.1f}%",
+                        a_acc=f"{mean_audio_acc * 100:.1f}%",
+                        cb0=f"{cb_accuracies[0] * 100:.1f}%",
+                        grad=f"{grad_norm:.2f}",
+                    )
                 if max_steps == 1:
                     tqdm.write(json.dumps({"event": "training_step", **record}))
 

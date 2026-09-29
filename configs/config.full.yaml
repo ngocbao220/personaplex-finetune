@@ -1,50 +1,97 @@
-# Standalone, fully expanded production configuration.
-# Unlike config.yaml, this file has no Hydra defaults to resolve.
-seed: 42
+# ==============================================================================
+# Standalone, fully expanded production configuration for PersonaPlex fine-tuning.
+# File cấu hình đầy đủ độc lập (không cần kế thừa Hydra defaults).
+# ==============================================================================
 
+seed: 42                           # Random seed tái lập kết quả [int: bất kỳ số nguyên nào, vd: 42, 1234]
+duration_sec: 100                  # Độ dài mỗi chunk âm thanh huấn luyện (giây) [float: 25.0 -> 100.0]
+sample_number: null                # Giới hạn N cuộc hội thoại đầu tiên [null: dùng toàn bộ data, int >= 1: 10, 100]
+sample_index: null                 # Chọn đúng 1 hội thoại theo index cụ thể [null: tắt, int >= 0: 0, 1, 2...]
+no_eval: false                     # Bỏ qua khâu đánh giá validation [true: không eval giúp train nhanh hơn, false: có eval]
+free_running_eval_every_steps: 500 # Chu kỳ đánh giá sinh text/audio tự do (bước) [0: tắt, int > 0: 100, 500]
+free_running_eval_samples: 3       # Số lượng mẫu dùng để eval tự do [int >= 1: 1 -> 10]
+free_running_eval_window_seconds: 30 # Độ dài đoạn audio đưa vào lúc eval tự do (giây) [float: 10.0 -> 60.0]
+validation_max_samples: 32         # Giới hạn số lượng mẫu validation tối đa [int >= 1: 16, 32, 64]
+profile_steps: false               # Đo thời gian chi tiết từng giai đoạn CPU/GPU [true, false]
+
+# ------------------------------------------------------------------------------
+# 1. MODEL SETTINGS (Mô hình nền và thiết bị)
+# ------------------------------------------------------------------------------
 model:
-  root: /storage-voice/voice/vdt/baottn/personaplex-7b-v1
-  source: ../src
-  device: cuda
+  root: /storage-voice/voice/vdt/baottn/personaplex-7b-v1  # Đường dẫn chứa weights PersonaPlex-7B [path]
+  source: ../src                                          # Thư mục mã nguồn moshi/personaplex [path]
+  device: cuda                                            # Thiết bị chạy ['cuda', 'cuda:0', 'cpu', 'mps']
 
+# ------------------------------------------------------------------------------
+# 2. DATA SETTINGS (Dữ liệu hội thoại)
+# ------------------------------------------------------------------------------
 data:
-  prepared_dir: /storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared
-  # window_seconds is used only when static_chunking is enabled for smoke/debug.
-  window_seconds: 30
-  # Train chunks are stochastic across epochs but only end at safe boundaries.
-  target_window_seconds: 25
-  min_window_seconds: 10
-  max_window_seconds: 30
-  shuffle: true             # Shuffle length-bucketed batches.
-  randomize_train: true     # Vary safe train chunk boundaries by epoch.
-  random_crop: false        # Arbitrary time crops are disabled.
-  prompt_aug_prob: 0.0
-  static_chunking: false    # Enable only for smoke/debug runs.
-  swap_roles_after_pass: true
-  val_ratio: 0.05           # Split by conversation when val.jsonl is absent.
-  val_manifest: null        # Auto-detect prepared_dir/val.jsonl when present.
-  test_manifest_path: null  # Auto-detect prepared_dir/test.jsonl when present.
+  prepared_dir: /storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared # Thư mục chứa train.jsonl & samples [path]
+  window_seconds: 30              # Cửa sổ audio mặc định khi load dataset [float: 20 -> 60]
+  target_window_seconds: 25       # Độ dài chunk mục tiêu khi chunking linh hoạt [float: 10 -> 30]
+  min_window_seconds: 10          # Độ dài chunk tối thiểu [float: 5 -> 15]
+  max_window_seconds: 30          # Độ dài chunk tối đa [float: 20 -> 40]
+  shuffle: true                   # Xáo trộn dữ liệu giữa các epoch [true: xáo trộn, false: giữ nguyên thứ tự]
+  randomize_train: false          # Biến thiên biên chunk ngẫu nhiên theo epoch [false: khuyên dùng với fixed chunks]
+  random_crop: false              # Cắt cúp thời gian ngẫu nhiên [false: tắt để giữ nguyên timeline chuẩn]
+  prompt_aug_prob: 0.0            # Xác suất augment text prompt đa dạng hóa [float: 0.0 -> 0.5]
+  static_chunking: false          # Bật chunking tĩnh đơn giản cho debug [false: tắt, true: bật]
+  swap_roles_after_pass: true     # Đổi vai Agent <-> User sau mỗi epoch [true: học cả 2 chiều nói, false: giữ nguyên]
+  val_ratio: 0.05                 # Tỷ lệ chia tập validation nếu chưa có val.jsonl [float: 0.01 -> 0.2]
+  val_manifest: null              # File val.jsonl riêng biệt [null: tự động tìm trong prepared_dir, path]
+  test_manifest_path: null        # File test.jsonl riêng biệt [null: tự động tìm trong prepared_dir, path]
 
+# ------------------------------------------------------------------------------
+# 3. LORA & QUANTIZATION SETTINGS (Cấu hình thích ứng tham số hiệu quả)
+# ------------------------------------------------------------------------------
 lora:
-  rank: 16
-  alpha: 32
-  qlora: false
-  quant_type: nf4
+  enable: true                    # Bật huấn luyện qua LoRA adapter [true, false]
+  rank: 16                        # Rank của ma trận LoRA [int: 8, 16, 32, 64, 128]
+  alpha: 32                       # Hệ số nhân scaling (thường = 2 * rank) [int: 16, 32, 64, 256]
+  scaling: 2.0                    # Tỷ lệ alpha / rank [float: 1.0, 2.0]
+  qlora: false                    # Lượng tử hóa 4-bit mô hình nền QLoRA để tiết kiệm VRAM [true, false]
+  quant_type: nf4                 # Kiểu lượng tử hóa nếu bật qlora ['nf4', 'fp4']
+  ft_embed: false                 # Fine-tune cả ma trận Embedding [false: khuyên dùng, true]
 
+# ------------------------------------------------------------------------------
+# 4. TRAINING & OPTIMIZER SETTINGS (Quá trình tối ưu và phần cứng)
+# ------------------------------------------------------------------------------
 train:
-  output_dir: ../runs/full
-  max_steps: 10000           # Optimizer updates, not micro-steps.
-  learning_rate: 2.0e-5
-  depformer_learning_rate: null
-  stage: joint
-  gradient_accumulation_steps: 8
-  per_device_batch_size: 2
-  num_workers: 4
-  pin_memory: true
-  # Workers are recreated when stochastic chunks are regenerated each epoch.
-  persistent_workers: true
-  warmup_steps: 500
-  eval_every_steps: 500
-  save_every_steps: 500
-  gradient_checkpointing: true
-  mixed_precision: bf16
+  output_dir: ../runs/full        # Thư mục lưu checkpoint & log TensorBoard [path]
+  max_steps: 10000                # Tổng số optimizer update steps [int: 500 -> 50000]
+  
+  # Dual Learning Rates (Kỹ thuật then chốt cho PersonaPlex)
+  learning_rate: 2.0e-5           # LR cho Temporal Transformer 7B [float: 5.0e-6 -> 5.0e-5]
+  depformer_learning_rate: 5.0e-5 # LR cho Depth Transformer 0.1B (thường cao hơn 2-3x) [float: 2.0e-5 -> 1.0e-4]
+  
+  stage: joint                    # Giai đoạn huấn luyện ['joint': cả 2 mạng, 'temporal_only': chỉ 7B, 'depth_only': chỉ Depformer]
+  gradient_accumulation_steps: 8  # Số bước tích luỹ gradient trước khi update [int >= 1: 1, 4, 8, 16]
+  per_device_batch_size: 2        # Batch size trên mỗi GPU [int >= 1: 1, 2, 4]
+  num_workers: 4                  # Số luồng CPU DataLoader đọc audio [int: 0, 2, 4, 8]
+  prefetch_factor: 2              # Số batch nạp trước trên mỗi worker [int >= 1: 2, 4]
+  pin_memory: true                # Ghim bộ nhớ RAM để tăng tốc chuyển dữ liệu sang GPU [true, false]
+  persistent_workers: true        # Giữ worker không bị hủy giữa các epoch [true, false]
+  warmup_steps: 500               # Số step tăng dần LR từ 0 [int >= 0: 0, 100, 500]
+  eval_every_steps: 500           # Tần suất chạy validation loss (steps) [0: tắt, int > 0: 100, 500]
+  save_every_steps: 500           # Tần suất lưu checkpoint LoRA adapter (steps) [int >= 1: 100, 500]
+  gradient_checkpointing: true    # Tiết kiệm VRAM bằng cách tính lại activation lúc backward [true, false]
+  mixed_precision: bf16           # Độ chính xác số học ['bf16': khuyên dùng cho B200/H100/A100, 'fp16', 'no']
+
+# ------------------------------------------------------------------------------
+# 5. LOSS WEIGHTING (Trọng số thành phần hàm mất mát)
+# ------------------------------------------------------------------------------
+first_codebook_weight_multiplier: 1.0 # Trọng số cho codebook âm thanh ngữ nghĩa số 1 [float: 0.5 -> 2.0]
+text_padding_weight: 0.3              # Trọng số cho token <pad> lúc Agent im lặng lắng nghe [float: 0.1 -> 0.5]
+log_freq: 1                           # Tần suất in log loss ra console (steps) [int >= 1: 1, 5, 10]
+ckpt_freq: 500                        # Tần suất lưu checkpoint dự phòng [int >= 1: 100, 500]
+
+# ------------------------------------------------------------------------------
+# 6. GENERATION & SAMPLING SETTINGS (Tham số khi chạy thử nghiệm suy luận)
+# ------------------------------------------------------------------------------
+generation:
+  use_sampling: true                  # Bật lấy mẫu ngẫu nhiên [true: sáng tạo/tự nhiên, false: greedy argmax chính xác]
+  temp: 0.7                           # Nhiệt độ audio codebook [float: 0.0 -> 1.0, 0.0: greedy, 0.7: chuẩn]
+  temp_text: 0.6                      # Nhiệt độ text stream [float: 0.0 -> 1.0, 0.0: greedy, 0.6: tránh lặp từ]
+  top_k: 250                          # Top-K candidates cho audio [int: 50 -> 500]
+  top_k_text: 25                      # Top-K candidates cho text [int: 10 -> 50]
+  audio_silence_frame_cnt: 6          # Số frame im lặng tối thiểu trước khi ngắt câu [int: 3 -> 12]

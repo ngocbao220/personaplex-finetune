@@ -1,6 +1,6 @@
 defaults:
   - model: server
-  - data: otospeech
+  - data: vietnamese
   - _self_
 
 seed: 42

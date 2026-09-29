@@ -167,23 +167,38 @@ def conversation_group_keys(sample: PreparedSample) -> tuple[str, ...]:
     return tuple(keys)
 
 
-def limit_conversations(samples: list[PreparedSample], sample_number: int | None) -> list[PreparedSample]:
-    """Select the first N already-split training conversations, before chunking."""
-    if sample_number is None:
-        return list(samples)
-    if sample_number < 1:
+def limit_conversations(
+    samples: list[PreparedSample],
+    sample_number: int | None = None,
+    sample_index: int | None = None,
+) -> list[PreparedSample]:
+    """Select unique conversations by sample_index or first N samples, before chunking."""
+    if sample_number is not None and sample_number < 1:
         raise ValueError("sample_number must be positive or None")
-    selected: list[PreparedSample] = []
+    if sample_index is not None and sample_index < 0:
+        raise ValueError("sample_index must be non-negative or None")
+
+    # Deduplicate conversations while preserving order
+    unique_conversations: list[PreparedSample] = []
     seen_keys: set[str] = set()
     for sample in samples:
         keys = conversation_group_keys(sample)
         if any(key in seen_keys for key in keys):
             continue
         seen_keys.update(keys)
-        selected.append(sample)
-        if len(selected) == sample_number:
-            break
-    return selected
+        unique_conversations.append(sample)
+
+    if sample_index is not None:
+        if sample_index >= len(unique_conversations):
+            raise IndexError(
+                f"sample_index={sample_index} is out of bounds for dataset with {len(unique_conversations)} unique conversations"
+            )
+        return [unique_conversations[sample_index]]
+
+    if sample_number is not None:
+        return unique_conversations[:sample_number]
+
+    return unique_conversations
 
 
 def turn_aware_chunks(
@@ -301,7 +316,25 @@ def sample_for_training_position(
     if shuffle:
         random.Random(seed + pass_index).shuffle(indices)
     sample = chunks[indices[index_within_pass]]
+    return sample_for_role_pass(sample, pass_index, swap_roles)
+
+
+def sample_for_role_pass(sample: PreparedSample, pass_index: int, swap_roles: bool) -> PreparedSample:
+    """Use LEFT as agent on even passes and RIGHT as agent on odd passes."""
+    if pass_index < 0:
+        raise ValueError("pass_index must be non-negative")
     return sample.swapped_roles() if swap_roles and pass_index % 2 else sample
+
+
+def samples_for_role_pass(
+    samples: list[PreparedSample], pass_index: int, swap_roles: bool
+) -> list[PreparedSample]:
+    """Validate and materialize one pass's agent/user interpretation."""
+    if pass_index < 0:
+        raise ValueError("pass_index must be non-negative")
+    if not swap_roles or pass_index % 2 == 0:
+        return samples
+    return [sample_for_role_pass(sample, pass_index, True) for sample in samples]
 
 
 def read_wav_info(path: Path) -> AudioInfo:
@@ -310,11 +343,59 @@ def read_wav_info(path: Path) -> AudioInfo:
             channels = wav.getnchannels()
             sample_rate = wav.getframerate()
             frames = wav.getnframes()
+            if frames > 0:
+                wav.setpos(frames - 1)
+                if len(wav.readframes(1)) != channels * wav.getsampwidth():
+                    raise ValidationError(
+                        f"WAV header declares {frames} frames but audio payload is truncated: {path}"
+                    )
     except (OSError, wave.Error) as exc:
         raise ValidationError(f"cannot read WAV {path}: {exc}") from exc
     if sample_rate <= 0 or frames <= 0:
         raise ValidationError(f"WAV has no audio frames: {path}")
     return AudioInfo(sample_rate, channels, frames / sample_rate)
+
+
+def read_stereo_window(path: Path, start_sec: float, end_sec: float, sample_rate: int, sample_id: str):
+    """Decode one real stereo window; never turn a failed seek into padded silence."""
+    import numpy as np
+    import sphn
+
+    duration_sec = end_sec - start_sec
+    if start_sec < 0 or duration_sec <= 0:
+        raise ValueError(f"{sample_id}: invalid audio window {start_sec:.6f}-{end_sec:.6f}s")
+
+    def channels_first(value):
+        value = np.asarray(value, dtype=np.float32)
+        if value.ndim == 2 and value.shape[0] != 2 and value.shape[1] == 2:
+            value = value.T
+        return value
+
+    audio, decoded_rate = sphn.read(
+        str(path), start_sec=start_sec, duration_sec=duration_sec, sample_rate=sample_rate,
+    )
+    audio = channels_first(audio)
+    if audio.ndim == 2 and audio.shape == (2, 0):
+        # sphn can return an empty time slice near a WAV boundary even when
+        # the complete file decodes. Retry by slicing the decoded waveform.
+        full_audio, decoded_rate = sphn.read(str(path), sample_rate=sample_rate)
+        full_audio = channels_first(full_audio)
+        if decoded_rate <= 0 or full_audio.ndim != 2 or full_audio.shape[0] != 2:
+            raise ValueError(f"{sample_id}: cannot decode stereo WAV {path}; got {full_audio.shape}")
+        start_frame = round(start_sec * decoded_rate)
+        end_frame = start_frame + round(duration_sec * decoded_rate)
+        audio = full_audio[:, start_frame:end_frame]
+        if audio.shape[-1] == 0:
+            raise ValueError(
+                f"{sample_id}: requested WAV window {start_sec:.6f}-{end_sec:.6f}s "
+                f"lies beyond decoded audio ({full_audio.shape[-1] / decoded_rate:.6f}s): {path}"
+            )
+    if decoded_rate != sample_rate or audio.ndim != 2 or audio.shape[0] != 2 or audio.shape[-1] == 0:
+        raise ValueError(
+            f"{sample_id}: decoded audio must be stereo [2,T] at {sample_rate} Hz; "
+            f"got {audio.shape} at {decoded_rate} Hz: {path}"
+        )
+    return audio
 
 
 class PreparedDataset:

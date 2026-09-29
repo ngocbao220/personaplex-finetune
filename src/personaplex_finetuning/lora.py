@@ -123,8 +123,16 @@ def adapter_state_dict(model):
 def load_adapter(model, path) -> None:
     from safetensors.torch import load_file
     state = load_file(str(path))
-    model_sd = model.state_dict()
-    filtered_state = {k: v for k, v in state.items() if k in model_sd}
-    missing, unexpected = model.load_state_dict(filtered_state, strict=False)
-    if any("lora_" in name for name in missing):
-        raise RuntimeError(f"adapter mismatch; missing required LoRA keys: {missing}")
+    expected = {
+        name for name, _ in model.named_parameters()
+        if ".lora_a." in name or ".lora_b." in name
+    }
+    supplied = set(state)
+    missing = expected - supplied
+    unexpected = supplied - expected
+    if not expected or missing or unexpected:
+        raise RuntimeError(
+            f"adapter LoRA keys do not match model: "
+            f"missing={sorted(missing)[:5]}, unexpected={sorted(unexpected)[:5]}"
+        )
+    model.load_state_dict(state, strict=False)

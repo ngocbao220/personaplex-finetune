@@ -11,10 +11,15 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from .data import read_stereo_window
+
 
 def _pad_audio_window(audio, sample_rate: int, duration_sec: float):
     """Match the fixed final-chunk padding performed by the reference dataset loader."""
     import numpy as np
+
+    if audio.ndim != 2 or audio.shape[0] != 2 or audio.shape[-1] == 0:
+        raise ValueError(f"cannot pad missing or non-stereo decoded audio: {audio.shape}")
 
     expected_samples = round(sample_rate * duration_sec)
     if audio.shape[-1] >= expected_samples:
@@ -106,7 +111,6 @@ class MimiCodec:
         than one without changing the audio window or channel semantics.
         """
         import numpy as np
-        import sphn
         import torch
 
         if not windows:
@@ -139,9 +143,8 @@ class MimiCodec:
                 duration_sec = end_sec - start_sec
                 if raw_audio is None:
                     # Windowed seek + resample avoids decoding an entire long conversation.
-                    audio, _ = sphn.read(
-                        str(path), start_sec=start_sec, duration_sec=duration_sec,
-                        sample_rate=self.sample_rate,
+                    audio = read_stereo_window(
+                        path, start_sec, end_sec, self.sample_rate, str(path),
                     )
                 else:
                     valid_samples = int(raw_audio["valid_samples"][result_index])
@@ -252,10 +255,9 @@ class MimiCodec:
             raise ValueError(f"agent/user Mimi frame counts differ in cache: {path}")
 
     def encode_conversation(self, path: Path, channel: int, start_sec: float, end_sec: float):
-        import sphn
         import torch
         duration_sec = end_sec - start_sec
-        audio, _ = sphn.read(str(path), start_sec=start_sec, duration_sec=duration_sec, sample_rate=self.sample_rate)
+        audio = read_stereo_window(path, start_sec, end_sec, self.sample_rate, str(path))
         audio = _pad_audio_window(audio, self.sample_rate, duration_sec)
         if channel not in (0, 1):
             raise ValueError(f"invalid conversation window {start_sec}:{end_sec} for {path}")

@@ -41,7 +41,8 @@ def build_debug_payload(sample, example: TrainingExample, tokenizer, frame_rate:
         raise AssertionError("hybrid prompt segments are not ordered with pauses")
 
     labels = example.labels
-    weights = stream_weights(labels, example.loss_mask, tokenizer.padding_id)
+    text_padding_ids = (tokenizer.padding_id, tokenizer.end_padding_id)
+    weights = stream_weights(labels, example.loss_mask, text_padding_ids)
     max_delay = max(delays)
     content_frames = 1 + max_delay + example.prompt_frames + example.dialogue_frames
     word_at_frame: dict[int, str] = {}

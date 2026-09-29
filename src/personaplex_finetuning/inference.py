@@ -252,7 +252,8 @@ def generate(
             decoded = runtime.codec.mimi.decode(tokens[:, 1:9]).squeeze().detach().float().cpu().numpy()
             pcm_frames.append(decoded)
             token = int(tokens[0, 0, 0])
-            if token not in (0, runtime.tokenizer.padding_id):
+            ignored_tokens = (0, runtime.tokenizer.padding_id, runtime.tokenizer.end_padding_id)
+            if token not in ignored_tokens:
                 text_token_ids.append(token)
     if not pcm_frames:
         raise RuntimeError("native PersonaPlex generation produced no frames")
@@ -316,7 +317,8 @@ def generate_text_with_runtime(
                 if tokens is None:
                     continue
                 token = int(tokens[0, 0, 0])
-                if token not in (0, runtime.tokenizer.padding_id):
+                ignored_tokens = (0, runtime.tokenizer.padding_id, runtime.tokenizer.end_padding_id)
+                if token not in ignored_tokens:
                     token_ids.append(token)
         processor = runtime.tokenizer._processor
         if hasattr(processor, "decode_ids"):

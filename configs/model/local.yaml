@@ -1,4 +1,0 @@
-# Local downloaded PersonaPlex-7B model paths
-root: ../models
-source: ../src
-device: cuda

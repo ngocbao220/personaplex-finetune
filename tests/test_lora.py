@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 
 try:
@@ -9,6 +11,32 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on documentation-onl
 
 @unittest.skipIf(torch is None, "PyTorch is required for LoRA module tests")
 class LoRATest(unittest.TestCase):
+    def test_adapter_load_rejects_extra_or_missing_lora_weights(self) -> None:
+        from safetensors.torch import save_file
+        from personaplex_finetuning.lora import adapter_state_dict, inject_lora, load_adapter
+
+        class Model(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.transformer = torch.nn.Module()
+                self.transformer.projection = torch.nn.Linear(3, 2)
+
+        model = Model()
+        inject_lora(model, rank=2, alpha=4)
+        state = adapter_state_dict(model)
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = Path(directory) / "lora.safetensors"
+            save_file(state, str(adapter))
+            load_adapter(model, adapter)
+
+            save_file({**state, "depformer.extra.lora_a.weight": torch.zeros(2, 2)}, str(adapter))
+            with self.assertRaisesRegex(RuntimeError, "unexpected"):
+                load_adapter(model, adapter)
+
+            save_file({next(iter(state)): next(iter(state.values()))}, str(adapter))
+            with self.assertRaisesRegex(RuntimeError, "missing"):
+                load_adapter(model, adapter)
+
     def test_replacement_accepts_bitsandbytes_4bit_linear(self) -> None:
         from personaplex_finetuning.lora import inject_lora
 

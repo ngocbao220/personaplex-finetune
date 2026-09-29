@@ -23,7 +23,7 @@ class Config:
     seed: int = 42
     window_seconds: float = 30.0
     shuffle: bool = False
-    randomize_train: bool = True
+    randomize_train: bool = False
     max_steps: int = 300
     learning_rate: float = 2e-5
     depformer_learning_rate: float | None = None
@@ -56,6 +56,7 @@ class Config:
     mixed_precision: str = "bf16"
     duration_sec: float = 100.0
     sample_number: int | None = None
+    sample_index: int | None = None
     profile_steps: bool = False
     generation_settings: GenerationSettings = GenerationSettings()
     free_running_eval_every_steps: int = 0
@@ -157,6 +158,12 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
                 elif o.startswith("max_steps="):
                     destination = "max_steps" if "max_steps" in conf else "train.max_steps"
                     hydra_overrides.append(f"{destination}={o.split('=', 1)[1]}")
+                elif o.startswith("sample_index="):
+                    hydra_overrides.append(f"+sample_index={o.split('=', 1)[1]}")
+                elif o.startswith("sample_number="):
+                    hydra_overrides.append(f"+sample_number={o.split('=', 1)[1]}")
+                elif o.startswith("batch_size="):
+                    hydra_overrides.append(f"+batch_size={o.split('=', 1)[1]}")
                 elif o.startswith("output_dir="):
                     hydra_overrides.append(f"train.{o}")
                 elif o.startswith("rank=") or o.startswith("alpha=") or o.startswith("qlora="):
@@ -221,6 +228,10 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     sample_number = None if sample_number_raw is None else int(sample_number_raw)
     if sample_number is not None and sample_number < 1:
         raise ValueError("sample_number must be null or a positive integer")
+    sample_index_raw = raw.get("sample_index", train.get("sample_index"))
+    sample_index = None if sample_index_raw is None else int(sample_index_raw)
+    if sample_index is not None and sample_index < 0:
+        raise ValueError("sample_index must be null or a non-negative integer")
     duration_sec = float(raw.get("duration_sec", data.get("duration_sec", 100.0)))
     if duration_sec <= 0:
         raise ValueError("duration_sec must be positive")
@@ -244,6 +255,19 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     # alpha consistent with the value that is actually used at runtime.
     lora_alpha = round(lora_rank * lora_scaling)
     generation_settings = generation_from_config(raw)
+    max_steps = int(raw.get("max_steps", train.get("max_steps", 300)))
+    warmup_steps = int(train.get("warmup_steps", 0))
+    if max_steps < 1 or warmup_steps < 0 or warmup_steps >= max_steps:
+        raise ValueError("max_steps must be positive and train.warmup_steps must be in [0, max_steps)")
+    configured_pct_start = optim.get("pct_start", train.get("pct_start"))
+    if warmup_steps and configured_pct_start is not None:
+        raise ValueError("set either train.warmup_steps or optim.pct_start, not both")
+    pct_start = (
+        warmup_steps / max_steps if warmup_steps
+        else float(configured_pct_start if configured_pct_start is not None else 0.05)
+    )
+    if not 0 < pct_start < 1:
+        raise ValueError("optim.pct_start must be strictly between 0 and 1")
 
     return Config(
         path=path,
@@ -255,8 +279,8 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         seed=int(raw.get("seed", 42)),
         window_seconds=float(data.get("window_seconds", 30.0)),
         shuffle=bool(data.get("shuffle", False)),
-        randomize_train=bool(data.get("randomize_train", True)),
-        max_steps=int(raw.get("max_steps", train.get("max_steps", 300))),
+        randomize_train=bool(data.get("randomize_train", False)),
+        max_steps=max_steps,
         learning_rate=float(optim.get("lr", train.get("learning_rate", 2e-5))),
         depformer_learning_rate=float(train["depformer_learning_rate"]) if (isinstance(train, dict) and train.get("depformer_learning_rate") is not None) else None,
         train_stage=str(train.get("stage") or train.get("train_stage") or "joint").lower() if isinstance(train, dict) else "joint",
@@ -271,7 +295,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         prefetch_factor=max(1, int(train.get("prefetch_factor", 2))) if isinstance(train, dict) else 2,
         pin_memory=bool(train.get("pin_memory", True)) if isinstance(train, dict) else True,
         persistent_workers=bool(train.get("persistent_workers", True)) if isinstance(train, dict) else True,
-        warmup_steps=max(0, int(train.get("warmup_steps", 0))) if isinstance(train, dict) else 0,
+        warmup_steps=warmup_steps,
         eval_every_steps=max(0, int(train.get("eval_every_steps", 0))) if isinstance(train, dict) else 0,
         save_every_steps=max(1, int(train.get("save_every_steps", 50))) if isinstance(train, dict) else 50,
         val_ratio=float(data.get("val_ratio", 0.05)),
@@ -288,6 +312,7 @@ gradient_checkpointing=bool(raw.get("gradient_checkpointing", train.get("gradien
         mixed_precision=str(train.get("mixed_precision", "bf16")),
         duration_sec=duration_sec,
         sample_number=sample_number,
+        sample_index=sample_index,
         profile_steps=bool(raw.get("profile_steps", False)),
         generation_settings=generation_settings,
         free_running_eval_every_steps=max(0, int(raw.get("free_running_eval_every_steps", 0))),
@@ -298,7 +323,7 @@ gradient_checkpointing=bool(raw.get("gradient_checkpointing", train.get("gradien
         lora_scaling=lora_scaling,
         ft_embed=bool(lora.get("ft_embed", False)),
         weight_decay=float(optim.get("weight_decay", train.get("weight_decay", 0.1))),
-        pct_start=float(optim.get("pct_start", train.get("pct_start", 0.05))),
+        pct_start=pct_start,
         first_codebook_weight_multiplier=first_codebook_weight_multiplier,
         text_padding_weight=text_padding_weight,
         log_freq=max(1, int(raw.get("log_freq", 1))),

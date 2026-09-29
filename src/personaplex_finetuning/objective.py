@@ -5,10 +5,29 @@ from __future__ import annotations
 from typing import Sequence
 
 
+def normalize_text_padding_ids(text_padding_id: int | Sequence[int]) -> tuple[int, ...]:
+    """Normalize PAD and END_PAD token IDs to one small immutable tuple."""
+    if isinstance(text_padding_id, int):
+        return (text_padding_id,)
+    ids = tuple(int(token_id) for token_id in text_padding_id)
+    if not ids:
+        raise ValueError("at least one text padding token ID is required")
+    return ids
+
+
+def text_padding_mask_torch(codes: "torch.Tensor", text_padding_ids: int | Sequence[int]):
+    import torch
+
+    mask = torch.zeros_like(codes, dtype=torch.bool)
+    for token_id in normalize_text_padding_ids(text_padding_ids):
+        mask |= codes == token_id
+    return mask
+
+
 def stream_weights(
     codes: Sequence[Sequence[int]],
     loss_mask: Sequence[Sequence[bool]],
-    text_padding_id: int,
+    text_padding_id: int | Sequence[int],
     nonsemantic_audio_weight: float = 0.02,
     text_padding_weight: float = 0.3,
     first_codebook_weight_multiplier: float = 1.0,
@@ -40,8 +59,9 @@ def stream_weights(
         if stream_index == 0:
             # Text stream: 1.0 for real tokens, text_padding_weight for padding
             tokens_arr = np.asarray(stream, dtype=np.int64)
+            padding_ids = normalize_text_padding_ids(text_padding_id)
             values = np.where(
-                tokens_arr == text_padding_id,
+                np.isin(tokens_arr, padding_ids),
                 np.float64(text_padding_weight),
                 np.float64(1.0),
             ).astype(np.float64)
@@ -62,7 +82,7 @@ def stream_weights(
 def stream_weights_torch(
     codes: "torch.Tensor",
     loss_mask: "torch.Tensor",
-    text_padding_id: int,
+    text_padding_id: int | Sequence[int],
     nonsemantic_audio_weight: float = 0.02,
     text_padding_weight: float = 0.3,
     first_codebook_weight_multiplier: float = 1.0,
@@ -93,7 +113,7 @@ def stream_weights_torch(
     # Agent text stream (index 0): 1.0 for real tokens, text_padding_weight for padding
     weights = torch.zeros(B, S, T, dtype=torch.float32, device=codes.device)
     text_mask = loss_mask[:, 0]
-    is_pad = codes[:, 0] == text_padding_id
+    is_pad = text_padding_mask_torch(codes[:, 0], text_padding_id)
     weights[:, 0] = torch.where(
         text_mask,
         torch.where(is_pad, torch.tensor(text_padding_weight, device=codes.device), torch.tensor(1.0, device=codes.device)),
