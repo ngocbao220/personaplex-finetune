@@ -379,7 +379,13 @@ class StreamingMultiheadAttention(StreamingModule[_MHAState]):
             capacity = self.context
         device = self.in_proj_weight.device
         # TODO: the following estimation will not work great with FSDP.
+        # Streaming state is commonly initialized before the first forward call,
+        # including before entering CUDA autocast. In that case the projection
+        # weights can be FP32 while autocast produces BF16 K/V tensors. Allocate
+        # the cache with autocast's active dtype so its first index_copy_ matches.
         dtype = self.in_proj_weight.dtype
+        if device.type == "cuda" and torch.is_autocast_enabled("cuda"):
+            dtype = torch.get_autocast_dtype("cuda")
         dim_per_head = self.embed_dim // self.num_heads
         kv_cache = RingKVCache(
             batch_size, self.num_heads, dim_per_head, capacity, device, dtype

@@ -118,3 +118,19 @@ class ProductionFeaturesTest(unittest.TestCase):
         out.sum().backward()
         self.assertIsNotNone(x.grad)
 
+    def test_streaming_attention_cache_uses_active_autocast_dtype(self):
+        import torch
+        from moshi.modules.transformer import StreamingMultiheadAttention
+
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA autocast is required")
+        attention = StreamingMultiheadAttention(
+            embed_dim=8, num_heads=2, causal=True, context=16, device="cuda", dtype=torch.float32
+        )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with attention.streaming(batch_size=1):
+                state = attention._streaming_state
+                self.assertEqual(state.kv_cache.cache.dtype, torch.bfloat16)
+                query = torch.randn(1, 1, 8, device="cuda", dtype=torch.float32)
+                output = attention(query, query, query)
+                self.assertEqual(output.dtype, torch.bfloat16)
