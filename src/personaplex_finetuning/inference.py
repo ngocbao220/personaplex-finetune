@@ -5,122 +5,64 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Mapping
-from dataclasses import dataclass, replace
+import copy
+import unicodedata
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
 from .config import Config
 from .data import PreparedSample
+from .generation import GenerationSettings, generation_from_config
 from .lora import inject_lora, load_adapter
 from .runtime import RuntimePaths, load_runtime
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class GenerationSettings:
-    """Sampling settings forwarded to moshi's ``LMGen``.
-
-    The defaults mirror Moshi/PersonaPlex (``LMGen.__init__``) and are exactly what the
-    inference smoke test hard-coded before the ``generation:`` config block existed, so an
-    absent or partial block keeps the previous behaviour unchanged.
-    """
-
-    use_sampling: bool = True
-    temp: float = 0.8
-    temp_text: float = 0.7
-    top_k: int = 250
-    top_k_text: int = 25
-    audio_silence_frame_cnt: int = 6
-
-    def lmgen_kwargs(self) -> dict[str, Any]:
-        """Keyword arguments handed to ``LMGen`` and the structured run-report payload."""
-        return {
-            "use_sampling": self.use_sampling,
-            "temp": self.temp,
-            "temp_text": self.temp_text,
-            "top_k": self.top_k,
-            "top_k_text": self.top_k_text,
-            "audio_silence_frame_cnt": self.audio_silence_frame_cnt,
-        }
-
-    def as_dict(self) -> dict[str, Any]:
-        return self.lmgen_kwargs()
-
-    def label(self) -> str:
-        """Describe the mechanism ``sample_token`` really uses, per stream.
-
-        ``moshi.utils.sampling.sample_token`` falls back to argmax when sampling is disabled
-        or the temperature is not positive, so the audio and text streams are labelled
-        separately instead of claiming one global mode.
-        """
-        audio = "greedy" if (not self.use_sampling or self.temp <= 0.0) else f"sampling temp={self.temp:g}"
-        text = "greedy" if (not self.use_sampling or self.temp_text <= 0.0) else f"sampling temp={self.temp_text:g}"
-        return (
-            f"native LMGen audio={audio}, text={text}, top_k={self.top_k}, "
-            f"top_k_text={self.top_k_text}, audio_silence_frame_cnt={self.audio_silence_frame_cnt}"
-        )
-
-
-def _as_bool(name: str, value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value.strip().lower() in {"true", "false", "1", "0"}:
-        return value.strip().lower() in {"true", "1"}
-    raise ValueError(f"{name} must be a boolean, got {value!r}")
-
-
-def _as_float(name: str, value: Any, minimum: float) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{name} must be a number, got {value!r}")
-    number = float(value)
-    if not np.isfinite(number) or number < minimum:
-        raise ValueError(f"{name} must be finite and >= {minimum:g}, got {value!r}")
-    return number
-
-
-def _as_int(name: str, value: Any, minimum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{name} must be an integer, got {value!r}")
-    if float(value) != int(value):
-        raise ValueError(f"{name} must be an integer, got {value!r}")
-    number = int(value)
-    if number < minimum:
-        raise ValueError(f"{name} must be >= {minimum}, got {value!r}")
-    return number
-
-
-def generation_from_config(raw: Mapping[str, Any] | None) -> GenerationSettings:
-    """Read the optional ``generation:`` section of a raw (Hydra/OmegaConf) config.
-
-    Missing keys fall back to the Moshi defaults. Unknown keys and out-of-range values
-    raise immediately, so a typo in the YAML can never be mistaken for a working setting.
-    """
-    defaults = GenerationSettings()
-    section = {} if raw is None else raw.get("generation")
-    if section is None:
-        section = {}
-    if not isinstance(section, Mapping):
-        raise ValueError("generation config section must be a mapping")
-    supported = sorted(defaults.as_dict())
-    unknown = sorted(set(section) - set(supported))
-    if unknown:
-        raise ValueError(f"unknown generation config keys: {unknown}; supported keys are {supported}")
-    return GenerationSettings(
-        use_sampling=_as_bool("generation.use_sampling", section.get("use_sampling", defaults.use_sampling)),
-        temp=_as_float("generation.temp", section.get("temp", defaults.temp), minimum=0.0),
-        temp_text=_as_float("generation.temp_text", section.get("temp_text", defaults.temp_text), minimum=0.0),
-        top_k=_as_int("generation.top_k", section.get("top_k", defaults.top_k), minimum=0),
-        top_k_text=_as_int("generation.top_k_text", section.get("top_k_text", defaults.top_k_text), minimum=0),
-        audio_silence_frame_cnt=_as_int(
-            "generation.audio_silence_frame_cnt",
-            section.get("audio_silence_frame_cnt", defaults.audio_silence_frame_cnt),
-            minimum=0,
-        ),
+def _normalize_text_for_metrics(text: str) -> tuple[list[str], str]:
+    normalized = unicodedata.normalize("NFC", text).casefold()
+    normalized = "".join(
+        " " if unicodedata.category(character).startswith("P") else character
+        for character in normalized
     )
+    words = normalized.split()
+    return words, "".join(words)
+
+
+def _edit_distance(left: list[str] | str, right: list[str] | str) -> int:
+    if len(left) < len(right):
+        left, right = right, left
+    previous = list(range(len(right) + 1))
+    for left_index, left_item in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_item in enumerate(right, start=1):
+            current.append(min(
+                current[-1] + 1,
+                previous[right_index] + 1,
+                previous[right_index - 1] + (left_item != right_item),
+            ))
+        previous = current
+    return previous[-1]
+
+
+def text_error_metrics(reference: str, hypothesis: str) -> dict[str, float | int] | None:
+    """Compute normalized Vietnamese-friendly WER and whitespace-free CER."""
+    reference_words, reference_characters = _normalize_text_for_metrics(reference)
+    hypothesis_words, hypothesis_characters = _normalize_text_for_metrics(hypothesis)
+    if not reference_words:
+        return None
+    word_errors = _edit_distance(reference_words, hypothesis_words)
+    character_errors = _edit_distance(reference_characters, hypothesis_characters)
+    return {
+        "wer": word_errors / len(reference_words),
+        "cer": character_errors / max(1, len(reference_characters)),
+        "reference_words": len(reference_words),
+        "reference_characters": len(reference_characters),
+        "word_errors": word_errors,
+        "character_errors": character_errors,
+    }
 
 
 def _prepare_input_audio(input_file: Path, output_dir: Path) -> Path:
@@ -143,8 +85,8 @@ def _prepare_input_audio(input_file: Path, output_dir: Path) -> Path:
     return normalized_path
 
 
-def resolve_adapter_checkpoint(adapter: Path) -> tuple[Path, int, int]:
-    """Resolve adapter weights and LoRA dimensions from checkpoint contents."""
+def resolve_adapter_checkpoint(adapter: Path) -> tuple[Path, int, int, Path | None, tuple[str, ...]]:
+    """Resolve adapter weights, LoRA dimensions/targets, and the training base-model path."""
     adapter = Path(adapter).expanduser()
     if adapter.is_dir():
         checkpoint_dir = adapter
@@ -164,23 +106,39 @@ def resolve_adapter_checkpoint(adapter: Path) -> tuple[Path, int, int]:
         raise ValueError(f"cannot read LoRA checkpoint metadata: {metadata_file}") from exc
     if not isinstance(metadata, dict):
         raise ValueError(f"LoRA checkpoint metadata must be a JSON object: {metadata_file}")
+    raw_model_root = metadata.get("model_root")
+    if raw_model_root is None:
+        model_root = None
+    elif isinstance(raw_model_root, str) and raw_model_root.strip():
+        model_root = Path(raw_model_root).expanduser().resolve()
+    else:
+        raise ValueError(f"LoRA checkpoint metadata has an invalid model_root: {metadata_file}")
 
     # Rank is encoded directly in adapter tensor shapes and is more reliable
     # than metadata from older runs, which could record the config default.
     from safetensors import safe_open
 
     ranks = set()
+    target_prefixes = set()
     with safe_open(str(adapter_file), framework="pt", device="cpu") as checkpoint:
         for name in checkpoint.keys():
             shape = checkpoint.get_slice(name).get_shape()
             if name.endswith(".lora_a.weight") and len(shape) == 2:
                 ranks.add(shape[0])
+                target_prefixes.add(name.split(".", 1)[0])
             elif name.endswith(".lora_b.weight") and len(shape) == 2:
                 ranks.add(shape[1])
+                target_prefixes.add(name.split(".", 1)[0])
     if not ranks:
         raise ValueError(f"adapter file contains no LoRA A/B weight tensors: {adapter_file}")
     if len(ranks) != 1 or next(iter(ranks)) <= 0:
         raise ValueError(f"adapter tensors contain inconsistent LoRA ranks {sorted(ranks)}: {adapter_file}")
+    supported_prefixes = {"transformer", "depformer"}
+    if not target_prefixes or target_prefixes - supported_prefixes:
+        raise ValueError(
+            f"adapter tensors contain unsupported LoRA module prefixes {sorted(target_prefixes)}: {adapter_file}"
+        )
+    prefixes = tuple(name for name in ("transformer", "depformer") if name in target_prefixes)
     rank = next(iter(ranks))
     metadata_rank = metadata.get("rank")
     if metadata_rank != rank:
@@ -212,7 +170,7 @@ def resolve_adapter_checkpoint(adapter: Path) -> tuple[Path, int, int]:
                 run_scaling = run_config.get("lora_scaling")
                 if run_rank == rank and isinstance(run_scaling, (int, float)) and run_scaling > 0:
                     alpha = round(rank * run_scaling)
-    return adapter_file, rank, alpha
+    return adapter_file, rank, alpha, model_root, prefixes
 
 
 def generate(
@@ -239,16 +197,21 @@ def generate(
     adapter_file = None
     adapter_rank = None
     adapter_alpha = None
+    adapter_model_root = None
+    adapter_prefixes = None
     if adapter is not None:
-        adapter_file, adapter_rank, adapter_alpha = resolve_adapter_checkpoint(adapter)
+        adapter_file, adapter_rank, adapter_alpha, adapter_model_root, adapter_prefixes = resolve_adapter_checkpoint(adapter)
     if settings.use_sampling and seed is not None:
         # Sampling is only reproducible with a pinned RNG (AGENTS.md: seed all randomness).
         torch.manual_seed(int(seed))
         logger.info("seeded torch RNG with %s for reproducible sampling", seed)
-    runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
+    model_root = adapter_model_root or Path(config.model_root)
+    if adapter_model_root is not None and adapter_model_root != Path(config.model_root).expanduser().resolve():
+        logger.info("using training base model from adapter metadata: %s", model_root)
+    runtime = load_runtime(RuntimePaths(model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
     if adapter_file is not None:
         assert adapter_rank is not None and adapter_alpha is not None
-        inject_lora(runtime.model, adapter_rank, adapter_alpha)
+        inject_lora(runtime.model, adapter_rank, adapter_alpha, prefixes=adapter_prefixes)
         load_adapter(runtime.model, adapter_file)
     runtime.model.eval()
     lm_module = importlib.import_module("moshi.models.lm")
@@ -289,6 +252,60 @@ def generate(
     output_text.write_text(cleaned_text, encoding="utf-8")
 
 
+def generate_text_with_runtime(
+    runtime, sample: PreparedSample, generation: GenerationSettings | None = None, seed: int = 42,
+) -> str:
+    """Run PersonaPlex free-running text generation with an already-loaded model.
+
+    This is used for validation between training checkpoints so validation measures the
+    autoregressive path without loading a second 7B model or decoding generated audio.
+    """
+    import importlib
+    import torch
+
+    settings = GenerationSettings() if generation is None else generation
+    if seed is not None:
+        torch.manual_seed(int(seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(seed))
+    model = runtime.model.module if hasattr(runtime.model, "module") else runtime.model
+    was_training = model.training
+    model.eval()
+    try:
+        lm_module = importlib.import_module("moshi.models.lm")
+        device = runtime.codec.device
+        generator = lm_module.LMGen(
+            model, sample_rate=runtime.codec.sample_rate,
+            frame_rate=runtime.codec.frame_rate, device=device,
+            **settings.lmgen_kwargs(),
+        )
+        generator.load_voice_prompt(str(sample.voice_prompt_wav))
+        generator.text_prompt_tokens = runtime.tokenizer.encode(
+            f"<system> {sample.text_prompt.strip()} <system>"
+        )
+        user_codes = runtime.codec.encode_conversation(
+            sample.conversation_wav, sample.user_channel,
+            sample.window_start_sec, min(sample.window_end_sec, sample.audio.duration_sec),
+        )
+        user = torch.tensor(user_codes, device=device).unsqueeze(0)
+        token_ids: list[int] = []
+        with torch.no_grad(), runtime.codec.mimi.streaming(1), generator.streaming(1):
+            generator.step_system_prompts(runtime.codec.mimi)
+            for frame in range(user.shape[-1]):
+                tokens = generator.step(input_tokens=user[:, :, frame : frame + 1])
+                if tokens is None:
+                    continue
+                token = int(tokens[0, 0, 0])
+                if token not in (0, runtime.tokenizer.padding_id):
+                    token_ids.append(token)
+        processor = runtime.tokenizer._processor
+        if hasattr(processor, "decode_ids"):
+            return str(processor.decode_ids(token_ids))
+        return "".join(processor.id_to_piece(token) for token in token_ids).strip()
+    finally:
+        model.train(was_training)
+
+
 def _export_context(sample: PreparedSample, output_dir: Path) -> None:
     import shutil
     import sphn
@@ -312,6 +329,11 @@ def _export_context(sample: PreparedSample, output_dir: Path) -> None:
         if w.speaker == "user" and w.end >= sample.window_start_sec and w.start <= sample.window_end_sec
     ]
     (output_dir / "user.txt").write_text(" ".join(user_words), encoding="utf-8")
+    agent_words = [
+        w.word for w in sample.words
+        if w.speaker == "agent" and sample.window_start_sec <= w.start < sample.window_end_sec
+    ]
+    (output_dir / "agent_reference.txt").write_text(" ".join(agent_words), encoding="utf-8")
 
     # Export prompts for reference
     (output_dir / "prompt_text.txt").write_text(sample.text_prompt.strip(), encoding="utf-8")
@@ -326,11 +348,22 @@ def smoke(
     output_dir: Path,
     input_file: Path | None = None,
     generation: GenerationSettings | None = None,
-) -> None:
+) -> str:
     settings = GenerationSettings() if generation is None else generation
     seed = int(getattr(config, "seed", 42))
     logger.info("generation settings: %s (seed=%s)", settings.label(), seed)
     output_dir.mkdir(parents=True, exist_ok=True)
+    adapter_path = Path(adapter).expanduser()
+    adapter_model_root = None
+    if adapter_path.is_file() or adapter_path.is_dir():
+        adapter_model_root = resolve_adapter_checkpoint(adapter_path)[3]
+    if adapter_model_root is not None:
+        # Compare the adapter against the exact base checkpoint it was trained on.
+        if hasattr(config, "replace"):
+            config = config.replace(model_root=adapter_model_root)
+        else:
+            config = copy.copy(config)
+            config.model_root = adapter_model_root
     if input_file is not None:
         normalized_input = _prepare_input_audio(input_file, output_dir)
 
@@ -346,6 +379,7 @@ def smoke(
             user_channel=0,
             window_start_sec=0.0,
             window_end_sec=audio.shape[-1] / sample_rate,
+            words=(),
         )
 
     _export_context(sample, output_dir)
@@ -407,6 +441,35 @@ def smoke(
     if finetuned_audio is not None and user_audio is not None:
         sphn.write_wav(str(output_dir / "dialogue_finetune.wav"), _make_stereo(finetuned_audio, user_audio), 24000)
 
+    reference_path = output_dir / "agent_reference.txt"
+    reference_text = reference_path.read_text(encoding="utf-8") if reference_path.is_file() else ""
+    base_text_path = output_dir / "base.txt"
+    finetuned_text_path = output_dir / "finetuned.txt"
+    base_text = base_text_path.read_text(encoding="utf-8") if base_text_path.is_file() else ""
+    finetuned_text = finetuned_text_path.read_text(encoding="utf-8") if finetuned_text_path.is_file() else ""
+    for name, text in (("base", base_text), ("finetuned", finetuned_text)):
+        if not text.strip():
+            message = f"{name} inference produced an empty transcript"
+            logger.warning(message)
+            output_warnings.append(message)
+    base_text_metrics = text_error_metrics(reference_text, base_text)
+    finetuned_text_metrics = text_error_metrics(reference_text, finetuned_text)
+    if not finetuned_text.strip():
+        text_quality_status = "empty_transcript"
+    elif finetuned_text_metrics is None:
+        text_quality_status = "reference_unavailable"
+    elif base_text_metrics is None:
+        text_quality_status = "base_reference_unavailable"
+    elif finetuned_text_metrics["cer"] < base_text_metrics["cer"]:
+        text_quality_status = "improves_over_base"
+    else:
+        text_quality_status = "does_not_improve_over_base"
+        message = (
+            "finetuned transcript CER does not improve over base: "
+            f"{finetuned_text_metrics['cer']:.4f} >= {base_text_metrics['cer']:.4f}"
+        )
+        logger.warning(message)
+        output_warnings.append(message)
     (output_dir / "run.json").write_text(
         json.dumps(
             {
@@ -415,7 +478,18 @@ def smoke(
                 "window_start_sec": sample.window_start_sec,
                 "window_end_sec": sample.window_end_sec,
                 "adapter": str(adapter),
-                "base_model": str(config.model_root),
+                "base_model": str(Path(config.model_root).expanduser().resolve()),
+                "text_prompt": sample.text_prompt,
+                "voice_prompt": str(sample.voice_prompt_wav),
+                "agent_reference_text": reference_text,
+                "text_metrics_available": bool(reference_text.strip()),
+                "base_text_metrics": base_text_metrics,
+                "finetuned_text_metrics": finetuned_text_metrics,
+                "text_quality_status": text_quality_status,
+                "finetuned_improves_base_cer": (
+                    finetuned_text_metrics["cer"] < base_text_metrics["cer"]
+                    if finetuned_text_metrics is not None and base_text_metrics is not None else None
+                ),
                 "generation": settings.label(),
                 "generation_settings": settings.as_dict(),
                 "seed": seed,
@@ -425,3 +499,4 @@ def smoke(
             indent=2,
         )
     )
+    return text_quality_status

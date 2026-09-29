@@ -1,5 +1,8 @@
 # Full 104h OtoSpeech dataset configuration
 prepared_dir: /storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared
+
+# Optional local persistent cache for Mimi dialogue codes; place on fast local NVMe.
+codec_cache_dir: null
 window_seconds: 30 # Fixed windows are reserved for static_chunking debug runs.
 target_window_seconds: 25
 min_window_seconds: 10

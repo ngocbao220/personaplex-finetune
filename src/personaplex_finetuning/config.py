@@ -9,6 +9,8 @@ from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
+from .generation import GenerationSettings, generation_from_config
+
 
 @dataclass(frozen=True)
 class Config:
@@ -17,6 +19,7 @@ class Config:
     personaplex_source: Path
     prepared_dir: Path
     output_dir: Path
+    codec_cache_dir: Path | None = None
     seed: int = 42
     window_seconds: float = 30.0
     shuffle: bool = False
@@ -53,6 +56,12 @@ class Config:
     mixed_precision: str = "bf16"
     duration_sec: float = 100.0
     sample_number: int | None = None
+    profile_steps: bool = False
+    generation_settings: GenerationSettings = GenerationSettings()
+    free_running_eval_every_steps: int = 0
+    free_running_eval_samples: int = 1
+    free_running_eval_window_seconds: float = 30.0
+    validation_max_samples: int = 32
     lora_enabled: bool = True
     lora_scaling: float = 2.0
     ft_embed: bool = False
@@ -63,6 +72,7 @@ class Config:
     log_freq: int = 1
     no_eval: bool = False
     ckpt_freq: int = 50
+    eval_on_train_samples: bool = False
 
     @property
     def manifest(self) -> Path:
@@ -130,7 +140,8 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
                     hydra_overrides.append(f"+train.depformer_learning_rate={val}")
                 elif o.startswith("tempformer_lr=") or o.startswith("tempformer_learning_rate="):
                     val = o.split("=", 1)[1]
-                    hydra_overrides.append(f"train.learning_rate={val}")
+                    destination = "optim.lr" if "optim" in conf else "train.learning_rate"
+                    hydra_overrides.append(f"{destination}={val}")
                 elif o.startswith("stage=") or o.startswith("train_stage="):
                     val = o.split("=", 1)[1]
                     hydra_overrides.append(f"+train.stage={val}")
@@ -139,7 +150,14 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
                     if val.lower() in {"true", "1"}:
                         st = "temporal_only" if "depformer" in key else "depth_only"
                         hydra_overrides.append(f"+train.stage={st}")
-                elif o.startswith("learning_rate=") or o.startswith("max_steps=") or o.startswith("output_dir="):
+                elif o.startswith("learning_rate="):
+                    val = o.split("=", 1)[1]
+                    destination = "optim.lr" if "optim" in conf else "train.learning_rate"
+                    hydra_overrides.append(f"{destination}={val}")
+                elif o.startswith("max_steps="):
+                    destination = "max_steps" if "max_steps" in conf else "train.max_steps"
+                    hydra_overrides.append(f"{destination}={o.split('=', 1)[1]}")
+                elif o.startswith("output_dir="):
                     hydra_overrides.append(f"train.{o}")
                 elif o.startswith("rank=") or o.startswith("alpha=") or o.startswith("qlora="):
                     hydra_overrides.append(f"lora.{o}")
@@ -191,6 +209,10 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
 
 
     prepared_dir = resolve(data, "prepared_dir") if "prepared_dir" in data else resolve(data, "manifest").parent
+    codec_cache_raw = data.get("codec_cache_dir")
+    if codec_cache_raw is not None and (not isinstance(codec_cache_raw, str) or not codec_cache_raw.strip()):
+        raise ValueError("data.codec_cache_dir must be null or a non-empty path")
+    codec_cache_dir = resolve(data, "codec_cache_dir") if codec_cache_raw is not None else None
     qlora = bool(lora.get("qlora", False)) if isinstance(lora, dict) else False
     quant_type = str(lora.get("quant_type", "nf4")).lower() if isinstance(lora, dict) else "nf4"
     if quant_type not in {"nf4", "fp4"}:
@@ -202,6 +224,9 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     duration_sec = float(raw.get("duration_sec", data.get("duration_sec", 100.0)))
     if duration_sec <= 0:
         raise ValueError("duration_sec must be positive")
+    free_running_eval_window_seconds = float(raw.get("free_running_eval_window_seconds", 30.0))
+    if free_running_eval_window_seconds <= 0:
+        raise ValueError("free_running_eval_window_seconds must be positive")
     first_codebook_weight_multiplier = float(raw.get("first_codebook_weight_multiplier", 1.0))
     text_padding_weight = float(raw.get("text_padding_weight", 0.3))
     if first_codebook_weight_multiplier < 0:
@@ -218,6 +243,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     # Training injects LoRA with alpha = rank * scaling. Keep the recorded
     # alpha consistent with the value that is actually used at runtime.
     lora_alpha = round(lora_rank * lora_scaling)
+    generation_settings = generation_from_config(raw)
 
     return Config(
         path=path,
@@ -225,6 +251,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         personaplex_source=resolve(model, "source"),
         prepared_dir=prepared_dir,
         output_dir=resolve(train if isinstance(train, dict) else {}, "output_dir", "../runs/overfit_10"),
+        codec_cache_dir=codec_cache_dir,
         seed=int(raw.get("seed", 42)),
         window_seconds=float(data.get("window_seconds", 30.0)),
         shuffle=bool(data.get("shuffle", False)),
@@ -261,6 +288,12 @@ gradient_checkpointing=bool(raw.get("gradient_checkpointing", train.get("gradien
         mixed_precision=str(train.get("mixed_precision", "bf16")),
         duration_sec=duration_sec,
         sample_number=sample_number,
+        profile_steps=bool(raw.get("profile_steps", False)),
+        generation_settings=generation_settings,
+        free_running_eval_every_steps=max(0, int(raw.get("free_running_eval_every_steps", 0))),
+        free_running_eval_samples=max(1, int(raw.get("free_running_eval_samples", 1))),
+        free_running_eval_window_seconds=free_running_eval_window_seconds,
+        validation_max_samples=max(1, int(raw.get("validation_max_samples", 32))),
         lora_enabled=bool(lora.get("enable", True)),
         lora_scaling=lora_scaling,
         ft_embed=bool(lora.get("ft_embed", False)),
@@ -271,4 +304,5 @@ gradient_checkpointing=bool(raw.get("gradient_checkpointing", train.get("gradien
         log_freq=max(1, int(raw.get("log_freq", 1))),
         no_eval=bool(raw.get("no_eval", True)),
         ckpt_freq=max(1, int(raw.get("ckpt_freq", train.get("save_every_steps", 50)))),
+        eval_on_train_samples=bool(train.get("eval_on_train_samples", False)) if isinstance(train, dict) else False,
     )

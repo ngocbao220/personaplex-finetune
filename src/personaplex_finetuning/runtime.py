@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
+import json
+import os
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,36 +79,110 @@ class MimiCodec:
 
     codebooks = 8
 
-    def __init__(self, mimi, sample_rate: int, frame_rate: float, device: str, lm_helpers, cache_dir: Path | None = None) -> None:
+    def __init__(
+        self, mimi, sample_rate: int, frame_rate: float, device: str, lm_helpers,
+        cache_dir: Path | None = None, cache_namespace: str = "default",
+    ) -> None:
         self.mimi = mimi
         self.sample_rate = sample_rate
         self.frame_rate = frame_rate
         self.device = device
         self._helpers = lm_helpers
         self._voice_cache: dict[str, tuple[tuple[int, ...], ...]] = {}
-        self._sine_cache: dict[int, tuple[tuple[int, ...], ...]] = {}
-        self._silence_cache: dict[int, tuple[tuple[int, ...], ...]] = {}
         self._cache_dir = cache_dir  # Optional persistent disk cache for conversation encoding
+        self._cache_namespace = cache_namespace
 
     def encode_conversation_stereo(self, path: Path, agent_channel: int, user_channel: int, start_sec: float, end_sec: float):
+        return self.encode_conversation_stereo_batch([
+            (path, agent_channel, user_channel, start_sec, end_sec),
+        ])[0]
+
+    def encode_conversation_stereo_batch(self, windows, raw_audio=None):
+        """Encode each batch's stereo windows in one Mimi call, preserving per-window padding.
+
+        ``windows`` contains ``(path, agent_channel, user_channel, start_sec, end_sec)``
+        tuples. Each conversation contributes two independent Mimi batch items, in agent/user
+        order. This replaces repeated tiny codec launches when the LM microbatch is greater
+        than one without changing the audio window or channel semantics.
+        """
         import numpy as np
         import sphn
         import torch
-        duration_sec = end_sec - start_sec
-        # Windowed seek + direct resample in C++ (avoids decoding entire 30m file)
-        audio, _ = sphn.read(str(path), start_sec=start_sec, duration_sec=duration_sec, sample_rate=self.sample_rate)
-        audio = _pad_audio_window(audio, self.sample_rate, duration_sec)
-        if agent_channel not in (0, 1) or user_channel not in (0, 1):
-            raise ValueError(f"invalid channels {agent_channel}, {user_channel} for {path}")
-        agent_audio = audio[agent_channel : agent_channel + 1]
-        user_audio = audio[user_channel : user_channel + 1]
-        # Batch encode both channels in a single Mimi GPU forward pass
-        batch = torch.as_tensor(np.stack([agent_audio, user_audio], axis=0), dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            codes = self.mimi.encode(batch)
-        agent_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[0])
-        user_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[1])
-        return agent_codes, user_codes
+
+        if not windows:
+            raise ValueError("cannot encode an empty conversation batch")
+        results = [None] * len(windows)
+        pending = []
+        cache_info = [None] * len(windows)
+        for index, (path, agent_channel, user_channel, start_sec, end_sec) in enumerate(windows):
+            if agent_channel not in (0, 1) or user_channel not in (0, 1) or agent_channel == user_channel:
+                raise ValueError(f"invalid agent/user channels {agent_channel}, {user_channel} for {path}")
+            duration_sec = end_sec - start_sec
+            if duration_sec <= 0:
+                raise ValueError(f"invalid conversation window {start_sec}:{end_sec} for {path}")
+            info = self._conversation_cache_info(path, agent_channel, user_channel, start_sec, end_sec)
+            cache_info[index] = info
+            if info is not None and info[1].is_file():
+                identity, cache_file = info
+                data = torch.load(str(cache_file), map_location="cpu", weights_only=True)
+                if data.get("identity") != identity:
+                    raise ValueError(f"Mimi cache identity mismatch: {cache_file}")
+                agent, user = data.get("agent"), data.get("user")
+                self._validate_cached_codes(agent, user, cache_file)
+                results[index] = (agent, user)
+            else:
+                pending.append((index, Path(path), agent_channel, user_channel, start_sec, end_sec))
+
+        if pending:
+            audio_items = []
+            for result_index, path, agent_channel, user_channel, start_sec, end_sec in pending:
+                duration_sec = end_sec - start_sec
+                if raw_audio is None:
+                    # Windowed seek + resample avoids decoding an entire long conversation.
+                    audio, _ = sphn.read(
+                        str(path), start_sec=start_sec, duration_sec=duration_sec,
+                        sample_rate=self.sample_rate,
+                    )
+                else:
+                    valid_samples = int(raw_audio["valid_samples"][result_index])
+                    audio = raw_audio["waveforms"][result_index, :, :valid_samples].numpy()
+                if audio.ndim == 2 and audio.shape[0] != 2 and audio.shape[1] == 2:
+                    audio = audio.T
+                audio = _pad_audio_window(audio, self.sample_rate, duration_sec)
+                if audio.ndim != 2 or audio.shape[0] != 2:
+                    raise ValueError(f"conversation audio must decode as [2,T], got {audio.shape}: {path}")
+                audio_items.append(audio[[agent_channel, user_channel]])
+            lengths = {audio.shape[-1] for audio in audio_items}
+            if len(lengths) != 1:
+                raise ValueError("batched Mimi windows must have one fixed duration")
+            # [B, speaker, T] -> [B*speaker, mono, T], matching the former [2,1,T] call.
+            host_batch = torch.from_numpy(
+                np.stack(audio_items, axis=0).reshape(-1, 1, audio_items[0].shape[-1])
+            )
+            use_pinned_transfer = (
+                str(self.device).startswith("cuda")
+                and raw_audio is not None
+                and raw_audio["waveforms"].is_pinned()
+            )
+            if use_pinned_transfer and not host_batch.is_pinned():
+                host_batch = host_batch.pin_memory()
+            batch = host_batch.to(
+                self.device, dtype=torch.float32, non_blocking=use_pinned_transfer,
+            )
+            with torch.no_grad():
+                encoded = self.mimi.encode(batch).detach().cpu().tolist()
+            for pending_index, (result_index, *_rest) in enumerate(pending):
+                agent_codes = tuple(tuple(int(token) for token in stream) for stream in encoded[pending_index * 2])
+                user_codes = tuple(tuple(int(token) for token in stream) for stream in encoded[pending_index * 2 + 1])
+                self._validate_cached_codes(agent_codes, user_codes, Path("<Mimi batch>"))
+                results[result_index] = (agent_codes, user_codes)
+                info = cache_info[result_index]
+                if info is not None:
+                    self._write_conversation_cache(info[0], info[1], agent_codes, user_codes)
+
+        if any(result is None for result in results):
+            raise RuntimeError("Mimi batch encoding did not produce codes for every conversation")
+        return results
 
     def encode_stereo_waveform(self, waveform, agent_channel: int, user_channel: int):
         """Encode one unpadded [2, T] waveform, preserving Mimi's true end context."""
@@ -128,20 +206,50 @@ class MimiCodec:
         On subsequent calls, loads from the sidecar – no GPU work needed.
         Falls back to live encoding if cache_dir is not set.
         """
+        return self.encode_conversation_stereo_batch([
+            (path, agent_channel, user_channel, start_sec, end_sec),
+        ])[0]
+
+    def _conversation_cache_info(self, path, agent_channel, user_channel, start_sec, end_sec):
         if self._cache_dir is None:
-            return self.encode_conversation_stereo(path, agent_channel, user_channel, start_sec, end_sec)
+            return None
+        path = Path(path).expanduser().resolve()
+        stat = path.stat()
+        identity = json.dumps({
+            "format_version": 1,
+            "source_path": str(path),
+            "source_size": stat.st_size,
+            "source_mtime_ns": stat.st_mtime_ns,
+            "agent_channel": agent_channel,
+            "user_channel": user_channel,
+            "start_sec": start_sec,
+            "end_sec": end_sec,
+            "sample_rate": self.sample_rate,
+            "mimi_namespace": self._cache_namespace,
+        }, sort_keys=True, separators=(",", ":"))
+        key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return identity, self._cache_dir / (key + ".pt")
 
+    def _write_conversation_cache(self, identity, cache_file, agent_codes, user_codes):
         import torch
-        key = f"{path.name}_ch{agent_channel}{user_channel}_{start_sec:.3f}_{end_sec:.3f}"
-        cache_file = self._cache_dir / (key + ".pt")
-        if cache_file.is_file():
-            data = torch.load(str(cache_file), map_location="cpu", weights_only=True)
-            return data["agent"], data["user"]
 
-        agent_codes, user_codes = self.encode_conversation_stereo(path, agent_channel, user_channel, start_sec, end_sec)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({"agent": agent_codes, "user": user_codes}, str(cache_file))
-        return agent_codes, user_codes
+        temporary = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            torch.save({"identity": identity, "agent": agent_codes, "user": user_codes}, str(temporary))
+            os.replace(temporary, cache_file)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _validate_cached_codes(agent, user, path: Path) -> None:
+        for label, codes in (("agent", agent), ("user", user)):
+            if not isinstance(codes, (tuple, list)) or len(codes) != 8:
+                raise ValueError(f"invalid {label} codebooks in Mimi cache: {path}")
+            if not codes or len({len(stream) for stream in codes}) != 1:
+                raise ValueError(f"inconsistent {label} code lengths in Mimi cache: {path}")
+        if len(agent[0]) == 0 or len(agent[0]) != len(user[0]):
+            raise ValueError(f"agent/user Mimi frame counts differ in cache: {path}")
 
     def encode_conversation(self, path: Path, channel: int, start_sec: float, end_sec: float):
         import sphn
@@ -167,23 +275,20 @@ class MimiCodec:
         return codes
 
     def sine(self, frames: int):
-        if frames in self._sine_cache:
-            return self._sine_cache[frames]
-        import numpy as np
-        import torch
-        duration = frames / self.frame_rate
-        codes = self._encode(self._helpers.create_sinewave(duration, self.sample_rate)[None, :], torch)
-        self._sine_cache[frames] = codes
-        return codes
+        """Repeat PersonaPlex's native sine-conditioning frame without Mimi re-encoding."""
+        return self._repeat_native_prompt_frame("SINE_TOKENS", frames)
 
     def silence(self, frames: int):
-        if frames in self._silence_cache:
-            return self._silence_cache[frames]
-        import numpy as np
-        import torch
-        codes = self._encode(np.zeros((1, int(frames * self.sample_rate / self.frame_rate)), dtype=np.float32), torch)
-        self._silence_cache[frames] = codes
-        return codes
+        """Repeat PersonaPlex's native silence-conditioning frame without Mimi re-encoding."""
+        return self._repeat_native_prompt_frame("SILENCE_TOKENS", frames)
+
+    def _repeat_native_prompt_frame(self, name: str, frames: int):
+        if frames < 0:
+            raise ValueError("prompt frame count must be non-negative")
+        tokens = getattr(self._helpers, name, None)
+        if tokens is None or len(tokens) != self.codebooks:
+            raise RuntimeError(f"PersonaPlex LM does not expose a valid {name} frame")
+        return tuple((int(token),) * frames for token in tokens)
 
     def _encode(self, audio, torch):
         with torch.no_grad():
@@ -210,6 +315,7 @@ def load_runtime(
     *,
     model_device: str | None = None,
     load_model_weights: bool = True,
+    codec_cache_dir: Path | None = None,
 ) -> PersonaPlexRuntime:
     """Load from explicit local assets only. No Hugging Face function is imported."""
     resolved = paths.validate()
@@ -229,6 +335,16 @@ def load_runtime(
     mimi = loaders.get_mimi(resolved.mimi_weight, device=device)
     mimi.eval()
     mimi.requires_grad_(False)
+    mimi_stat = resolved.mimi_weight.stat()
+    mimi_cache_identity = json.dumps(
+        {
+            "path": str(resolved.mimi_weight),
+            "size": mimi_stat.st_size,
+            "mtime_ns": mimi_stat.st_mtime_ns,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     lm_dtype = torch.bfloat16
     dev_type = getattr(device, "type", str(device))
     if dev_type == "mps":
@@ -259,7 +375,11 @@ def load_runtime(
         raise RuntimeError("loaded checkpoint is not the expected 17-stream PersonaPlex model")
     return PersonaPlexRuntime(
         model=model,
-        codec=MimiCodec(mimi, mimi.sample_rate, mimi.frame_rate, device, lm_helpers),
+        codec=MimiCodec(
+            mimi, mimi.sample_rate, mimi.frame_rate, device, lm_helpers,
+            cache_dir=codec_cache_dir,
+            cache_namespace=mimi_cache_identity,
+        ),
         tokenizer=SentencePieceTokenizer(resolved.tokenizer),
         initial_tokens=initial,
         zero_token=int(model.zero_token_id),

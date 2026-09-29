@@ -50,8 +50,17 @@ def main() -> int:
     )
     parser.add_argument("--index", type=int, default=None, help="Sample index in dataset to evaluate.")
     parser.add_argument(
+        "--split", choices=("train", "validation", "test"), default="train",
+        help="Conversation split to sample from; validation reproduces the seeded training split when no val.jsonl exists.",
+    )
+    parser.add_argument("--sample-id", default=None, help="Select a sample by its manifest sample_id.")
+    parser.add_argument(
         "--start", type=float, default=None,
         help="Start time in seconds for one exact data.window_seconds inference window.",
+    )
+    parser.add_argument(
+        "--window-seconds", type=float, default=None,
+        help="Override data.window_seconds for this inference run.",
     )
     parser.add_argument(
         "--input-path",
@@ -95,13 +104,40 @@ def main() -> int:
     if input_file is None and hasattr(inf_sec, "get") and inf_sec.get("input_file"):
         input_file = Path(inf_sec.get("input_file"))
 
-    sample = PreparedDataset(config.manifest, config.window_seconds).load()[sample_index]
-    sample = select_inference_window(sample, start_sec, config.window_seconds)
+    window_seconds = config.window_seconds if args.window_seconds is None else args.window_seconds
+    if window_seconds <= 0:
+        parser.error("--window-seconds must be positive")
+    if args.split == "train":
+        samples = PreparedDataset(config.manifest, window_seconds).load()
+    elif args.split == "validation":
+        if config.val_manifest is not None:
+            samples = PreparedDataset(config.val_manifest, window_seconds).load()
+        else:
+            _, samples = PreparedDataset(config.manifest, window_seconds).split(
+                val_ratio=config.val_ratio, seed=config.seed,
+            )
+    elif config.test_manifest is not None:
+        samples = PreparedDataset(config.test_manifest, window_seconds).load()
+    else:
+        raise ValueError("test split requested, but data.test_manifest is not configured")
+
+    if args.sample_id is not None:
+        matching = [sample for sample in samples if sample.sample_id == args.sample_id]
+        if not matching:
+            raise ValueError(f"sample_id {args.sample_id!r} is not present in the {args.split} split")
+        sample = matching[0]
+    else:
+        if not 0 <= sample_index < len(samples):
+            raise IndexError(f"sample index {sample_index} is outside the {args.split} split (size={len(samples)})")
+        sample = samples[sample_index]
+    sample = select_inference_window(sample, start_sec, window_seconds)
     print(
         f"Inference sample {sample.sample_id}: "
         f"window {sample.window_start_sec:.3f}-{sample.window_end_sec:.3f} seconds"
     )
-    smoke(
+    print(f"Voice prompt: {getattr(sample, 'voice_prompt_wav', '(unknown)')}")
+    print(f"Text prompt: {getattr(sample, 'text_prompt', '(unknown)')}")
+    quality_status = smoke(
         config=config,
         sample=sample,
         adapter=Path(adapter_path).resolve(),
@@ -109,6 +145,9 @@ def main() -> int:
         input_file=input_file.resolve() if input_file is not None else None,
         generation=generation,
     )
+    if quality_status in {"empty_transcript", "does_not_improve_over_base"}:
+        print(f"Inference smoke failed quality gate: {quality_status}")
+        return 2
     return 0
 
 

@@ -52,8 +52,8 @@ def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0, prefixes: 
             self.base = base
             self.scale = alpha / rank
             self.dropout = torch.nn.Dropout(dropout)
-            # Keep trainable adapter weights and Adam moments in FP32; FSDP's
-            # mixed-precision policy casts them for BF16 forward/backward.
+            # Keep adapter weights and optimizer state in FP32; forward
+            # autocast handles BF16 matmuls while updates retain FP32 precision.
             adapter_dtype = torch.float32
             self.lora_a = torch.nn.Linear(base.in_features, rank, bias=False, device=base.weight.device, dtype=adapter_dtype)
             self.lora_b = torch.nn.Linear(rank, base.out_features, bias=False, device=base.weight.device, dtype=adapter_dtype)

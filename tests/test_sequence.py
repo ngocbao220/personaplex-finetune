@@ -50,6 +50,29 @@ def sample() -> PreparedSample:
 
 
 class SequenceBuilderTest(unittest.TestCase):
+    def test_prefers_cached_stereo_mimi_codes_when_available(self) -> None:
+        class CachedCodec(FakeCodec):
+            def __init__(self):
+                self.cached_calls = 0
+
+            def encode_conversation_stereo_cached(self, *_args):
+                self.cached_calls += 1
+                codes = tuple(tuple(100 * cb + frame for frame in range(4)) for cb in range(8))
+                return codes, codes
+
+            def encode_conversation_stereo(self, *_args):
+                raise AssertionError("cache-backed training should not encode Mimi again")
+
+        codec = CachedCodec()
+        builder = PersonaPlexTrainingExampleBuilder(
+            codec=codec, tokenizer=FakeTokenizer(), initial_tokens=[1] * 17, zero_token=-1
+        )
+
+        example = builder.build(sample())
+
+        self.assertEqual(codec.cached_calls, 1)
+        self.assertEqual(example.dialogue_frames, 4)
+
     def test_final_chunk_padding_is_masked_while_real_silence_remains_valid(self) -> None:
         codec = FakeCodec()
         codec.frame_rate = 0.5
@@ -64,6 +87,24 @@ class SequenceBuilderTest(unittest.TestCase):
         example = builder.build(short_conversation)
 
         self.assertEqual(example.dialogue_frames, 4)
+        self.assertTrue(example.loss_mask[0][example.prompt_frames])
+        self.assertFalse(example.loss_mask[0][example.prompt_frames + 1])
+        self.assertTrue(example.loss_mask[1][example.prompt_frames])
+        self.assertFalse(example.loss_mask[1][example.prompt_frames + 1])
+
+    def test_fractional_final_mimi_frame_is_valid_instead_of_rounded_away(self) -> None:
+        codec = FakeCodec()
+        codec.frame_rate = 0.5
+        short_conversation = replace(
+            sample(), words=(), audio=AudioInfo(24000, 2, 1.0),
+            window_start_sec=0.0, window_end_sec=1.0,
+        )
+        builder = PersonaPlexTrainingExampleBuilder(
+            codec=codec, tokenizer=FakeTokenizer(), initial_tokens=[1] * 17, zero_token=-1
+        )
+
+        example = builder.build(short_conversation)
+
         self.assertTrue(example.loss_mask[0][example.prompt_frames])
         self.assertFalse(example.loss_mask[0][example.prompt_frames + 1])
         self.assertTrue(example.loss_mask[1][example.prompt_frames])
@@ -84,6 +125,16 @@ class SequenceBuilderTest(unittest.TestCase):
         self.assertTrue(all(example.loss_mask[stream][16] for stream in range(1, 9)))
         self.assertTrue(all(not example.loss_mask[stream][16] for stream in range(9, 17)))
         self.assertEqual(example.loss_mask[0][16], True)
+
+    def test_hybrid_prompt_uses_the_configured_native_inference_pause_length(self) -> None:
+        builder = PersonaPlexTrainingExampleBuilder(
+            codec=FakeCodec(), tokenizer=FakeTokenizer(), initial_tokens=[1] * 17,
+            zero_token=-1, pause_frames=2,
+        )
+
+        example = builder.build(sample())
+
+        self.assertEqual(example.prompt_frames, 8)  # voice=2, two 2-frame pauses, prompt text=2
 
     def test_delay_keeps_masks_and_stream_lengths_aligned(self) -> None:
         builder = PersonaPlexTrainingExampleBuilder(

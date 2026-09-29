@@ -58,6 +58,86 @@ class ConfigTest(unittest.TestCase):
 
             self.assertIsNone(load_config(config).sample_number)
 
+    def test_optional_codec_cache_path_resolves_from_the_data_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.json"
+            config.write_text(
+                '{"model":{"root":"/models/base","source":"/source"},'
+                '"data":{"prepared_dir":"/data","codec_cache_dir":"/nvme/mimi-codes"}}'
+            )
+
+            self.assertEqual(load_config(config).codec_cache_dir, Path("/nvme/mimi-codes"))
+
+    def test_profile_steps_is_an_explicit_training_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.yaml"
+            config.write_text(
+                "model:\n  root: /models/base\n  source: /source\n"
+                "data:\n  prepared_dir: /data\n"
+                "train:\n  output_dir: /runs\nprofile_steps: true\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(load_config(config).profile_steps)
+
+    def test_hydra_moshi_overrides_target_the_effective_top_level_parameters(self) -> None:
+        config = Path(__file__).resolve().parents[1] / "configs" / "moshi_code_style.yaml"
+
+        loaded = load_config(
+            config,
+            overrides=[
+                "model=server", "max_steps=20", "learning_rate=1e-5", "profile_steps=true",
+                "batch_size=4", "train.gradient_accumulation_steps=2", "lora.rank=64",
+                "no_eval=false", "train.eval_every_steps=100",
+                "free_running_eval_every_steps=200", "validation_max_samples=8",
+                "generation.audio_silence_frame_cnt=4",
+            ],
+        )
+
+        self.assertEqual(loaded.max_steps, 20)
+        self.assertEqual(loaded.learning_rate, 1e-5)
+        self.assertTrue(loaded.profile_steps)
+        self.assertEqual(loaded.per_device_batch_size, 4)
+        self.assertEqual(loaded.gradient_accumulation_steps, 2)
+        self.assertEqual(loaded.lora_rank, 64)
+        self.assertEqual(loaded.free_running_eval_every_steps, 200)
+        self.assertEqual(loaded.validation_max_samples, 8)
+        self.assertEqual(loaded.free_running_eval_samples, 3)
+        self.assertEqual(loaded.generation_settings.audio_silence_frame_cnt, 4)
+
+    def test_default_training_config_runs_heldout_generation_validation(self) -> None:
+        config = Path(__file__).resolve().parents[1] / "configs" / "moshi_code_style.yaml"
+        loaded = load_config(config)
+
+        self.assertFalse(loaded.no_eval)
+        self.assertEqual(loaded.eval_every_steps, 500)
+        self.assertEqual(loaded.free_running_eval_every_steps, 500)
+        self.assertEqual(loaded.validation_max_samples, 32)
+        self.assertEqual(loaded.num_workers, 4)
+        self.assertEqual(loaded.prefetch_factor, 2)
+        self.assertTrue(loaded.pin_memory)
+        self.assertTrue(loaded.persistent_workers)
+        inference_config = load_config(Path(__file__).resolve().parents[1] / "configs" / "infer.yaml")
+        self.assertEqual(loaded.generation_settings, inference_config.generation_settings)
+
+    def test_ten_sample_overfit_is_deterministic_and_monitors_generation_on_train_set(self) -> None:
+        config = Path(__file__).resolve().parents[1] / "configs" / "moshi_overfit_10.yaml"
+        loaded = load_config(config)
+
+        self.assertEqual(loaded.sample_number, 10)
+        self.assertFalse(loaded.shuffle)
+        self.assertFalse(loaded.no_eval)
+        self.assertTrue(loaded.eval_on_train_samples)
+        self.assertEqual(loaded.free_running_eval_every_steps, 100)
+
+    def test_ten_conversation_overfit_config_disables_dataset_shuffling(self) -> None:
+        config = Path(__file__).resolve().parents[1] / "configs" / "moshi_overfit_10.yaml"
+
+        loaded = load_config(config)
+
+        self.assertEqual(loaded.sample_number, 10)
+        self.assertFalse(loaded.shuffle)
+
     def test_full_standalone_config_loads_every_feature_setting(self) -> None:
         root = Path(__file__).resolve().parents[1]
         loaded = load_config(root / "configs" / "config.full.yaml")

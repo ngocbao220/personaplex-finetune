@@ -19,11 +19,12 @@ from tools import inference_smoke
 from tools.inference_smoke import select_inference_window
 
 
-def _write_lora_weights(path: Path, rank: int) -> None:
-    save_file({
-        "transformer.layers.0.linear.lora_a.weight": torch.zeros((rank, 3)),
-        "transformer.layers.0.linear.lora_b.weight": torch.zeros((2, rank)),
-    }, str(path))
+def _write_lora_weights(path: Path, rank: int, prefixes=("transformer",)) -> None:
+    weights = {}
+    for prefix in prefixes:
+        weights[f"{prefix}.layers.0.linear.lora_a.weight"] = torch.zeros((rank, 3))
+        weights[f"{prefix}.layers.0.linear.lora_b.weight"] = torch.zeros((2, rank))
+    save_file(weights, str(path))
 
 
 class _UserTokens:
@@ -131,7 +132,7 @@ class InferenceStreamingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              patch.dict(sys.modules, {"sphn": fake_sphn}), \
              patch.object(torch, "manual_seed", side_effect=seeded.append), \
-             patch.object(inference, "load_runtime", return_value=runtime), \
+             patch.object(inference, "load_runtime", return_value=runtime) as load_runtime, \
              patch.object(inference, "inject_lora") as inject_lora, \
              patch.object(inference, "load_adapter") as load_adapter, \
              patch.object(importlib, "import_module", return_value=fake_lm):
@@ -142,6 +143,7 @@ class InferenceStreamingTest(unittest.TestCase):
             yield SimpleNamespace(
                 mimi=mimi, config=config, seeded=seeded, generator=_Generator.instances[0],
                 model=runtime.model, inject_lora=inject_lora, load_adapter=load_adapter,
+                load_runtime=load_runtime,
             )
 
     def test_generate_keeps_mimi_decoder_streaming_across_generated_frames(self):
@@ -149,6 +151,44 @@ class InferenceStreamingTest(unittest.TestCase):
             self.assertEqual(fakes.mimi.streaming_calls, [1])
             self.assertEqual(fakes.generator.streaming_calls, [1])
             self.assertEqual(fakes.mimi.decode_calls, 2)
+
+    def test_free_running_validation_uses_native_prompts_and_restores_training_mode(self):
+        mimi = _Mimi()
+
+        class Model:
+            training = True
+
+            def eval(self):
+                self.training = False
+
+            def train(self, enabled=True):
+                self.training = enabled
+
+        model = Model()
+        runtime = SimpleNamespace(
+            model=model,
+            codec=SimpleNamespace(
+                mimi=mimi, device="cpu", sample_rate=24000, frame_rate=12.5,
+                encode_conversation=lambda *_args: ((1, 2),) * 8,
+            ),
+            tokenizer=SimpleNamespace(
+                padding_id=3, encode=lambda _text: [4],
+                _processor=SimpleNamespace(id_to_piece=lambda token: f"{token},"),
+            ),
+        )
+        sample = SimpleNamespace(
+            voice_prompt_wav=Path("voice.wav"), text_prompt="Việt", conversation_wav=Path("conversation.wav"),
+            user_channel=1, window_start_sec=0.0, window_end_sec=1.0,
+            audio=SimpleNamespace(duration_sec=1.0),
+        )
+        _Generator.instances = []
+        with patch.object(importlib, "import_module", return_value=SimpleNamespace(LMGen=_Generator)):
+            text = inference.generate_text_with_runtime(runtime, sample, seed=7)
+
+        self.assertEqual(text, "7,7,")
+        self.assertTrue(model.training)
+        self.assertEqual(mimi.streaming_calls, [1])
+        self.assertEqual(_Generator.instances[0].streaming_calls, [1])
 
     def test_generate_disables_moshi_compile_before_loading_runtime(self):
         with patch.dict(os.environ):
@@ -167,8 +207,46 @@ class InferenceStreamingTest(unittest.TestCase):
             )
 
             with self._generate_with_fakes(adapter=checkpoint) as fakes:
-                fakes.inject_lora.assert_called_once_with(fakes.model, 64, 128)
+                fakes.inject_lora.assert_called_once_with(
+                    fakes.model, 64, 128, prefixes=("transformer",),
+                )
                 fakes.load_adapter.assert_called_once_with(fakes.model, adapter_file)
+
+    def test_generate_uses_the_base_model_path_recorded_with_the_adapter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trained_model_root = Path(directory) / "trained-personaplex"
+            checkpoint = Path(directory) / "checkpoint_000010"
+            checkpoint.mkdir()
+            adapter_file = checkpoint / "lora.safetensors"
+            _write_lora_weights(adapter_file, rank=8)
+            (checkpoint / "adapter.json").write_text(
+                json.dumps({"rank": 8, "alpha": 16, "model_root": str(trained_model_root)}),
+                encoding="utf-8",
+            )
+
+            with self._generate_with_fakes(adapter=checkpoint) as fakes:
+                paths = fakes.load_runtime.call_args.args[0]
+
+        self.assertEqual(paths.model_root, trained_model_root.resolve())
+
+    def test_generate_injects_all_module_prefixes_found_in_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "checkpoint_000010"
+            checkpoint.mkdir()
+            adapter_file = checkpoint / "lora.safetensors"
+            prefixes = ("transformer", "depformer")
+            _write_lora_weights(adapter_file, rank=8, prefixes=prefixes)
+            (checkpoint / "adapter.json").write_text(
+                json.dumps({"rank": 8, "alpha": 16}), encoding="utf-8",
+            )
+
+            with self._generate_with_fakes(adapter=checkpoint) as fakes:
+                resolved = inference.resolve_adapter_checkpoint(checkpoint)
+
+        self.assertEqual(resolved[4], prefixes)
+        self.assertEqual(
+            fakes.inject_lora.call_args.kwargs["prefixes"], prefixes,
+        )
 
     def test_resolve_adapter_requires_valid_checkpoint_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -181,7 +259,7 @@ class InferenceStreamingTest(unittest.TestCase):
 
             self.assertEqual(
                 inference.resolve_adapter_checkpoint(checkpoint),
-                (adapter_file, 8, 16),
+                (adapter_file, 8, 16, None, ("transformer",)),
             )
             (checkpoint / "adapter.json").write_text(
                 json.dumps({"rank": 8}), encoding="utf-8",
@@ -205,14 +283,14 @@ class InferenceStreamingTest(unittest.TestCase):
 
             self.assertEqual(
                 inference.resolve_adapter_checkpoint(checkpoint),
-                (adapter_file, 128, 256),
+                (adapter_file, 128, 256, None, ("transformer",)),
             )
             (checkpoint / "adapter.json").write_text(
                 json.dumps({"rank": 128, "alpha": 32, "scaling": 2.0}), encoding="utf-8",
             )
             self.assertEqual(
                 inference.resolve_adapter_checkpoint(checkpoint),
-                (adapter_file, 128, 256),
+                (adapter_file, 128, 256, None, ("transformer",)),
             )
 
     def test_resolve_adapter_uses_tensor_rank_when_metadata_is_stale(self):
@@ -227,7 +305,7 @@ class InferenceStreamingTest(unittest.TestCase):
             with self.assertLogs(inference.logger, level="WARNING") as logged:
                 resolved = inference.resolve_adapter_checkpoint(checkpoint)
 
-        self.assertEqual(resolved, (adapter_file, 128, 256))
+        self.assertEqual(resolved, (adapter_file, 128, 256, None, ("transformer",)))
         self.assertIn("using tensor rank", logged.output[0])
 
     def test_generate_without_settings_keeps_the_previous_hard_coded_values(self):
@@ -301,16 +379,23 @@ class OriginalDialogueExportTest(unittest.TestCase):
             user_channel=1,
             window_start_sec=2 / 24000,
             window_end_sec=5 / 24000,
-            words=(),
+            words=(
+                SimpleNamespace(speaker="agent", word="Xin", start=0.0, end=0.1),
+                SimpleNamespace(speaker="agent", word="chào", start=3 / 24000, end=4 / 24000),
+                SimpleNamespace(speaker="user", word="bạn", start=4 / 24000, end=5 / 24000),
+            ),
             text_prompt="Prompt",
             voice_prompt_wav=Path("missing.wav"),
         )
         with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, {"sphn": fake_sphn}):
-            inference._export_context(sample, Path(directory))
+            output_dir = Path(directory)
+            inference._export_context(sample, output_dir)
+            reference_text = (output_dir / "agent_reference.txt").read_text(encoding="utf-8")
 
         self.assertIn("dialogue_original.wav", written)
         np.testing.assert_array_equal(written["dialogue_original.wav"][0], original[:, 2:5])
         self.assertEqual(written["dialogue_original.wav"][1], 24000)
+        self.assertEqual(reference_text, "chào")
 
 
 class InferenceWindowSelectionTest(unittest.TestCase):
@@ -361,6 +446,15 @@ class InferenceCliTest(unittest.TestCase):
 
 
 class GenerationSettingsTest(unittest.TestCase):
+    def test_text_error_metrics_normalize_vietnamese_unicode_and_punctuation(self):
+        metrics = inference.text_error_metrics("Xin chào, Việt Nam!", "Xin cha\u0300o Việt Nam")
+
+        self.assertEqual(metrics["wer"], 0.0)
+        self.assertEqual(metrics["cer"], 0.0)
+
+    def test_text_error_metrics_are_unavailable_without_reference_targets(self):
+        self.assertIsNone(inference.text_error_metrics("  ", "Xin chào"))
+
     def test_defaults_match_the_moshi_lmgen_reference(self):
         self.assertEqual(inference.GenerationSettings().as_dict(), {
             "use_sampling": True, "temp": 0.8, "temp_text": 0.7,
@@ -444,25 +538,74 @@ class SmokeGenerationReportTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
+            checkpoint = output_dir / "checkpoint_000010"
+            checkpoint.mkdir()
+            adapter_file = checkpoint / "lora.safetensors"
+            trained_model_root = output_dir / "trained-personaplex"
+            _write_lora_weights(adapter_file, rank=8)
+            (checkpoint / "adapter.json").write_text(
+                json.dumps({"rank": 8, "alpha": 16, "model_root": str(trained_model_root)}),
+                encoding="utf-8",
+            )
             with patch.object(inference, "_export_context"), \
                  patch.object(inference, "generate") as generate, \
                  patch.dict(sys.modules, {"sphn": fake_sphn}):
-                inference.smoke(config, sample, Path("adapter.safetensors"), output_dir, generation=settings)
+                inference.smoke(config, sample, checkpoint, output_dir, generation=settings)
             report = json.loads((output_dir / "run.json").read_text())
 
         self.assertEqual(report["generation_settings"], settings.as_dict())
         self.assertEqual(report["generation"], settings.label())
         self.assertIn("greedy", report["generation"])
         self.assertEqual(report["seed"], 1234)
+        self.assertEqual(report["text_prompt"], sample.text_prompt)
+        self.assertEqual(report["voice_prompt"], str(sample.voice_prompt_wav))
+        self.assertEqual(report["base_model"], str(trained_model_root.resolve()))
+        self.assertFalse(report["text_metrics_available"])
+        self.assertIsNone(report["finetuned_text_metrics"])
+        self.assertEqual(report["text_quality_status"], "empty_transcript")
+        self.assertIn("finetuned inference produced an empty transcript", report["warnings"])
         # Both the base and the fine-tuned run must use identical settings and seed.
         self.assertEqual(len(generate.call_args_list), 2)
         for call in generate.call_args_list:
             self.assertEqual(call.kwargs["generation"], settings)
             self.assertEqual(call.kwargs["seed"], 1234)
+            self.assertEqual(call.args[0].model_root, trained_model_root.resolve())
+
+    def test_smoke_warns_when_finetuned_text_is_worse_than_base(self):
+        sample = SimpleNamespace(
+            sample_id="vi-reference", voice_prompt_wav=Path("voice.wav"),
+            text_prompt="Hãy trò chuyện bằng tiếng Việt.", conversation_wav=Path("conversation.wav"),
+            user_channel=1, window_start_sec=0.0, window_end_sec=1.0,
+            words=(SimpleNamespace(speaker="agent", word="Xin chào", start=0.1, end=0.5),),
+        )
+        fake_sphn = types.SimpleNamespace(
+            read=lambda _path: (_ for _ in ()).throw(AssertionError("missing audio outputs should not be read"))
+        )
+        config = SimpleNamespace(model_root=Path("model"), seed=42)
+
+        def export_context(_sample, output_dir):
+            (output_dir / "agent_reference.txt").write_text("Xin chào", encoding="utf-8")
+
+        def generate(_config, _sample, output_wav, output_text, adapter, **_kwargs):
+            text = "Xin chào" if adapter is None else "hello there"
+            output_text.write_text(text, encoding="utf-8")
+            output_wav.write_bytes(b"audio")
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            with patch.object(inference, "_export_context", side_effect=export_context), \
+                 patch.object(inference, "generate", side_effect=generate), \
+                 patch.dict(sys.modules, {"sphn": fake_sphn}):
+                inference.smoke(config, sample, Path("adapter.safetensors"), output_dir)
+            report = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(report["text_quality_status"], "does_not_improve_over_base")
+        self.assertFalse(report["finetuned_improves_base_cer"])
+        self.assertTrue(any("CER does not improve over base" in warning for warning in report["warnings"]))
 
 
 class InferenceCliGenerationTest(unittest.TestCase):
-    def _run_cli(self, config_text):
+    def _run_cli(self, config_text, arguments=()):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "infer.yaml"
             config_path.write_text(config_text, encoding="utf-8")
@@ -470,19 +613,19 @@ class InferenceCliGenerationTest(unittest.TestCase):
                 sample_id="sample-0", window_start_sec=0.0, window_end_sec=1.0,
                 audio=SimpleNamespace(duration_sec=1.0),
             )
-            with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path)]), \
+            with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path), *arguments]), \
                  patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
                      manifest="manifest.jsonl", window_seconds=30.0,
                  )), \
                  patch.object(inference_smoke, "PreparedDataset", return_value=SimpleNamespace(
                      load=lambda: [sample],
-                 )), \
+                 )) as dataset_factory, \
                  patch.object(inference_smoke, "smoke", autospec=True) as smoke:
                 status = inference_smoke.main()
-            return status, smoke
+            return status, smoke, dataset_factory
 
     def test_generation_block_from_config_reaches_smoke(self):
-        status, smoke = self._run_cli(
+        status, smoke, _ = self._run_cli(
             "adapter:\n  path: adapter.safetensors\n"
             "generation:\n  use_sampling: false\n  temp: 0.9\n  top_k: 17\n"
             "inference:\n  sample_index: 0\n"
@@ -493,6 +636,51 @@ class InferenceCliGenerationTest(unittest.TestCase):
             smoke.call_args.kwargs["generation"],
             inference.GenerationSettings(use_sampling=False, temp=0.9, top_k=17),
         )
+
+    def test_window_seconds_override_reaches_dataset_and_smoke(self):
+        status, smoke, dataset_factory = self._run_cli(
+            "adapter:\n  path: adapter.safetensors\n",
+            ["--window-seconds", "100"],
+        )
+
+        self.assertEqual(status, 0)
+        dataset_factory.assert_called_once_with("manifest.jsonl", 100.0)
+        self.assertEqual(smoke.call_args.kwargs["sample"].sample_id, "sample-0")
+
+    def test_validation_sample_id_reproduces_the_seeded_heldout_split_and_window(self):
+        class Dataset:
+            def __init__(self):
+                self.split_called = False
+
+            def split(self, val_ratio, seed):
+                self.split_called = (val_ratio, seed)
+                return [], [sample]
+
+        sample = SimpleNamespace(
+            sample_id="heldout-7", window_start_sec=0.0, window_end_sec=30.0,
+            audio=SimpleNamespace(duration_sec=45.0),
+            with_window=lambda start, end: SimpleNamespace(
+                sample_id="heldout-7", window_start_sec=start, window_end_sec=end,
+                audio=SimpleNamespace(duration_sec=45.0),
+            ),
+        )
+        dataset = Dataset()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "infer.yaml"
+            config_path.write_text("adapter:\n  path: adapter.safetensors\n", encoding="utf-8")
+            with patch.object(sys, "argv", [
+                "inference_smoke.py", "--config", str(config_path), "--split", "validation",
+                "--sample-id", "heldout-7", "--start", "5", "--window-seconds", "20",
+            ]), patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
+                manifest="train.jsonl", val_manifest=None, val_ratio=0.1, seed=9,
+                window_seconds=30.0, test_manifest=None,
+            )), patch.object(inference_smoke, "PreparedDataset", return_value=dataset), \
+                 patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+                self.assertEqual(inference_smoke.main(), 0)
+
+        self.assertEqual(dataset.split_called, (0.1, 9))
+        selected = smoke.call_args.kwargs["sample"]
+        self.assertEqual((selected.window_start_sec, selected.window_end_sec), (5.0, 25.0))
 
     def test_invalid_generation_block_fails_before_any_model_is_loaded(self):
         with self.assertRaisesRegex(ValueError, "top_k_text"):

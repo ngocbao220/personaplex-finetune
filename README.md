@@ -252,19 +252,97 @@ python -m personaplex_finetuning.train \
 
 ### 4.2. Moshi-style fixed-duration training
 
-Run the deterministic 10-conversation overfit on one GPU first:
+Run the deterministic 10-conversation overfit on one GPU first. For the full training split, use the hardware profile that is available:
 
 ```bash
-python -m train configs/moshi_overfit_10.yaml
+python -m train configs/moshi_overfit_10.yaml model=server
+# 2 x B200:
+torchrun --nproc-per-node 2 -m train configs/moshi_code_style.yaml model=server
+# or 4 x A100, preserving effective global batch 16:
+torchrun --nproc-per-node 4 -m train configs/moshi_code_style.yaml model=server \
+  batch_size=1 train.gradient_accumulation_steps=4
 ```
 
-After verifying decreasing loss, adapter reload, and inference, run FSDP `FULL_SHARD` on eight GPUs with the full training split:
+`moshi_code_style.yaml` uses `duration_sec=100`, `sample_number=null`, LoRA rank 128 / scaling 2, learning rate `2e-6`, and 2,000 optimizer steps. The commands above start at per-GPU batch 1 and effective global batch 16 for both topologies. Each rank loads a complete copy of the frozen 7B base and receives disjoint duration chunks. Adapter checkpoints are unwrapped before saving and record their base model, rank, and alpha so inference can reload the matching architecture. Resume with the same GPU count, per-device batch, accumulation, and `max_steps`; the saved OneCycleLR schedule is tied to its original step budget and the trainer now rejects a different one. To compare a larger step budget, start a fresh run with that `max_steps` so its schedule spans the full run. Training sets `NO_TORCH_COMPILE=1` by default for stable fixed-shape execution.
+
+To avoid repeating Mimi GPU encoding on every epoch, set `data.codec_cache_dir` to a persistent fast local directory (for example `/local_nvme/personaplex_mimi_cache`). Cache entries are keyed by audio identity, window, channel mapping, sample rate, and the active Mimi checkpoint identity; the default `null` keeps caching disabled. This cache stores only deterministic Mimi codes and does not alter sequence construction or targets.
+
+Use short DDP pilots to choose the per-device batch size from measured peak memory and step time before a long run. Keep the global batch at 16 during the physical-batch comparison:
 
 ```bash
-torchrun --nproc-per-node 8 -m train configs/moshi_code_style.yaml sample_number=null
+# 2 x B200; run each candidate separately, increasing batch only after the prior run fits:
+torchrun --nproc-per-node 2 -m train configs/moshi_code_style.yaml model=server \
+  batch_size=1 train.gradient_accumulation_steps=8 max_steps=20 ckpt_freq=20 profile_steps=true
+torchrun --nproc-per-node 2 -m train configs/moshi_code_style.yaml model=server \
+  batch_size=2 train.gradient_accumulation_steps=4 max_steps=20 ckpt_freq=20 profile_steps=true
+torchrun --nproc-per-node 2 -m train configs/moshi_code_style.yaml model=server \
+  batch_size=4 train.gradient_accumulation_steps=2 max_steps=20 ckpt_freq=20 profile_steps=true
+
+# 4 x A100:
+torchrun --nproc-per-node 4 -m train configs/moshi_code_style.yaml model=server \
+  batch_size=1 train.gradient_accumulation_steps=4 max_steps=20 ckpt_freq=20 profile_steps=true
+torchrun --nproc-per-node 4 -m train configs/moshi_code_style.yaml model=server \
+  batch_size=2 train.gradient_accumulation_steps=2 max_steps=20 ckpt_freq=20 profile_steps=true
+torchrun --nproc-per-node 4 -m train configs/moshi_code_style.yaml model=server \
+  batch_size=4 train.gradient_accumulation_steps=1 max_steps=20 ckpt_freq=20 profile_steps=true
 ```
 
-`configs/moshi_code_style.yaml` retains the requested `duration_sec=100`, `sample_number=10`, `batch_size=16`, and `max_steps=2000`. This batch size cannot form batches from only ten chunks across eight ranks, so the full-run command explicitly sets `sample_number=null`. Use the same FSDP topology when resuming a distributed checkpoint. Training sets `NO_TORCH_COMPILE=1` by default to avoid Moshi compile failures reported with FSDP padding; opt in to compile by setting it to `0`.
+`profile_steps=true` synchronizes CUDA around each phase and records per-update `timing/data_sec` (audio decode, batched Mimi encode, alignment, and collation), `timing/forward_loss_sec`, `timing/backward_sec` (including DDP gradient reduction on the synchronized microstep), `timing/optimizer_sec`, and their `timing/profiled_phase_sum_sec` in `metrics.jsonl` and TensorBoard. The per-rank `DataLoader` uses `train.num_workers`, `train.prefetch_factor`, `train.pin_memory`, and `train.persistent_workers` to overlap CPU audio decoding with model work; stereo Mimi codes are then encoded in one call per local batch. Both are semantics-preserving and their time is included in `timing/data_sec`. Each timing value is the maximum for that phase across ranks. The phase sum is an estimate, since it excludes small reporting collectives and host overhead. Profiling synchronization adds overhead, so use it to locate the bottleneck, then turn it off for throughput comparisons. An OOM candidate is rejected; do not resume from that run. Follow each batch sweep with fixed 10-conversation LoRA-rank/LR comparisons, holding data order, global batch, and step budget constant:
+
+```bash
+# Rank sweep: hold LR at 2e-6 and use the deterministic 10-conversation config.
+torchrun --nproc-per-node 2 -m train configs/moshi_overfit_10.yaml model=server \
+  lora.rank=64 optim.lr=2e-6 max_steps=500 batch_size=1 train.gradient_accumulation_steps=8
+torchrun --nproc-per-node 2 -m train configs/moshi_overfit_10.yaml model=server \
+  lora.rank=128 optim.lr=2e-6 max_steps=500 batch_size=1 train.gradient_accumulation_steps=8
+torchrun --nproc-per-node 2 -m train configs/moshi_overfit_10.yaml model=server \
+  lora.rank=256 optim.lr=2e-6 max_steps=500 batch_size=1 train.gradient_accumulation_steps=8
+
+# Then sweep LR at the selected rank (replace 128 with the winning rank).
+torchrun --nproc-per-node 2 -m train configs/moshi_overfit_10.yaml model=server \
+  lora.rank=128 optim.lr=1e-6 max_steps=500 batch_size=1 train.gradient_accumulation_steps=8
+torchrun --nproc-per-node 2 -m train configs/moshi_overfit_10.yaml model=server \
+  lora.rank=128 optim.lr=2e-6 max_steps=500 batch_size=1 train.gradient_accumulation_steps=8
+torchrun --nproc-per-node 2 -m train configs/moshi_overfit_10.yaml model=server \
+  lora.rank=128 optim.lr=5e-6 max_steps=500 batch_size=1 train.gradient_accumulation_steps=8
+```
+
+These are screening points, not claimed optima. First pass the single-GPU 10-sample overfit and adapter reload check, then run these DDP sweeps. They hold effective global batch at 16 for 2×B200; for 4×A100, use accumulation 4 instead of 8. The rank and LR sweeps vary one factor at a time. After each 10-sample run, use the exact adapter path in its `training_report.md` to run inference and compare generated Vietnamese, not just loss. Then validate against held-out conversations from the full training split. The default full-data config evaluates teacher-forced loss and seeded free-running generation every 500 updates; generation uses three held-out 30-second windows with the same LMGen settings used by inference. `free_running_metrics.jsonl` records reference/hypothesis/CER/WER, empty-hypothesis count, and window metadata; an eval with any empty transcript cannot replace `checkpoints/best_inference`. The checkpoint is selected by lowest generation CER, separately from `checkpoints/best_loss`. A lower teacher-forced loss therefore cannot silently select an adapter whose generated text is worse. `max_steps` counts optimizer updates, independent of gradient accumulation. The default 2,000-step run compares checkpoints at 500-step intervals; if CER is still improving at the final checkpoint, start another run from the original base with a larger full-run step budget and compare held-out CER. Do not extend the budget by resuming the old OneCycleLR state. The generated `training_report.md` contains an inference command targeting the same held-out sample and best inference adapter; it checks WAV decoding and adapter reload.
+
+The 10-sample config evaluates generation on those same ten fixed training conversations every 100 updates. This is intentionally an overfit gate, not a generalization score. It records generation before training starts; a checkpoint is labeled inference-validated only if it produces non-empty transcripts and improves CER over that baseline. For a fresh run this is the base model; when resuming, it is the loaded starting adapter. The full-data config keeps conversation-disjoint validation. If no checkpoint passes the generation gate, `training_report.md` marks that clearly and points only to the final adapter for diagnosis; low loss is never labeled as inference success.
+
+After selecting physical batch, LoRA rank, and learning rate, compare optimizer-step budgets from fresh runs with the same seed/data order/global batch. For example, on 2×B200:
+
+```bash
+for steps in 1000 2000 4000; do
+  torchrun --nproc-per-node 2 -m train configs/moshi_overfit_10.yaml model=server \
+    batch_size=1 train.gradient_accumulation_steps=8 max_steps="$steps" \
+    lora.rank=128 optim.lr=2e-6
+done
+```
+
+For 4×A100, use `--nproc-per-node 4` and `train.gradient_accumulation_steps=4`. Each run must be fresh because `max_steps` sets the OneCycleLR schedule. Choose the step budget from generation CER/WER on the overfit gate, then verify generalization on held-out conversations before using it for the full dataset.
+
+After several trials, summarize them by held-out CER, WER, throughput, and the maximum memory observed across ranks:
+
+```bash
+python -m tools.summarize_training_runs runs/moshi-code-style
+```
+
+The CSV orders scored trials by best free-running CER. Runs without generation evaluation remain visible after scored runs; do not select them from training loss alone.
+
+After training, run the saved adapter through generation (this checks actual free-running inference, not only teacher-forced loss):
+
+```bash
+python -m tools.inference_smoke --config configs/infer.yaml \
+  --adapter runs/moshi-code-style/<run-directory>/checkpoints/checkpoint_002000 \
+  --window-seconds 100 --start 0 \
+  --output-dir outputs/moshi-code-style-inference
+```
+
+Inspect `finetuned.txt`, `finetuned.wav`, `agent_reference.txt`, and `run.json`. For prepared samples, the smoke test compares the generated text with the timestamp-aligned agent transcript and records WER/CER for both base and finetuned outputs; external audio has no reference metrics. `run.json.text_quality_status` distinguishes empty output, missing reference, and output that does not improve over base; each failure is also included in `warnings` while preserving WAV/text artifacts. Vietnamese CER ignores whitespace and normalizes Unicode, while WER uses whitespace-delimited tokens. Inference uses the selected manifest sample's prepared voice prompt and text prompt; `run.json` records these so you can confirm the actual conditioning. Before training, the trainer prints an agent-text sample and verifies tokenizer round-trip; metrics include `loss/text_nonpadding` alongside the original weighted text loss and real target/padding counts. `training_report.md` records the exact checkpoint path and GPU peak memory. A falling training loss by itself does not establish that Vietnamese text targets were learned.
+
+The smoke CLI's default window follows `data.window_seconds` (30 seconds for OtoSpeech); `--window-seconds` overrides it for one run. The command above matches the 100-second training chunk and starts at the same timeline boundary. The selected recording must be at least 100 seconds long. Omit both flags for a shorter 30-second inference check. The generated `training_report.md` includes a second command for the same held-out sample at the full training duration when that source is long enough, so compare its CER/WER with the 30-second result to isolate any context-length effect.
 
 ## 5. Giám Sát Quá Trình Huấn Luyện (TensorBoard)
 

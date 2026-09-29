@@ -140,8 +140,10 @@ class PipelineSmokeTest(unittest.TestCase):
         # ---------------------------------------------------------------------
         # Phase 3: LoRA Injection & Train Step (Forward + Backward)
         # ---------------------------------------------------------------------
-        lora_targets = inject_lora(model, rank=4, alpha=8)
+        lora_prefixes = ("transformer", "depformer")
+        lora_targets = inject_lora(model, rank=4, alpha=8, prefixes=lora_prefixes)
         self.assertGreater(len(lora_targets), 0, "Expected LoRA targets to be injected")
+        self.assertTrue(any(target.startswith("depformer.") for target in lora_targets))
 
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         frozen_params = [p for p in model.parameters() if not p.requires_grad]
@@ -201,7 +203,7 @@ class PipelineSmokeTest(unittest.TestCase):
 
             # Instantiate fresh model and reload adapter
             fresh_model = loaders.LMModel(device="cpu", dtype=torch.float32, **lm_kwargs)
-            inject_lora(fresh_model, rank=4, alpha=8)
+            inject_lora(fresh_model, rank=4, alpha=8, prefixes=lora_prefixes)
             load_adapter(fresh_model, saved_adapter)
 
             # Compare weights to ensure exact reload

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,20 +11,87 @@ import torch
 from personaplex_finetuning.train import (
     create_run_dir,
     effective_global_batch_size,
+    evenly_spaced_validation_samples,
+    evaluate_free_running,
+    generation_checkpoint_score,
     load_training_state,
     model_forward_train,
+    lora_prefixes_for_stage,
+    inspect_training_sample,
+    iter_training_batches,
+    text_supervision_counts,
+    text_target_token_loss_stats,
+    unwrap_parallel_model,
     rank_stride_indices,
     reduce_distributed_loss,
     sample_index_for_rank,
     step_optimizer_if_ready,
+    validation_selection_loss,
     save_training_state,
     save_adapter_state,
     write_rank_info,
     write_tensorboard_scalars,
+    verify_reloaded_adapter,
 )
 
 
 class TrainTest(unittest.TestCase):
+    def test_training_iterator_prefetches_audio_and_batches_mimi_in_loader_order(self) -> None:
+        from personaplex_finetuning.data import AudioInfo, PreparedSample
+
+        class FakeCodec:
+            sample_rate = 24_000
+            frame_rate = 12.5
+
+            def __init__(self):
+                self.raw_audio = None
+
+            def encode_conversation_stereo_batch(self, windows, raw_audio=None):
+                self.raw_audio = raw_audio
+                self.windows = windows
+                return [(((1,),) * 8, ((2,),) * 8) for _ in windows]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav_path = Path(tmp) / "conversation.wav"
+            with wave.open(str(wav_path), "wb") as output:
+                output.setnchannels(2)
+                output.setsampwidth(2)
+                output.setframerate(24_000)
+                output.writeframes(b"\x00\x00\x00\x00" * 48_000)
+            sample = PreparedSample(
+                sample_id="prefetch-1", conversation_wav=wav_path,
+                voice_prompt_wav=Path(tmp) / "voice.wav", words=(), text_prompt="prompt",
+                metadata={}, audio=AudioInfo(24_000, 2, 2.0),
+                window_start_sec=0.0, window_end_sec=2.0,
+            )
+            codec = FakeCodec()
+            runtime = SimpleNamespace(codec=codec, tokenizer=SimpleNamespace(padding_id=3), zero_token=-1)
+            config = SimpleNamespace(
+                duration_sec=2.0, per_device_batch_size=1, shuffle=False, seed=42,
+                num_workers=1, prefetch_factor=2, pin_memory=False,
+                persistent_workers=False, prompt_aug_prob=0.0,
+            )
+            fake_example = SimpleNamespace(
+                prompt_frames=0, dialogue_frames=25,
+                input_codes=tuple((0,) * 25 for _ in range(17)),
+                loss_mask=tuple((False,) * 25 for _ in range(17)),
+            )
+            sentinel_batch = {"codes": "collated"}
+            with patch("personaplex_finetuning.train.build_example", return_value=fake_example), \
+                 patch("personaplex_finetuning.train.pad_training_example", side_effect=lambda example, *_args: example), \
+                 patch("personaplex_finetuning.train.post_encode_collate", return_value=sentinel_batch):
+                batches = iter_training_batches(config, [sample], runtime, "cpu", 0, 1, smoke=False)
+                try:
+                    batch, _epoch, count, _seconds, _frames, loaded_samples = next(batches)
+                finally:
+                    batches.close()
+
+        self.assertIs(batch, sentinel_batch)
+        self.assertEqual(count, 1)
+        self.assertEqual([item.sample_id for item in loaded_samples], ["prefetch-1"])
+        self.assertEqual(codec.raw_audio["waveforms"].shape, (1, 2, 48_000))
+        self.assertEqual(codec.raw_audio["valid_samples"].tolist(), [48_000])
+
     def test_moshi_rank_stride_partition_is_disjoint_and_complete(self) -> None:
         partitions = [rank_stride_indices(11, rank, 4) for rank in range(4)]
         self.assertEqual(partitions, [[0, 4, 8], [1, 5, 9], [2, 6, 10], [3, 7]])
@@ -31,6 +99,98 @@ class TrainTest(unittest.TestCase):
 
     def test_global_batch_multiplies_processes_and_accumulation(self) -> None:
         self.assertEqual(effective_global_batch_size(1, 4, 2), 8)
+
+    def test_validation_subset_is_deterministically_spread_across_dataset(self) -> None:
+        samples = list(range(101))
+        self.assertEqual(evenly_spaced_validation_samples(samples, 3), [0, 50, 100])
+        self.assertEqual(evenly_spaced_validation_samples(samples, 1), [50])
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            evenly_spaced_validation_samples(samples, 0)
+
+    def test_b200_and_a100_pilot_candidates_hold_global_batch_constant(self) -> None:
+        candidates = ((2, 1, 8), (2, 2, 4), (2, 4, 2), (4, 1, 4), (4, 2, 2), (4, 4, 1))
+        self.assertEqual(
+            {effective_global_batch_size(batch, world_size, accumulation)
+             for world_size, batch, accumulation in candidates},
+            {16},
+        )
+
+    def test_best_validation_checkpoint_uses_nonpadding_text_and_audio_losses(self) -> None:
+        metrics = {
+            "val/loss_total": 0.01,
+            "val/loss_text_nonpadding": 1.2,
+            "val/loss_audio_semantic": 0.3,
+            "val/loss_audio_nonsemantic": 0.02,
+        }
+        self.assertAlmostEqual(validation_selection_loss(metrics), 1.52)
+        self.assertEqual(validation_selection_loss({"val/loss_total": 0.001}), float("inf"))
+
+    def test_empty_free_running_generation_cannot_win_checkpoint_selection(self) -> None:
+        self.assertEqual(
+            generation_checkpoint_score({"val/generation_cer": 0.01, "val/generation_empty_samples": 1}),
+            float("inf"),
+        )
+        self.assertEqual(
+            generation_checkpoint_score({"val/generation_cer": 0.2, "val/generation_empty_samples": 0}),
+            0.2,
+        )
+        self.assertEqual(
+            generation_checkpoint_score(
+                {"val/generation_cer": 0.2, "val/generation_empty_samples": 0}, baseline_cer=0.2,
+            ),
+            float("inf"),
+        )
+        self.assertEqual(
+            generation_checkpoint_score(
+                {"val/generation_cer": 0.1, "val/generation_empty_samples": 0}, baseline_cer=0.2,
+            ),
+            0.1,
+        )
+
+    def test_free_running_validation_scores_generated_text_on_the_requested_window(self) -> None:
+        from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
+
+        sample = PreparedSample(
+            sample_id="heldout-1", conversation_wav=Path("conversation.wav"),
+            voice_prompt_wav=Path("voice.wav"), words=(Word("agent", "Xin chào.", 1.0, 1.5),),
+            text_prompt="Trò chuyện bằng tiếng Việt.", metadata={},
+            audio=AudioInfo(24_000, 2, 60.0), window_start_sec=0.0, window_end_sec=60.0,
+        )
+        config = SimpleNamespace(
+            seed=42, free_running_eval_samples=1, free_running_eval_window_seconds=30.0,
+        )
+
+        with patch(
+            "personaplex_finetuning.train.generate_text_with_runtime",
+            side_effect=lambda _runtime, window, **_kwargs: (
+                "Xin chào." if (window.window_start_sec, window.window_end_sec) == (1.0, 31.0) else "wrong window"
+            ),
+        ):
+            metrics = evaluate_free_running(object(), [sample], config)
+
+        self.assertEqual(metrics["val/generation_samples"], 1)
+        self.assertEqual(metrics["val/generation_cer"], 0.0)
+        self.assertEqual(metrics["val/generation_wer"], 0.0)
+        self.assertEqual(metrics["samples"][0]["sample_id"], "heldout-1")
+        self.assertEqual(metrics["samples"][0]["window_start_sec"], 1.0)
+        self.assertEqual(metrics["samples"][0]["source_duration_sec"], 60.0)
+
+    def test_free_running_validation_counts_empty_hypotheses(self) -> None:
+        from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
+
+        sample = PreparedSample(
+            sample_id="heldout-empty", conversation_wav=Path("conversation.wav"),
+            voice_prompt_wav=Path("voice.wav"), words=(Word("agent", "Xin chào.", 1.0, 1.5),),
+            text_prompt="Trò chuyện bằng tiếng Việt.", metadata={},
+            audio=AudioInfo(24_000, 2, 60.0), window_start_sec=0.0, window_end_sec=60.0,
+        )
+        config = SimpleNamespace(
+            seed=42, free_running_eval_samples=1, free_running_eval_window_seconds=30.0,
+        )
+        with patch("personaplex_finetuning.train.generate_text_with_runtime", return_value="  "):
+            metrics = evaluate_free_running(object(), [sample], config)
+        self.assertEqual(metrics["val/generation_empty_samples"], 1)
+        self.assertEqual(generation_checkpoint_score(metrics, baseline_cer=0.5), float("inf"))
 
     def test_distributed_loss_reduces_components_in_one_collective_and_preserves_gradient(self) -> None:
         parameter = torch.nn.Parameter(torch.tensor(2.0))
@@ -128,6 +288,20 @@ class TrainTest(unittest.TestCase):
             self.assertEqual(restored_scheduler.last_epoch, scheduler.last_epoch)
             self.assertTrue(restored_optimizer.state_dict()["state"])
 
+    def test_resume_rejects_a_changed_max_step_onecycle_schedule(self) -> None:
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.AdamW([parameter], lr=0.1)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=0.1, total_steps=8, pct_start=0.25,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp)
+            save_training_state(checkpoint, optimizer, scheduler, 4, 1, 1)
+
+            with self.assertRaisesRegex(RuntimeError, r"max_steps \(8\).*\(12\)"):
+                load_training_state(checkpoint, optimizer, scheduler, 1, 1, total_steps=12)
+
     def test_adapter_metadata_records_effective_lora_alpha_and_scaling(self) -> None:
         config = SimpleNamespace(
             model_root=Path("/models/personaplex"), lora_rank=128,
@@ -188,24 +362,137 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(model_forward_train(model, "codes"), "lm-output")
         self.assertEqual(model.codes, "codes")
 
-    def test_fsdp_forward_uses_wrapper_call_for_parameter_all_gather(self) -> None:
-        class FakeFSDP:
+    def test_ddp_forward_uses_wrapper_call_for_gradient_reduction(self) -> None:
+        class FakeDDP:
             def __init__(self):
                 self.called = False
 
             def __call__(self, codes):
                 self.called = True
-                return "fsdp-output"
+                return "ddp-output"
 
             def forward_train(self, _codes):
-                raise AssertionError("direct forward_train bypasses FSDP hooks")
+                raise AssertionError("direct forward_train bypasses DDP hooks")
 
-        model = FakeFSDP()
-        with patch("torch.distributed.fsdp.FullyShardedDataParallel", FakeFSDP):
+        model = FakeDDP()
+        with patch("torch.nn.parallel.DistributedDataParallel", FakeDDP):
             output = model_forward_train(model, "codes")
 
-        self.assertEqual(output, "fsdp-output")
+        self.assertEqual(output, "ddp-output")
         self.assertTrue(model.called)
+
+    def test_unwrap_parallel_model_removes_ddp_module_prefix_before_saving(self) -> None:
+        base = torch.nn.Linear(2, 2)
+
+        class FakeDDP:
+            def __init__(self, module):
+                self.module = module
+
+        wrapped = FakeDDP(base)
+        self.assertIs(unwrap_parallel_model(wrapped), base)
+
+    def test_joint_stage_targets_both_temporal_and_depth_lora_without_dual_lr(self) -> None:
+        config = SimpleNamespace(train_stage="joint", depformer_learning_rate=None)
+        self.assertEqual(lora_prefixes_for_stage(config), ("transformer", "depformer"))
+
+    def test_reload_verification_reuses_loaded_base_instead_of_loading_a_second_7b_copy(self) -> None:
+        from personaplex_finetuning.lora import inject_lora
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.transformer = torch.nn.Module()
+                self.transformer.projection = torch.nn.Linear(2, 2)
+
+        model = Model()
+        inject_lora(model, rank=2, alpha=4)
+        saved = {
+            name: parameter.detach().clone()
+            for name, parameter in model.named_parameters() if "lora_" in name
+        }
+        runtime = SimpleNamespace(model=model, codec=object(), tokenizer=object())
+        config = SimpleNamespace(device="cpu")
+
+        def reload_checkpoint(target, _adapter):
+            with torch.no_grad():
+                for name, parameter in target.named_parameters():
+                    if name in saved:
+                        parameter.copy_(saved[name])
+
+        def teacher_forced_loss(_config, target_runtime, _example, _optimizer=None):
+            return sum(
+                parameter.sum() for name, parameter in target_runtime.model.named_parameters()
+                if "lora_" in name
+            ), {}, 0.0
+
+        with patch("personaplex_finetuning.train.load_runtime", side_effect=AssertionError("must not load a second base")), \
+             patch("personaplex_finetuning.train.build_example", return_value=object()), \
+             patch("personaplex_finetuning.train.load_adapter", side_effect=reload_checkpoint), \
+             patch("personaplex_finetuning.train.one_step", side_effect=teacher_forced_loss):
+            loss = verify_reloaded_adapter(config, object(), Path("adapter.safetensors"), runtime)
+
+        self.assertTrue(torch.isfinite(torch.tensor(loss)))
+        for name, parameter in model.named_parameters():
+            if name in saved:
+                self.assertTrue(torch.equal(parameter, saved[name]))
+
+    def test_stage_specific_lora_prefixes_are_shared_by_train_and_reload(self) -> None:
+        self.assertEqual(
+            lora_prefixes_for_stage(SimpleNamespace(train_stage="temporal_only")),
+            ("transformer",),
+        )
+        self.assertEqual(
+            lora_prefixes_for_stage(SimpleNamespace(train_stage="depth_only")),
+            ("depformer",),
+        )
+
+    def test_training_sample_inspection_checks_target_roundtrip_and_channels(self) -> None:
+        sample = SimpleNamespace(
+            sample_id="vi-1", agent_channel=0, user_channel=1,
+            window_start_sec=0.0, window_end_sec=2.0,
+            text_prompt="Hãy trả lời bằng tiếng Việt.",
+            words=[SimpleNamespace(speaker="agent", word="Xin chào", start=0.2, end=1.0)],
+        )
+
+        class Tokenizer:
+            def encode(self, text):
+                self.text = text
+                return [1, 2]
+
+            def decode(self, _tokens):
+                return self.text
+
+        report = inspect_training_sample(sample, Tokenizer())
+        self.assertEqual(report["agent_text"], "Xin chào")
+        self.assertEqual(report["agent_channel"], 0)
+        self.assertEqual(report["user_channel"], 1)
+        self.assertEqual(report["token_count"], 2)
+        self.assertEqual(report["text_prompt"], "Hãy trả lời bằng tiếng Việt.")
+
+    def test_text_supervision_counts_separate_real_targets_from_padding(self) -> None:
+        batch = {
+            "labels": torch.tensor([[[4, 3, 3]] + [[0, 0, 0]] * 16]),
+            "loss_mask": torch.tensor([[[True, True, False]] + [[False, False, False]] * 16]),
+        }
+        output = SimpleNamespace(text_mask=torch.tensor([[[True, True, True]]]))
+        tokens, padding = text_supervision_counts(batch, output, padding_id=3)
+        self.assertEqual((int(tokens), int(padding)), (1, 1))
+
+    def test_nonpadding_text_loss_measures_only_valid_target_tokens(self) -> None:
+        logits = torch.tensor([[[[0.0, 2.0, 0.0, 0.0, 0.0], [100.0] * 5, [0.0] * 5]]])
+        batch = {
+            "labels": torch.tensor([[[1, 3, 3]] + [[0, 0, 0]] * 16]),
+            "loss_mask": torch.tensor([[[True, True, False]] + [[False, False, False]] * 16]),
+        }
+        output = SimpleNamespace(
+            text_logits=logits,
+            text_mask=torch.tensor([[[True, True, True]]]),
+        )
+
+        loss_sum, token_count = text_target_token_loss_stats(batch, output, padding_id=3)
+        expected = torch.nn.functional.cross_entropy(logits[0, 0, 0].reshape(1, -1), torch.tensor([1]), reduction="sum")
+        self.assertEqual(int(token_count), 1)
+        self.assertTrue(torch.allclose(loss_sum, expected))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for BF16 autocast regression")
     def test_cuda_forward_autocasts_fp32_activations_for_bf16_projection(self) -> None:
@@ -236,13 +523,19 @@ class TrainTest(unittest.TestCase):
         write_tensorboard_scalars(
             writer,
             {"step": 2, "loss/total": 1.0, "loss/text": 0.2, "loss/audio_semantic": 0.3,
-             "loss/audio_nonsemantic": 0.4, "lr": 2e-5, "grad_norm": 0.5, "gpu_peak_bytes": 1024},
+             "loss/text_nonpadding": 1.5, "loss/audio_nonsemantic": 0.4,
+             "lr": 2e-5, "grad_norm": 0.5, "gpu_peak_bytes": 1024,
+             "timing/data_sec": 1.0, "timing/forward_loss_sec": 2.0,
+             "timing/backward_sec": 3.0, "timing/optimizer_sec": 0.5,
+             "timing/profiled_phase_sum_sec": 6.5},
             trainable_parameters=42,
             cpu_threads=1,
         )
 
         self.assertEqual({name for name, _, _ in writer.scalars}, {
-            "loss/total", "loss/text", "loss/audio_semantic", "loss/audio_nonsemantic",
+            "loss/total", "loss/text", "loss/text_nonpadding", "loss/audio_semantic", "loss/audio_nonsemantic",
             "train/learning_rate", "train/gradient_norm", "system/gpu_peak_bytes",
-            "system/trainable_parameters", "system/cpu_threads",
+            "system/trainable_parameters", "system/cpu_threads", "timing/data_sec",
+            "timing/forward_loss_sec", "timing/backward_sec", "timing/optimizer_sec",
+            "timing/profiled_phase_sum_sec",
         })

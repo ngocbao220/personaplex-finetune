@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import random
+import shlex
 import sys
 import time
 from contextlib import nullcontext
@@ -19,13 +20,14 @@ from tqdm.auto import tqdm
 from .config import Config, load_config
 from .data import PreparedDataset, conversation_group_keys, duration_chunks, limit_conversations
 from .batching import (
-    DistributedBucketBatchSampler, RawAudioDataset, collate_raw_audio, post_encode_collate,
+    RankStrideBatchSampler, RawAudioDataset, collate_raw_audio, post_encode_collate,
 )
 from .lora import adapter_state_dict, inject_lora, load_adapter
+from .generation import GenerationSettings
+from .inference import generate_text_with_runtime, text_error_metrics
 from .objective import stream_weights_torch, torch_weighted_cross_entropy, torch_weighted_cross_entropy_stats
 from .runtime import RuntimePaths, load_runtime
 from .sequence import PersonaPlexTrainingExampleBuilder, pad_training_example
-from .fsdp import fsdp_adapter_state_dict, wrap_model_fsdp
 
 
 def limit_cpu_threads(torch_module) -> int:
@@ -53,7 +55,11 @@ def create_run_dir(output_root: Path, smoke: bool) -> Path:
 
 
 def build_example(config: Config, sample, runtime, random_crop: bool = False, rng=None, dialogue_codes=None):
-    builder = PersonaPlexTrainingExampleBuilder(runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token)
+    pause_frames = getattr(getattr(config, "generation_settings", None), "audio_silence_frame_cnt", 6)
+    builder = PersonaPlexTrainingExampleBuilder(
+        runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token,
+        pause_frames=pause_frames,
+    )
     # PersonaPlex LMModel.forward_train applies its native per-stream delays.
     return builder.build(sample, dialogue_codes=dialogue_codes)
 
@@ -71,12 +77,86 @@ def rank_stride_indices(sample_count: int, rank: int, world_size: int) -> list[i
     return list(range(rank, sample_count, world_size))
 
 
+def lora_prefixes_for_stage(config: Config) -> tuple[str, ...]:
+    """Select the same LoRA target modules for training and adapter reload."""
+    stage = getattr(config, "train_stage", "joint").lower()
+    if stage in {"temporal_only", "freeze_depformer"}:
+        return ("transformer",)
+    if stage in {"depth_only", "freeze_tempformer"}:
+        return ("depformer",)
+    return ("transformer", "depformer")
+
+
+def unwrap_parallel_model(model):
+    """Return the underlying model so checkpoints use inference-compatible keys."""
+    while hasattr(model, "module"):
+        model = model.module
+    return model
+
+
+def inspect_training_sample(sample, tokenizer) -> dict[str, object]:
+    """Validate and describe the actual agent-text target before optimization."""
+    if sample.agent_channel != 0 or sample.user_channel != 1:
+        raise ValueError(f"{sample.sample_id}: expected LEFT=agent and RIGHT=user")
+    words = [
+        word.word for word in sample.words
+        if word.speaker == "agent" and sample.window_start_sec <= word.start < sample.window_end_sec
+    ]
+    if not words:
+        raise ValueError(f"{sample.sample_id}: training window has no agent text target")
+    text = " ".join(words)
+    tokens = tokenizer.encode(text)
+    decoded = tokenizer.decode(tokens)
+    normalize = lambda value: " ".join(value.split())
+    if normalize(decoded) != normalize(text):
+        raise ValueError(
+            f"{sample.sample_id}: tokenizer round-trip changed agent text; "
+            f"source={text!r}, decoded={decoded!r}"
+        )
+    return {
+        "sample_id": sample.sample_id,
+        "window_start_sec": sample.window_start_sec,
+        "window_end_sec": sample.window_end_sec,
+        "agent_channel": sample.agent_channel,
+        "user_channel": sample.user_channel,
+        "agent_word_count": len(words),
+        "token_count": len(tokens),
+        "text_prompt": sample.text_prompt,
+        "agent_text": text,
+        "tokenizer_round_trip": decoded,
+    }
+
+
+def text_supervision_counts(batch, model_output, padding_id: int):
+    """Count valid non-padding text targets and weighted padding positions."""
+    labels = batch["labels"][:, 0, :]
+    valid = batch["loss_mask"][:, 0, :] & model_output.text_mask[:, 0]
+    return ((labels != padding_id) & valid).sum(), ((labels == padding_id) & valid).sum()
+
+
+def text_target_token_loss_stats(batch, model_output, padding_id: int):
+    """Return diagnostic CE over valid non-padding text tokens only."""
+    labels = batch["labels"][:, 0, :]
+    valid_targets = (
+        batch["loss_mask"][:, 0, :]
+        & model_output.text_mask[:, 0]
+        & (labels != padding_id)
+    )
+    with torch.no_grad():
+        selected_logits = model_output.text_logits[:, 0][valid_targets].float()
+        selected_targets = labels[valid_targets]
+        loss_sum = torch.nn.functional.cross_entropy(
+            selected_logits, selected_targets, reduction="sum"
+        )
+    return loss_sum, valid_targets.sum()
+
+
 def step_optimizer_if_ready(sync_state, optimizer, scheduler, trainable, model=None, max_norm=1.0) -> float:
     if not sync_state.sync_gradients:
         return 0.0
 
     if model is not None and hasattr(model, "clip_grad_norm_"):
-        # FSDP: global norm across shards
+        # Distributed wrappers may provide a model-aware global norm operation.
         grad_norm = model.clip_grad_norm_(max_norm)
     else:
         grad_norm = torch.nn.utils.clip_grad_norm_(trainable, max_norm)
@@ -93,34 +173,78 @@ def deterministic_crop_rng(seed: int, process_index: int, micro_step: int) -> ra
     return random.Random(seed + (process_index * 1_000_003) + micro_step)
 
 
+def _initialize_audio_worker(_worker_id: int) -> None:
+    """Keep each spawned audio decoder worker from oversubscribing CPU threads."""
+    for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[variable] = "1"
+    torch.set_num_threads(1)
+
+
 def iter_training_batches(config, conversations, runtime, device, rank: int, world_size: int, smoke: bool, skip_batches: int = 0):
     """Moshi-style iterator: fixed conversation chunks, rank stride, then small batches."""
     epoch = 0
-    while True:
-        samples = duration_chunks(conversations, config.duration_sec)
-        if config.shuffle and not smoke:
-            random.Random(config.seed + epoch).shuffle(samples)
-        rank_samples = [samples[index] for index in rank_stride_indices(len(samples), rank, world_size)]
-        common_batch_count = min(
-            len(rank_stride_indices(len(samples), worker, world_size)) // config.per_device_batch_size
-            for worker in range(world_size)
+    samples = duration_chunks(conversations, config.duration_sec)
+    use_prefetch = hasattr(runtime.codec, "encode_conversation_stereo_batch")
+    loader = sampler = None
+    if use_prefetch:
+        sampler = RankStrideBatchSampler(
+            len(samples), config.per_device_batch_size, rank, world_size,
+            seed=config.seed, shuffle=config.shuffle and not smoke,
         )
+        dataset = RawAudioDataset(samples, runtime.codec.sample_rate)
+        worker_count = 0 if smoke else config.num_workers
+        loader_options = {
+            "dataset": dataset,
+            "batch_sampler": sampler,
+            "collate_fn": collate_raw_audio,
+            "num_workers": worker_count,
+            "pin_memory": config.pin_memory and str(device).startswith("cuda"),
+            "persistent_workers": config.persistent_workers and worker_count > 0,
+            "worker_init_fn": _initialize_audio_worker if worker_count > 0 else None,
+        }
+        if worker_count > 0:
+            loader_options["prefetch_factor"] = config.prefetch_factor
+            # The model has already initialized CUDA in the parent. Spawn keeps
+            # decoder workers isolated from that CUDA runtime state.
+            loader_options["multiprocessing_context"] = "spawn"
+        loader = torch.utils.data.DataLoader(**loader_options)
+
+    while True:
+        if use_prefetch:
+            sampler.set_epoch(epoch)
+            batches = enumerate(loader)
+        else:
+            ordered_samples = list(samples)
+            if config.shuffle and not smoke:
+                random.Random(config.seed + epoch).shuffle(ordered_samples)
+            rank_samples = [ordered_samples[index] for index in rank_stride_indices(len(ordered_samples), rank, world_size)]
+            common_batch_count = min(
+                len(rank_stride_indices(len(ordered_samples), worker, world_size)) // config.per_device_batch_size
+                for worker in range(world_size)
+            )
+            batches = enumerate(
+                rank_samples[index * config.per_device_batch_size:(index + 1) * config.per_device_batch_size]
+                for index in range(common_batch_count)
+            )
+
+        common_batch_count = len(loader) if use_prefetch else common_batch_count
         if common_batch_count == 0:
             raise ValueError(
                 f"only {len(samples)} duration chunks for world_size={world_size} and "
                 f"batch_size_per_gpu={config.per_device_batch_size}; use sample_number=null/full data "
                 "or run a one-GPU overfit config with batch_size=1"
             )
-        rank_samples = rank_samples[:common_batch_count * config.per_device_batch_size]
-        for batch_index in range(common_batch_count):
+        for batch_index, batch_value in batches:
             if skip_batches:
                 skip_batches -= 1
                 continue
-            batch_samples = rank_samples[
-                batch_index * config.per_device_batch_size:
-                (batch_index + 1) * config.per_device_batch_size
-            ]
-            examples = []
+            if use_prefetch:
+                raw_audio = batch_value
+                batch_samples = raw_audio["samples"]
+            else:
+                raw_audio = None
+                batch_samples = batch_value
+            prepared_batch = []
             for sample_index, sample in enumerate(batch_samples):
                 if config.prompt_aug_prob and not smoke:
                     sample = sample.with_window(
@@ -133,7 +257,21 @@ def iter_training_batches(config, conversations, runtime, device, rank: int, wor
                             ),
                         ),
                     )
-                examples.append(build_example(config, sample, runtime))
+                prepared_batch.append(sample)
+            if hasattr(runtime.codec, "encode_conversation_stereo_batch"):
+                dialogue_codes = runtime.codec.encode_conversation_stereo_batch([
+                    (
+                        sample.conversation_wav, sample.agent_channel, sample.user_channel,
+                        sample.window_start_sec, sample.window_end_sec,
+                    )
+                    for sample in prepared_batch
+                ], raw_audio=raw_audio)
+                examples = [
+                    build_example(config, sample, runtime, dialogue_codes=codes)
+                    for sample, codes in zip(prepared_batch, dialogue_codes, strict=True)
+                ]
+            else:
+                examples = [build_example(config, sample, runtime) for sample in prepared_batch]
             fixed_frames = round(config.duration_sec * runtime.codec.frame_rate) + max(
                 (example.prompt_frames for example in examples), default=0
             )
@@ -156,7 +294,7 @@ def iter_training_batches(config, conversations, runtime, device, rank: int, wor
                 for item in batch_samples
             )
             audio_frames = sum(item.dialogue_frames for item in examples)
-            yield batch, epoch, len(examples), audio_seconds, audio_frames
+            yield batch, epoch, len(examples), audio_seconds, audio_frames, batch_samples
         epoch += 1
 
 
@@ -231,21 +369,18 @@ def enable_gradient_checkpointing(model: torch.nn.Module) -> None:
 
 def model_forward_train(model, codes: torch.Tensor):
     """Run Moshi's training forward with the runtime's CUDA BF16 precision."""
-    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.nn.parallel import DistributedDataParallel
 
-    # FSDP mixed_precision casts managed parameters, but floating activations
-    # produced by unwrapped Moshi operations may remain FP32. CUDA autocast
-    # makes those activations compatible with BF16 projections throughout the
-    # full model, including projections outside transformer FSDP units.
+    # Some Moshi activations are produced in FP32 while the PersonaPlex model
+    # weights are BF16. Autocast keeps all projections dtype-compatible.
     precision_context = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         if getattr(getattr(codes, "device", None), "type", None) == "cuda"
         else nullcontext()
     )
     with precision_context:
-        if isinstance(model, FSDP):
-            # Calling forward_train directly bypasses FSDP's pre-forward all-gather;
-            # sharded embedding weights then reach nn.Embedding as 1-D local shards.
+        if isinstance(model, DistributedDataParallel):
+            # Calling forward_train directly bypasses distributed wrapper hooks.
             output = model(codes)
         elif hasattr(model, "forward_train"):
             output = model.forward_train(codes)
@@ -264,6 +399,7 @@ def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_
     for name, value in (
         ("loss/total", record["loss/total"]),
         ("loss/text", record["loss/text"]),
+        ("loss/text_nonpadding", record["loss/text_nonpadding"]),
         ("loss/audio_semantic", record["loss/audio_semantic"]),
         ("loss/audio_nonsemantic", record["loss/audio_nonsemantic"]),
         ("train/learning_rate", record["lr"]),
@@ -271,6 +407,7 @@ def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_
         ("system/gpu_peak_bytes", record["gpu_peak_bytes"]),
         ("system/trainable_parameters", trainable_parameters),
         ("system/cpu_threads", cpu_threads),
+        *((name, value) for name, value in record.items() if name.startswith("timing/")),
     ):
         writer.add_scalar(name, value, step)
 
@@ -334,7 +471,7 @@ def reduce_distributed_loss(stats, all_reduce_sum, *, preserve_grad: bool = Fals
         global_denominator = global_values[index * 2 + 1].clamp_min(1e-12)
         global_mean = global_numerator / global_denominator
         if preserve_grad:
-            # FSDP averages gradients across ranks; scale each local numerator
+            # DDP averages gradients across ranks; scale each local numerator
             # so the averaged gradient equals the global weighted-mean gradient.
             local_gradient = numerator * world_size / global_denominator
             loss = local_gradient + (global_mean - local_gradient.detach())
@@ -375,6 +512,11 @@ def save_training_state(
 ) -> Path:
     """Persist enough state to continue the optimizer trajectory exactly."""
     path = checkpoint_dir / "training_state.pt"
+    scheduler_state = scheduler.state_dict() if scheduler is not None else None
+    if isinstance(scheduler_state, dict) and callable(scheduler_state.get("anneal_func")):
+        # OneCycleLR stores a Python function in its state. Persist its known
+        # function name so the checkpoint remains loadable with weights_only=True.
+        scheduler_state["anneal_func"] = scheduler_state["anneal_func"].__name__
     torch.save(
         {
             "format_version": 1,
@@ -383,7 +525,7 @@ def save_training_state(
             "num_processes": num_processes,
             "per_device_batch_size": per_device_batch_size,
             "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict() if scheduler is not None else None,
+            "scheduler": scheduler_state,
         },
         path,
     )
@@ -397,6 +539,7 @@ def load_training_state(
     gradient_accumulation_steps: int,
     num_processes: int,
     per_device_batch_size: int = 1,
+    total_steps: int | None = None,
 ) -> int | None:
     """Restore an optimizer checkpoint, rejecting incompatible DDP topology."""
     path = checkpoint_dir / "training_state.pt"
@@ -409,11 +552,28 @@ def load_training_state(
         raise RuntimeError("resume checkpoint num_processes differs from this run")
     if state.get("per_device_batch_size", 1) != per_device_batch_size:
         raise RuntimeError("resume checkpoint per_device_batch_size differs from this run")
-    optimizer.load_state_dict(state["optimizer"])
     saved_scheduler = state.get("scheduler")
+    saved_total_steps = saved_scheduler.get("total_steps") if isinstance(saved_scheduler, dict) else None
+    if total_steps is not None and saved_total_steps != total_steps:
+        raise RuntimeError(
+            f"resume checkpoint max_steps ({saved_total_steps}) differs from this run ({total_steps}); "
+            "start a fresh run to use a different OneCycleLR schedule"
+        )
+    optimizer.load_state_dict(state["optimizer"])
     if scheduler is None and saved_scheduler is not None:
         raise RuntimeError("resume checkpoint has scheduler state but this run has no scheduler")
+    if scheduler is not None and saved_scheduler is None:
+        raise RuntimeError("resume checkpoint has no scheduler state but this run requires one")
     if scheduler is not None and saved_scheduler is not None:
+        anneal_name = saved_scheduler.get("anneal_func")
+        if isinstance(anneal_name, str):
+            supported_annealers = {
+                "_annealing_cos": scheduler._annealing_cos,
+                "_annealing_linear": scheduler._annealing_linear,
+            }
+            if anneal_name not in supported_annealers:
+                raise RuntimeError(f"unsupported scheduler anneal function in checkpoint: {anneal_name}")
+            saved_scheduler["anneal_func"] = supported_annealers[anneal_name]
         scheduler.load_state_dict(saved_scheduler)
     return int(state["optimizer_step"])
 
@@ -457,8 +617,9 @@ def save_best_adapter(
 def save_best_adapter_state(
     run_dir: Path, state_dict, config: Config, step: int, val_loss: float,
     optimizer=None, scheduler=None, gradient_accumulation_steps: int = 1, num_processes: int = 1,
+    checkpoint_name: str = "best",
 ) -> Path:
-    path = run_dir / "checkpoints" / "best"
+    path = run_dir / "checkpoints" / checkpoint_name
     path.mkdir(parents=True, exist_ok=True)
     adapter = path / "lora.safetensors"
     save_file(state_dict, str(adapter))
@@ -482,9 +643,12 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
     unwrapped = runtime.model
     unwrapped.eval()
     totals = {"total": 0.0, "text": 0.0, "semantic": 0.0, "nonsemantic": 0.0}
+    nonpadding_text_loss_sum = 0.0
+    nonpadding_text_token_count = 0
     count = 0
     with torch.no_grad():
-        local_samples = val_samples[rank::world_size]
+        selected_samples = evenly_spaced_validation_samples(val_samples, config.validation_max_samples)
+        local_samples = selected_samples[rank::world_size]
         for sample in local_samples:
             example = build_example(config, sample, runtime, random_crop=False)
             codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
@@ -497,39 +661,196 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
             totals["text"] += float(comps["text"].detach())
             totals["semantic"] += float(comps["audio_semantic"].detach())
             totals["nonsemantic"] += float(comps["audio_nonsemantic"].detach())
+            labels = torch.tensor(example.labels, dtype=torch.long, device=device).unsqueeze(0)
+            loss_mask = torch.tensor(example.loss_mask, dtype=torch.bool, device=device).unsqueeze(0)
+            text_loss_sum, text_token_count = text_target_token_loss_stats(
+                {"labels": labels, "loss_mask": loss_mask}, output, runtime.tokenizer.padding_id,
+            )
+            nonpadding_text_loss_sum += float(text_loss_sum)
+            nonpadding_text_token_count += int(text_token_count)
             count += 1
     unwrapped.train()
-    reduced = torch.tensor([totals["total"], totals["text"], totals["semantic"], totals["nonsemantic"], count], device=device)
+    reduced = torch.tensor([
+        totals["total"], totals["text"], totals["semantic"], totals["nonsemantic"], count,
+        nonpadding_text_loss_sum, nonpadding_text_token_count,
+    ], device=device)
     if world_size > 1:
         torch.distributed.all_reduce(reduced, op=torch.distributed.ReduceOp.SUM)
     total_count = float(reduced[4].item())
     if total_count == 0:
         raise RuntimeError("validation has no samples after rank partitioning")
+    text_token_count = float(reduced[6].item())
+    text_nonpadding_loss = float(reduced[5].item()) / text_token_count if text_token_count else float("inf")
+    audio_semantic_loss = float(reduced[2].item()) / total_count
+    audio_nonsemantic_loss = float(reduced[3].item()) / total_count
     return {
         "val/loss_total": float(reduced[0].item()) / total_count,
         "val/loss_text": float(reduced[1].item()) / total_count,
-        "val/loss_audio_semantic": float(reduced[2].item()) / total_count,
-        "val/loss_audio_nonsemantic": float(reduced[3].item()) / total_count,
+        "val/loss_text_nonpadding": text_nonpadding_loss,
+        "val/text_nonpadding_tokens": text_token_count,
+        "val/loss_audio_semantic": audio_semantic_loss,
+        "val/loss_audio_nonsemantic": audio_nonsemantic_loss,
+        "val/loss_selection": text_nonpadding_loss + audio_semantic_loss + audio_nonsemantic_loss,
     }
 
 
-def verify_reloaded_adapter(config: Config, sample, adapter: Path) -> float:
-    """Load base + adapter in a fresh model object and return teacher-forced loss."""
-    fresh = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
-    stage = getattr(config, "train_stage", "joint").lower()
-    if stage in {"temporal_only", "freeze_depformer"}:
-        prefixes = ("transformer",)
-    elif stage in {"depth_only", "freeze_tempformer"}:
-        prefixes = ("depformer",)
-    else:
-        prefixes = ("transformer", "depformer") if config.depformer_learning_rate is not None else ("transformer",)
-    inject_lora(fresh.model, config.lora_rank, config.lora_alpha, prefixes=prefixes)
-    load_adapter(fresh.model, adapter)
-    fresh.model.eval()
-    example = build_example(config, sample, fresh)
-    with torch.no_grad():
-        total, _, _ = one_step(config, fresh, example)
-    return float(total)
+def validation_selection_loss(metrics: dict[str, float]) -> float:
+    """Choose checkpoints using valid text targets plus the two agent-audio losses."""
+    keys = (
+        "val/loss_text_nonpadding",
+        "val/loss_audio_semantic",
+        "val/loss_audio_nonsemantic",
+    )
+    if any(key not in metrics for key in keys):
+        return float("inf")
+    return sum(metrics[key] for key in keys)
+
+
+def generation_checkpoint_score(metrics: dict, baseline_cer: float | None = None) -> float:
+    """Return CER only for complete, non-empty generation that beats the starting adapter."""
+    if metrics.get("val/generation_empty_samples", 0):
+        return float("inf")
+    cer = float(metrics.get("val/generation_cer", float("inf")))
+    if baseline_cer is not None and cer >= baseline_cer:
+        return float("inf")
+    return cer
+
+
+def inference_config_snapshot(config: Config, adapter_path: Path, output_dir: Path) -> dict:
+    """Create a standalone inference config matching the effective training inputs."""
+    data = {
+        "prepared_dir": str(config.prepared_dir),
+        "window_seconds": config.window_seconds,
+        "val_ratio": config.val_ratio,
+    }
+    if config.val_manifest is not None:
+        data["val_manifest"] = str(config.val_manifest)
+    if config.test_manifest is not None:
+        data["test_manifest"] = str(config.test_manifest)
+    return {
+        "model": {
+            "root": str(config.model_root),
+            "source": str(config.personaplex_source),
+            "device": config.device,
+        },
+        "data": data,
+        "lora": {"qlora": config.qlora, "quant_type": config.quant_type},
+        "adapter": {"path": str(adapter_path)},
+        "seed": config.seed,
+        "generation": config.generation_settings.as_dict(),
+        "inference": {"output_dir": str(output_dir)},
+    }
+
+
+def evenly_spaced_validation_samples(samples: list, limit: int) -> list:
+    """Choose a deterministic spread over a conversation-ordered validation set."""
+    if limit < 1:
+        raise ValueError("validation sample limit must be positive")
+    if len(samples) <= limit:
+        return list(samples)
+    if limit == 1:
+        return [samples[len(samples) // 2]]
+    indices = [round(index * (len(samples) - 1) / (limit - 1)) for index in range(limit)]
+    return [samples[index] for index in indices]
+
+
+def evaluate_free_running(runtime, samples: list, config: Config) -> dict:
+    """Score autoregressive text on a small, fixed held-out subset."""
+    evaluated = []
+    unique_conversations = []
+    seen_groups = set()
+    for sample in samples:
+        keys = conversation_group_keys(sample)
+        if any(key in seen_groups for key in keys):
+            continue
+        seen_groups.update(keys)
+        unique_conversations.append(sample)
+    candidates = evenly_spaced_validation_samples(
+        unique_conversations, max(config.free_running_eval_samples * 4, config.free_running_eval_samples),
+    )
+    for sample in candidates:
+        agent_words = [
+            word for word in sample.words
+            if word.speaker == "agent" and sample.window_start_sec <= word.start < sample.window_end_sec
+        ]
+        if not agent_words:
+            continue
+        clipped_end = min(sample.window_end_sec, sample.audio.duration_sec)
+        latest_start = max(sample.window_start_sec, clipped_end - config.free_running_eval_window_seconds)
+        window_start = max(sample.window_start_sec, min(min(word.start for word in agent_words), latest_start))
+        end_sec = min(
+            sample.window_end_sec,
+            window_start + config.free_running_eval_window_seconds,
+            sample.audio.duration_sec,
+        )
+        if end_sec <= window_start:
+            continue
+        window = sample.with_window(window_start, end_sec)
+        reference = " ".join(
+            word.word for word in window.words
+            if word.speaker == "agent" and window.window_start_sec <= word.start < window.window_end_sec
+        )
+        if not reference.strip():
+            continue
+        hypothesis = generate_text_with_runtime(
+            runtime, window,
+            generation=getattr(config, "generation_settings", GenerationSettings()),
+            seed=config.seed + len(evaluated),
+        )
+        metrics = text_error_metrics(reference, hypothesis)
+        if metrics is not None:
+            evaluated.append((metrics, sample.sample_id, reference, hypothesis, window.window_start_sec, window.window_end_sec))
+        if len(evaluated) >= config.free_running_eval_samples:
+            break
+    if not evaluated:
+        raise RuntimeError("free-running validation found no samples with agent text references")
+    empty_hypotheses = sum(not hypothesis.strip() for _, _, _, hypothesis, _, _ in evaluated)
+    return {
+        "val/generation_cer": sum(float(item[0]["cer"]) for item in evaluated) / len(evaluated),
+        "val/generation_wer": sum(float(item[0]["wer"]) for item in evaluated) / len(evaluated),
+        "val/generation_samples": len(evaluated),
+        "val/generation_empty_samples": empty_hypotheses,
+        "samples": [
+            {"sample_id": sample_id, "reference": reference, "hypothesis": hypothesis,
+             "cer": metrics["cer"], "wer": metrics["wer"],
+             "window_start_sec": start_sec, "window_end_sec": end_sec,
+             "source_duration_sec": next(
+                 sample.audio.duration_sec for sample in unique_conversations
+                 if sample.sample_id == sample_id
+             )}
+            for metrics, sample_id, reference, hypothesis, start_sec, end_sec in evaluated
+        ],
+    }
+
+
+def verify_reloaded_adapter(config: Config, sample, adapter: Path, runtime) -> float:
+    """Round-trip saved LoRA weights in-place without allocating a second 7B base."""
+    parallel_model = runtime.model
+    model = unwrap_parallel_model(parallel_model)
+    was_training = parallel_model.training
+    runtime.model = model
+    try:
+        model.eval()
+        example = build_example(config, sample, runtime)
+        with torch.no_grad():
+            reference_loss, _, _ = one_step(config, runtime, example)
+        with torch.no_grad():
+            for name, parameter in model.named_parameters():
+                if ".lora_a." in name or ".lora_b." in name:
+                    parameter.add_(1.0)
+        load_adapter(model, adapter)
+        with torch.no_grad():
+            reloaded_loss, _, _ = one_step(config, runtime, example)
+        reference_loss = float(reference_loss)
+        reloaded_loss = float(reloaded_loss)
+        if abs(reloaded_loss - reference_loss) > 1e-5:
+            raise RuntimeError(
+                f"reloaded adapter loss drifted: {reloaded_loss} vs {reference_loss}"
+            )
+        return reloaded_loss
+    finally:
+        runtime.model = parallel_model
+        parallel_model.train(was_training)
 
 
 def run(
@@ -537,8 +858,8 @@ def run(
     smoke: bool = False,
     resume_from: str | None = None,
 ) -> Path | None:
-    from accelerate import Accelerator
-    # Moshi's lazy compile wrappers can trigger graph/compile shape issues under FSDP.
+    # Moshi's lazy compile wrappers can trigger graph/compile shape issues on
+    # the fixed, padded sequences used by distributed training.
     os.environ.setdefault("NO_TORCH_COMPILE", "1")
     for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[variable] = "1"
@@ -560,27 +881,34 @@ def run(
         world_size = torch.distributed.get_world_size()
     else:
         rank, world_size, local_rank = 0, 1, 0
-    use_fsdp = world_size > 1
-    if use_fsdp and not torch.cuda.is_available():
-        raise RuntimeError("multi-process training requires CUDA and FSDP FULL_SHARD")
+    distributed = world_size > 1
+    if distributed and not torch.cuda.is_available():
+        raise RuntimeError("multi-process DDP training requires CUDA")
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     global_batch_size = effective_global_batch_size(config.per_device_batch_size, world_size, accum_steps)
     cpu_threads = limit_cpu_threads(torch)
     seed_everything(config.seed, torch)
     main_process = rank == 0
     def barrier():
-        if use_fsdp:
+        if distributed:
             torch.distributed.barrier(device_ids=[local_rank])
     def all_reduce_sum(value):
-        if use_fsdp:
+        if distributed:
             torch.distributed.all_reduce(value, op=torch.distributed.ReduceOp.SUM)
         return value
     # Dataset loading
     test_samples = []
-    if config.val_manifest:
+    if config.eval_on_train_samples:
+        if config.no_eval or config.sample_number is None:
+            raise ValueError("eval_on_train_samples requires evaluation enabled and a finite sample_number")
+        if config.val_manifest_path is not None:
+            raise ValueError("eval_on_train_samples cannot be combined with a separate validation manifest")
+        train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
+        val_samples = []
+    elif config.val_manifest:
         train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
         val_samples = PreparedDataset(config.val_manifest, config.window_seconds).load()
-    elif config.eval_every_steps > 0 and not config.no_eval:
+    elif (config.eval_every_steps > 0 or config.free_running_eval_every_steps > 0) and not config.no_eval:
         train_samples, val_samples = PreparedDataset(config.manifest, config.window_seconds).split(
             val_ratio=config.val_ratio, seed=config.seed
         )
@@ -593,12 +921,20 @@ def run(
     train_groups = {key for sample in train_samples for key in conversation_group_keys(sample)}
     val_groups = {key for sample in val_samples for key in conversation_group_keys(sample)}
     test_groups = {key for sample in test_samples for key in conversation_group_keys(sample)}
-    if train_groups & val_groups or train_groups & test_groups or val_groups & test_groups:
+    if (
+        (not config.eval_on_train_samples and train_groups & val_groups)
+        or train_groups & test_groups
+        or val_groups & test_groups
+    ):
         raise ValueError("train/validation/test manifests contain overlapping conversation groups")
 
     train_conversations = limit_conversations(train_samples, config.sample_number)
     train_samples = duration_chunks(train_conversations, config.duration_sec)
     val_samples = duration_chunks(val_samples, config.duration_sec) if val_samples else []
+    if config.eval_on_train_samples:
+        # Explicitly scoped overfit gate: monitor autoregressive behavior on the
+        # exact fixed training examples. Full runs continue using disjoint splits.
+        val_samples = list(train_samples)
     test_samples = duration_chunks(test_samples, config.duration_sec) if test_samples else []
 
     # Run directory creation (coordinated across ranks)
@@ -611,9 +947,11 @@ def run(
             "model_root": str(config.model_root),
             "personaplex_source": str(config.personaplex_source),
             "manifest": str(config.manifest),
+            "codec_cache_dir": str(config.codec_cache_dir) if config.codec_cache_dir else None,
             "output_dir": str(run_dir),
             "duration_sec": config.duration_sec,
             "sample_number": config.sample_number,
+            "profile_steps": config.profile_steps,
             "max_steps": 1 if smoke else config.max_steps,
             "learning_rate": config.learning_rate,
             "lora_rank": config.lora_rank,
@@ -627,6 +965,7 @@ def run(
             "text_padding_weight": config.text_padding_weight,
             "log_freq": config.log_freq,
             "no_eval": config.no_eval,
+            "eval_on_train_samples": config.eval_on_train_samples,
             "ckpt_freq": config.ckpt_freq,
             "torch_compile_disabled": os.environ.get("NO_TORCH_COMPILE", ""),
             "qlora": config.qlora,
@@ -636,13 +975,18 @@ def run(
             "cpu_threads": cpu_threads,
             "gradient_accumulation_steps": accum_steps,
             "per_device_batch_size": config.per_device_batch_size,
-            "num_workers": config.num_workers,
+            "num_workers": 0 if smoke else config.num_workers,
             "prefetch_factor": config.prefetch_factor,
             "pin_memory": config.pin_memory,
-            "persistent_workers": config.persistent_workers,
+            "persistent_workers": config.persistent_workers and not smoke and config.num_workers > 0,
             "global_batch_size": global_batch_size,
             "warmup_steps": config.warmup_steps,
             "eval_every_steps": config.eval_every_steps,
+            "free_running_eval_every_steps": config.free_running_eval_every_steps,
+            "free_running_eval_samples": config.free_running_eval_samples,
+            "free_running_eval_window_seconds": config.free_running_eval_window_seconds,
+            "validation_max_samples": config.validation_max_samples,
+            "validation_generation_settings": config.generation_settings.as_dict(),
             "save_every_steps": config.save_every_steps,
             "random_crop": config.random_crop,
             "randomize_train": config.randomize_train,
@@ -668,34 +1012,45 @@ def run(
 
     if run_dir is not None:
         write_rank_info(run_dir, rank, world_size, device, len(train_samples))
-    if use_fsdp:
+    if distributed:
         barrier()
 
-    # Only rank zero materializes the base checkpoint; other ranks initialize
-    # the identical architecture on meta tensors for FSDP synchronization.
+    # DDP keeps a complete frozen base model on every device. Each rank loads
+    # the same explicit local PersonaPlex checkpoint before DDP synchronizes it.
     runtime = load_runtime(
         RuntimePaths(config.model_root, config.personaplex_source),
         str(device), config.qlora, config.quant_type,
-        model_device=("cpu" if rank == 0 else "meta") if use_fsdp else str(device),
-        load_model_weights=(rank == 0 or not use_fsdp),
+        model_device=str(device),
+        load_model_weights=True,
+        codec_cache_dir=config.codec_cache_dir,
     )
+    inspection = None
+    for sample in train_samples:
+        try:
+            inspection = inspect_training_sample(sample, runtime.tokenizer)
+            break
+        except ValueError as exc:
+            if "no agent text target" not in str(exc):
+                raise
+    if inspection is None:
+        raise ValueError("training chunks contain no agent text targets")
+    if main_process:
+        print("[Training sample inspection] " + json.dumps(inspection, ensure_ascii=False))
 
     # Inject LoRA with Stage-Wise Freezing support
     stage = getattr(config, "train_stage", "joint").lower()
+    lora_prefixes = lora_prefixes_for_stage(config)
     if stage in {"temporal_only", "freeze_depformer"}:
-        lora_prefixes = ("transformer",)
         if hasattr(runtime.model, "depformer"):
             runtime.model.depformer.requires_grad_(False)
         if main_process:
             print("[Stage-Wise Training] Active Stage: TEMPORAL ONLY (Depth Transformer / Depformer is 100% frozen).")
     elif stage in {"depth_only", "freeze_tempformer"}:
-        lora_prefixes = ("depformer",)
         if hasattr(runtime.model, "transformer"):
             runtime.model.transformer.requires_grad_(False)
         if main_process:
             print("[Stage-Wise Training] Active Stage: DEPTH ONLY (Temporal 7B Transformer is 100% frozen).")
     else:
-        lora_prefixes = ("transformer", "depformer") if config.depformer_learning_rate is not None else ("transformer",)
         if main_process:
             print("[Stage-Wise Training] Active Stage: JOINT (Both Temporal & Depth active).")
 
@@ -710,7 +1065,7 @@ def run(
         if main_process:
             print("Gradient checkpointing enabled on transformer layers.")
 
-    # Load adapter weights before FSDP wrapping.
+    # Load adapter weights before DDP wrapping.
     resume_checkpoint_dir = None
     adapter_resume_step = 0
     if resume_from:
@@ -771,8 +1126,14 @@ def run(
             total_steps=max_steps,
             pct_start=config.pct_start,
         )
-    if use_fsdp:
-        runtime.model = wrap_model_fsdp(runtime.model, strategy="full_shard", device=device)
+    if distributed:
+        runtime.model = torch.nn.parallel.DistributedDataParallel(
+            runtime.model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,
+            find_unused_parameters=False,
+        )
         barrier()
 
     start_step = adapter_resume_step
@@ -784,6 +1145,7 @@ def run(
             accum_steps,
             world_size,
             config.per_device_batch_size,
+            total_steps=max_steps if max_steps > 1 else None,
         )
         if restored_step is not None:
             start_step = restored_step
@@ -807,13 +1169,52 @@ def run(
     saved = None
     best_saved = None
     best_val_loss = float("inf")
+    best_inference_saved = None
+    best_generation_cer = float("inf")
+    baseline_generation_cer = None
+    best_generation_sample = None
     last_record = None
     reload_checks: list[dict[str, float | int]] = []
     started = time.monotonic()
 
+    if val_samples and not config.no_eval and config.free_running_eval_every_steps > 0:
+        # Establish the pre-training generation baseline with the same samples,
+        # seed, and LMGen settings used for later checkpoint selection.
+        barrier()
+        baseline_result = [None]
+        if main_process:
+            try:
+                baseline_result[0] = evaluate_free_running(runtime, val_samples, config)
+            except Exception as exc:
+                baseline_result[0] = {"error": f"{type(exc).__name__}: {exc}"}
+        if distributed:
+            torch.distributed.broadcast_object_list(baseline_result, src=0, device=device)
+        if isinstance(baseline_result[0], dict) and "error" in baseline_result[0]:
+            raise RuntimeError(f"base-model free-running validation failed: {baseline_result[0]['error']}")
+        baseline_generation_cer = float(baseline_result[0]["val/generation_cer"])
+        if main_process and run_dir is not None:
+            baseline_row = {
+                "step": 0, "val/generation_baseline": True, **baseline_result[0],
+            }
+            with (run_dir / "free_running_metrics.jsonl").open("a", encoding="utf-8") as metrics_file:
+                metrics_file.write(json.dumps(baseline_row, ensure_ascii=False) + "\n")
+            if writer:
+                writer.add_scalar("val/generation_cer_base", baseline_generation_cer, 0)
+                writer.add_scalar(
+                    "val/generation_empty_samples_base",
+                    baseline_result[0]["val/generation_empty_samples"], 0,
+                )
+            print(json.dumps({
+                "event": "starting_generation_baseline",
+                "cer": baseline_generation_cer,
+                "wer": baseline_result[0]["val/generation_wer"],
+                "empty_samples": baseline_result[0]["val/generation_empty_samples"],
+            }, ensure_ascii=False))
+        barrier()
+
     try:
         max_micro_steps = max_steps * accum_steps
-        progress = tqdm(total=max_steps, initial=start_step, desc="training (FSDP)" if use_fsdp else "training", unit="update", dynamic_ncols=True) if main_process else None
+        progress = tqdm(total=max_steps, initial=start_step, desc="training (DDP)" if distributed else "training", unit="update", dynamic_ncols=True) if main_process else None
         last_update_time = time.monotonic()
         batch_iterator = iter(iter_training_batches(
             config, train_conversations, runtime, device, rank,
@@ -822,13 +1223,29 @@ def run(
         samples_seen = 0
         audio_seconds_seen = 0.0
         audio_frames_seen = 0
+        text_target_tokens_seen = 0
+        text_padding_positions_seen = 0
+        pending_text_target_tokens = torch.zeros((), dtype=torch.int64, device=device)
+        pending_text_padding_positions = torch.zeros((), dtype=torch.int64, device=device)
+        pending_text_target_ce_sum = torch.zeros((), dtype=torch.float32, device=device)
+        pending_text_target_ce_count = torch.zeros((), dtype=torch.int64, device=device)
+        pending_profile_times = torch.zeros(3, dtype=torch.float64, device=device)
+
+        def profile_sync() -> None:
+            if config.profile_steps and device.type == "cuda":
+                torch.cuda.synchronize(device)
 
         optimizer_step = start_step
         for micro_step in range(start_micro_step, max_micro_steps):
+            profile_sync()
+            data_started = time.monotonic() if config.profile_steps else 0.0
             try:
-                batch, epoch, local_samples, local_audio_seconds, local_audio_frames = next(batch_iterator)
+                batch, epoch, local_samples, local_audio_seconds, local_audio_frames, batch_samples = next(batch_iterator)
             except StopIteration as exc:
                 raise RuntimeError("training batch iterator stopped before max_steps") from exc
+            profile_sync()
+            if config.profile_steps:
+                pending_profile_times[0] += time.monotonic() - data_started
             codes = batch["codes"]
             samples_seen += local_samples * world_size
             global_audio_seconds = all_reduce_sum(
@@ -838,27 +1255,76 @@ def run(
             audio_frames_seen += int(global_audio_seconds[1])
 
             sync_gradients = (micro_step + 1 - start_micro_step) % accum_steps == 0 or micro_step + 1 == max_micro_steps
-            sync_context = runtime.model.no_sync() if use_fsdp and not sync_gradients else nullcontext()
+            sync_context = runtime.model.no_sync() if distributed and not sync_gradients else nullcontext()
             with sync_context:
+                profile_sync()
+                forward_started = time.monotonic() if config.profile_steps else 0.0
                 output = model_forward_train(runtime.model, codes)
+                text_targets, text_padding = text_supervision_counts(
+                    batch, output, runtime.tokenizer.padding_id
+                )
+                pending_text_target_tokens += text_targets.detach()
+                pending_text_padding_positions += text_padding.detach()
+                target_ce_sum, target_ce_count = text_target_token_loss_stats(
+                    batch, output, runtime.tokenizer.padding_id
+                )
+                pending_text_target_ce_sum += target_ce_sum
+                pending_text_target_ce_count += target_ce_count
                 loss_result = loss_components(
                     output, codes, batch, runtime.tokenizer.padding_id, torch,
                     config.first_codebook_weight_multiplier, config.text_padding_weight,
-                    distributed=use_fsdp,
+                    distributed=distributed,
                 )
-                if use_fsdp:
+                if distributed:
                     components, total = reduce_distributed_loss(
                         loss_result[1], all_reduce_sum, preserve_grad=True, world_size=world_size
                     )
                 else:
                     total = loss_result[0]
                     components = loss_result[1]
+                profile_sync()
+                if config.profile_steps:
+                    pending_profile_times[1] += time.monotonic() - forward_started
+                profile_sync()
+                backward_started = time.monotonic() if config.profile_steps else 0.0
                 (total / accum_steps).backward()
+                profile_sync()
+                if config.profile_steps:
+                    pending_profile_times[2] += time.monotonic() - backward_started
+            profile_sync()
+            optimizer_started = time.monotonic() if config.profile_steps else 0.0
             sync_state = type("SyncState", (), {"sync_gradients": sync_gradients})()
             grad_norm = step_optimizer_if_ready(sync_state, optimizer, scheduler, trainable, runtime.model)
+            profile_sync()
+            optimizer_seconds = time.monotonic() - optimizer_started if config.profile_steps else 0.0
 
             if not sync_gradients:
                 continue
+
+            global_text_stats = all_reduce_sum(torch.stack([
+                pending_text_target_tokens.float(), pending_text_padding_positions.float(),
+                pending_text_target_ce_sum, pending_text_target_ce_count.float(),
+            ]))
+            text_target_tokens_seen += int(global_text_stats[0])
+            text_padding_positions_seen += int(global_text_stats[1])
+            text_nonpadding_loss = float(
+                global_text_stats[2] / global_text_stats[3].clamp_min(1.0)
+            )
+            pending_text_target_tokens.zero_()
+            pending_text_padding_positions.zero_()
+            pending_text_target_ce_sum.zero_()
+            pending_text_target_ce_count.zero_()
+
+            profile_times = None
+            if config.profile_steps:
+                profile_times = torch.cat((
+                    pending_profile_times,
+                    torch.tensor([optimizer_seconds], dtype=torch.float64, device=device),
+                ))
+                if distributed:
+                    torch.distributed.all_reduce(profile_times, op=torch.distributed.ReduceOp.MAX)
+                profile_times = profile_times.cpu().tolist()
+                pending_profile_times.zero_()
 
             optimizer_step += 1
 
@@ -875,9 +1341,15 @@ def run(
                     "samples_seen": samples_seen,
                     "audio_seconds_seen": audio_seconds_seen,
                     "audio_frames_seen": audio_frames_seen,
+                    "text_target_tokens_seen": text_target_tokens_seen,
+                    "text_padding_positions_seen": text_padding_positions_seen,
+                    "text_target_fraction": text_target_tokens_seen / max(
+                        1, text_target_tokens_seen + text_padding_positions_seen
+                    ),
                     "global_batch_size": global_batch_size,
                     "loss/total": float(reduced_total.detach()),
                     "loss/text": float(reduced_text.detach()),
+                    "loss/text_nonpadding": text_nonpadding_loss,
                     "loss/audio_semantic": float(reduced_sem.detach()),
                     "loss/audio_nonsemantic": float(reduced_nonsem.detach()),
                     "lr": optimizer.param_groups[0]["lr"],
@@ -885,6 +1357,14 @@ def run(
                     "samples_per_second": global_batch_size / max(time.monotonic() - last_update_time, 1e-9),
                     "gpu_peak_bytes": torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0,
                 }
+                if profile_times is not None:
+                    record.update({
+                        "timing/data_sec": profile_times[0],
+                        "timing/forward_loss_sec": profile_times[1],
+                        "timing/backward_sec": profile_times[2],
+                        "timing/optimizer_sec": profile_times[3],
+                        "timing/profiled_phase_sum_sec": sum(profile_times),
+                    })
                 last_update_time = time.monotonic()
                 last_record = record
                 if log_file:
@@ -899,38 +1379,97 @@ def run(
                     tqdm.write(json.dumps({"event": "training_step", **record}))
 
             # Validation evaluation
-            if val_samples and config.eval_every_steps > 0 and not config.no_eval and (optimizer_step % config.eval_every_steps == 0 or optimizer_step == max_steps):
+            teacher_eval_due = (
+                config.eval_every_steps > 0
+                and (optimizer_step % config.eval_every_steps == 0 or optimizer_step == max_steps)
+            )
+            generation_eval_due = (
+                config.free_running_eval_every_steps > 0
+                and (optimizer_step % config.free_running_eval_every_steps == 0 or optimizer_step == max_steps)
+            )
+            if val_samples and not config.no_eval and (teacher_eval_due or generation_eval_due):
                 barrier()
                 val_metrics = evaluate_validation(config, runtime, val_samples, rank, world_size, device)
                 barrier()
-                best_state = fsdp_adapter_state_dict(runtime.model) if use_fsdp else adapter_state_dict(runtime.model)
+                best_state = adapter_state_dict(unwrap_parallel_model(runtime.model))
+                generation_metrics = None
+                if generation_eval_due:
+                    barrier()
+                    generation_result = [None]
+                    if main_process:
+                        try:
+                            generation_result[0] = evaluate_free_running(
+                                runtime, val_samples, config,
+                            )
+                        except Exception as exc:
+                            generation_result[0] = {"error": f"{type(exc).__name__}: {exc}"}
+                    if distributed:
+                        torch.distributed.broadcast_object_list(generation_result, src=0, device=device)
+                    if isinstance(generation_result[0], dict) and "error" in generation_result[0]:
+                        raise RuntimeError(f"free-running validation failed: {generation_result[0]['error']}")
+                    generation_metrics = generation_result[0]
+                    if main_process:
+                        generation_row = {"step": optimizer_step, **generation_metrics}
+                        with (run_dir / "free_running_metrics.jsonl").open("a", encoding="utf-8") as metrics_file:
+                            metrics_file.write(json.dumps(generation_row, ensure_ascii=False) + "\n")
+                        if writer:
+                            writer.add_scalar("val/generation_cer", generation_metrics["val/generation_cer"], optimizer_step)
+                            writer.add_scalar("val/generation_wer", generation_metrics["val/generation_wer"], optimizer_step)
+                        # A blank transcript is a failed generation even when its
+                        # normalized CER happens to beat earlier checkpoints.
+                        generation_score = generation_checkpoint_score(
+                            generation_metrics, baseline_cer=baseline_generation_cer,
+                        )
+                        if generation_score < best_generation_cer:
+                            best_generation_cer = generation_score
+                            best_generation_sample = generation_metrics["samples"][0]
+                            best_inference_saved = save_best_adapter_state(
+                                run_dir, best_state, config, optimizer_step,
+                                val_metrics.get("val/loss_selection", float("inf")), optimizer, scheduler,
+                                gradient_accumulation_steps=accum_steps, num_processes=world_size,
+                                checkpoint_name="best_inference",
+                            )
+                            tqdm.write(json.dumps({
+                                "event": "new_best_free_running_checkpoint", "step": optimizer_step,
+                                "cer": best_generation_cer,
+                                "wer": generation_metrics["val/generation_wer"],
+                                "adapter": str(best_inference_saved),
+                            }, ensure_ascii=False))
+                    barrier()
                 if main_process:
                     for k, v in val_metrics.items():
                         if writer:
                             writer.add_scalar(k, v, optimizer_step)
-                    val_loss = val_metrics.get("val/loss_total", float("inf"))
+                    val_loss = validation_selection_loss(val_metrics)
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         best_saved = save_best_adapter_state(
                             run_dir, best_state, config, optimizer_step, val_loss, optimizer, scheduler,
                             gradient_accumulation_steps=accum_steps, num_processes=world_size,
+                            checkpoint_name="best_loss",
                         )
-                        tqdm.write(json.dumps({"event": "new_best_val_loss", "step": optimizer_step, "val_loss": val_loss}))
+                        tqdm.write(json.dumps({
+                            "event": "new_best_val_checkpoint", "step": optimizer_step,
+                            "selection_loss": val_loss,
+                            "text_nonpadding_loss": val_metrics.get("val/loss_text_nonpadding"),
+                            "audio_semantic_loss": val_metrics.get("val/loss_audio_semantic"),
+                            "audio_nonsemantic_loss": val_metrics.get("val/loss_audio_nonsemantic"),
+                        }))
 
             # Periodic saving & smoke reload verification
             save_interval = 1 if smoke else config.ckpt_freq
             if optimizer_step % save_interval == 0 or optimizer_step == max_steps:
                 barrier()
-                checkpoint_state = fsdp_adapter_state_dict(runtime.model) if use_fsdp else adapter_state_dict(runtime.model)
+                checkpoint_state = adapter_state_dict(unwrap_parallel_model(runtime.model))
                 if main_process:
                     saved = save_adapter_state(
                         run_dir, checkpoint_state, config, optimizer_step, optimizer, scheduler,
                         accum_steps, world_size,
                     )
                     if smoke:
-                        reload_loss = verify_reloaded_adapter(config, train_samples[micro_step % len(train_samples)], saved)
-                        if abs(reload_loss - record["loss/total"]) > 0.05:
-                            raise RuntimeError(f"reloaded adapter loss drifted: {reload_loss} vs {record['loss/total']}")
+                        reload_loss = verify_reloaded_adapter(
+                            config, batch_samples[0], saved, runtime,
+                        )
                         reload_checks.append({"step": optimizer_step, "loss": reload_loss})
                 barrier()
 
@@ -955,26 +1494,85 @@ def run(
             "checkpoint": str(saved) if saved else None,
             "best_checkpoint": str(best_saved) if best_saved else None,
             "best_val_loss": best_val_loss if best_val_loss < float("inf") else None,
+            "best_inference_checkpoint": str(best_inference_saved) if best_inference_saved else None,
+            "best_generation_cer": best_generation_cer if best_generation_cer < float("inf") else None,
+            "starting_generation_cer": baseline_generation_cer,
+            "inference_checkpoint_status": (
+                "validated_generation_improves_base"
+                if best_inference_saved is not None else "no_checkpoint_improved_base_generation"
+            ),
+            "best_inference_sample": best_generation_sample,
             "reload_checks": reload_checks,
         }
+        report = run_dir / "training_report.md"
+        inference_adapter = best_inference_saved or saved
+        inference_config_path = run_dir / "inference_config.json"
+        inference_output_dir = run_dir / "inference_smoke"
+        inference_config_path.write_text(
+            json.dumps(
+                inference_config_snapshot(config, inference_adapter, inference_output_dir),
+                indent=2,
+                ensure_ascii=False,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        run_info["inference_config"] = str(inference_config_path)
         (run_dir / "run.json").write_text(json.dumps(run_info, indent=2))
-        report = config.path.parent.parent / "reports" / "overfit_10.md"
-        report.parent.mkdir(parents=True, exist_ok=True)
+        inference_args = [
+            sys.executable, "-m", "tools.inference_smoke", "--config", str(inference_config_path),
+            "--adapter", str(inference_adapter),
+            "--output-dir", str(inference_output_dir),
+        ]
+        if best_generation_sample is not None:
+            inference_args.extend([
+                "--split", "train" if config.eval_on_train_samples else "validation",
+                "--sample-id", str(best_generation_sample["sample_id"]),
+                "--start", str(best_generation_sample["window_start_sec"]),
+                "--window-seconds", str(best_generation_sample["window_end_sec"] - best_generation_sample["window_start_sec"]),
+            ])
+        training_duration_inference_args = None
+        if (
+            best_generation_sample is not None
+            and best_generation_sample["source_duration_sec"]
+            >= best_generation_sample["window_start_sec"] + config.duration_sec
+        ):
+            training_duration_inference_args = list(inference_args)
+            duration_index = training_duration_inference_args.index("--window-seconds") + 1
+            training_duration_inference_args[duration_index] = str(config.duration_sec)
+            training_duration_inference_args.extend([
+                "--output-dir", str(run_dir / "inference_training_duration"),
+            ])
         report.write_text(
             "# PersonaPlex Training Report\n\n"
-            "Status: INCOMPLETE — trainer run completed; overfit and inference criteria require separate verification.\n\n"
+            f"Status: {'GENERATION-VALIDATED' if best_inference_saved is not None else 'NO GENERATION-VALID ADAPTER'} — "
+            "training loss alone does not establish usable inference.\n\n"
+            f"- Command: `{shlex.join([sys.executable, *sys.argv])}`\n"
             f"- Dataset: {config.manifest}\n- Model: {config.model_root}\n- LoRA: rank={config.lora_rank}, alpha={config.lora_alpha}\n"
             f"- Processes (GPUs): {world_size}\n"
             f"- Steps: {max_steps}\n- Final loss: {last_record['loss/total'] if last_record else 'n/a'}\n"
+            f"- Text targets/padding positions: "
+            f"{last_record['text_target_tokens_seen'] if last_record else 'n/a'}/"
+            f"{last_record['text_padding_positions_seen'] if last_record else 'n/a'}\n"
+            f"- Non-padding text loss: {last_record['loss/text_nonpadding'] if last_record else 'n/a'}\n"
             f"- Best val loss: {best_val_loss if best_val_loss < float('inf') else 'n/a'}\n"
             f"- Peak GPU bytes: {peak}\n- Checkpoint: {saved}\n"
             f"- Best checkpoint: {best_saved}\n"
-            "- Inference outputs: run `python -m tools.inference_smoke` with this checkpoint.\n",
+            f"- Best inference checkpoint: {best_inference_saved}\n"
+            f"- Starting free-running CER: {baseline_generation_cer if baseline_generation_cer is not None else 'n/a'}\n"
+            f"- Best free-running CER: {best_generation_cer if best_generation_cer < float('inf') else 'n/a'}\n"
+            f"- Best inference sample: {best_generation_sample['sample_id'] if best_generation_sample else 'n/a'}\n"
+            f"- Inference command: `{shlex.join(inference_args)}`\n",
             encoding="utf-8",
         )
+        if training_duration_inference_args is not None:
+            with report.open("a", encoding="utf-8") as report_file:
+                report_file.write(
+                    f"- Same adapter/sample with training-duration input ({config.duration_sec:g}s): "
+                    f"`{shlex.join(training_duration_inference_args)}`\n"
+                )
 
     barrier()
-    return best_saved or saved
+    return best_inference_saved or best_saved or saved
 
 
 def main() -> int:

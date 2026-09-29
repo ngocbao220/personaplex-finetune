@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
@@ -81,17 +82,28 @@ class PersonaPlexTrainingExampleBuilder:
 
     pause_frames = 6
 
-    def __init__(self, codec: Codec, tokenizer: Tokenizer, initial_tokens: Sequence[int], zero_token: int) -> None:
+    def __init__(
+        self, codec: Codec, tokenizer: Tokenizer, initial_tokens: Sequence[int], zero_token: int,
+        pause_frames: int = 6,
+    ) -> None:
         self.codec = codec
         self.tokenizer = tokenizer
         self.initial_tokens = tuple(initial_tokens)
         self.zero_token = zero_token
+        if pause_frames < 0:
+            raise ValueError("pause frame count must be non-negative")
+        self.pause_frames = pause_frames
         if codec.codebooks != 8 or len(self.initial_tokens) != 17:
             raise ValueError("PersonaPlex requires 8 codebooks per speaker and 17 initial tokens")
 
     def build(self, sample: PreparedSample, dialogue_codes=None) -> TrainingExample:
         if dialogue_codes is not None:
             agent, user = dialogue_codes
+        elif hasattr(self.codec, "encode_conversation_stereo_cached"):
+            agent, user = self.codec.encode_conversation_stereo_cached(
+                sample.conversation_wav, sample.agent_channel, sample.user_channel,
+                sample.window_start_sec, sample.window_end_sec,
+            )
         elif hasattr(self.codec, "encode_conversation_stereo"):
             agent, user = self.codec.encode_conversation_stereo(
                 sample.conversation_wav, sample.agent_channel, sample.user_channel, sample.window_start_sec, sample.window_end_sec
@@ -139,7 +151,7 @@ class PersonaPlexTrainingExampleBuilder:
             min(sample.window_end_sec, sample.audio.duration_sec) - sample.window_start_sec,
         )
         valid_dialogue_frames = min(
-            dialogue_frames, round(valid_duration * self.codec.frame_rate)
+            dialogue_frames, math.ceil(valid_duration * self.codec.frame_rate - 1e-6)
         )
         dialogue_validity = (True,) * valid_dialogue_frames + (False,) * (dialogue_frames - valid_dialogue_frames)
         dialogue_text_mask = dialogue_validity

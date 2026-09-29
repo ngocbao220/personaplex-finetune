@@ -159,3 +159,47 @@ class DistributedBucketBatchSampler(torch.utils.data.Sampler):
 
     def __len__(self):
         return len(self._batches())
+
+
+class RankStrideBatchSampler(torch.utils.data.Sampler):
+    """Yield fixed local batches after Moshi-style global rank-stride partitioning."""
+
+    def __init__(self, sample_count: int, batch_size: int, rank: int, world_size: int,
+                 seed: int = 42, shuffle: bool = False) -> None:
+        if sample_count < 0 or batch_size < 1 or world_size < 1 or not 0 <= rank < world_size:
+            raise ValueError("invalid rank-stride batch sampler dimensions")
+        self.sample_count = sample_count
+        self.batch_size = batch_size
+        self.rank = rank
+        self.world_size = world_size
+        self.seed = seed
+        self.shuffle = shuffle
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def _indices(self) -> list[int]:
+        indices = list(range(self.sample_count))
+        if self.shuffle:
+            import random
+            random.Random(self.seed + self.epoch).shuffle(indices)
+        return indices[self.rank::self.world_size]
+
+    def __iter__(self):
+        rank_indices = self._indices()
+        # All ranks must execute the same number of DDP forwards. Drop only the
+        # incomplete tail, matching the previous in-process rank-stride iterator.
+        common_batches = min(
+            len(list(range(worker, self.sample_count, self.world_size))) // self.batch_size
+            for worker in range(self.world_size)
+        )
+        usable = common_batches * self.batch_size
+        for start in range(0, usable, self.batch_size):
+            yield rank_indices[start:start + self.batch_size]
+
+    def __len__(self) -> int:
+        return min(
+            len(list(range(worker, self.sample_count, self.world_size))) // self.batch_size
+            for worker in range(self.world_size)
+        )

@@ -10,6 +10,7 @@ import torch
 
 from personaplex_finetuning.batching import (
     DistributedBucketBatchSampler,
+    RankStrideBatchSampler,
     RawAudioDataset,
     RawAudioItem,
     collate_raw_audio,
@@ -38,6 +39,52 @@ def example(length, padding_id=3):
 
 
 class BatchContractTest(unittest.TestCase):
+    def test_rank_stride_data_loader_batches_are_disjoint_and_keep_moshi_order(self):
+        batches = [
+            list(RankStrideBatchSampler(12, 1, rank, 4, shuffle=False))
+            for rank in range(4)
+        ]
+        flattened = [[index for batch in rank_batches for index in batch] for rank_batches in batches]
+        self.assertEqual(flattened, [[0, 4, 8], [1, 5, 9], [2, 6, 10], [3, 7, 11]])
+        self.assertEqual([len(rank_batches) for rank_batches in batches], [3, 3, 3, 3])
+
+    def test_rank_stride_batch_sampler_drops_only_unmatched_final_microbatch(self):
+        batches = [
+            list(RankStrideBatchSampler(11, 2, rank, 4, shuffle=False))
+            for rank in range(4)
+        ]
+        self.assertEqual(batches, [[[0, 4]], [[1, 5]], [[2, 6]], [[3, 7]]])
+
+    def test_stereo_mimi_cache_reuses_codes_and_invalidates_changed_audio(self):
+        class CountingMimi:
+            def __init__(self):
+                self.calls = 0
+
+            def encode(self, audio):
+                self.calls += 1
+                return torch.full((2, 8, 3), self.calls, dtype=torch.long)
+
+        fake_sphn = SimpleNamespace(
+            read=lambda *_args, **_kwargs: (np.zeros((2, 24000), dtype=np.float32), 24000)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = Path(tmp) / "conversation.wav"
+            audio_path.write_bytes(b"audio-v1")
+            mimi = CountingMimi()
+            codec = MimiCodec(
+                mimi, 24000, 12.5, "cpu", None,
+                cache_dir=Path(tmp) / "mimi-cache", cache_namespace="mimi-v1",
+            )
+            with patch.dict("sys.modules", {"sphn": fake_sphn}):
+                first = codec.encode_conversation_stereo_cached(audio_path, 0, 1, 0.0, 1.0)
+                second = codec.encode_conversation_stereo_cached(audio_path, 0, 1, 0.0, 1.0)
+                audio_path.write_bytes(b"audio-v2-changed")
+                third = codec.encode_conversation_stereo_cached(audio_path, 0, 1, 0.0, 1.0)
+
+        self.assertEqual(mimi.calls, 2)
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, third)
+
     def test_raw_dataset_decodes_only_requested_real_audio_window(self):
         with tempfile.TemporaryDirectory() as tmp:
             audio_path = Path(tmp) / "conversation.wav"
