@@ -72,7 +72,7 @@ def summarize_training_run(run_dir: Path) -> dict[str, object]:
     generation_rows = [
         row for row in generation_rows
         if has_validated_baseline
-        if row.get("val/generation_baseline") is not True
+        and row.get("val/generation_baseline") is not True
         and isinstance(row.get("val/generation_cer"), (int, float))
         and row.get("val/generation_empty_samples", 0) == 0
         and row["val/generation_cer"] < baseline_cer

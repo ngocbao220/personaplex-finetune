@@ -1215,7 +1215,9 @@ def run(
     try:
         max_micro_steps = max_steps * accum_steps
         progress = tqdm(total=max_steps, initial=start_step, desc="training (DDP)" if distributed else "training", unit="update", dynamic_ncols=True) if main_process else None
-        last_update_time = time.monotonic()
+        update_started_at = None
+        pending_train_seconds = 0.0
+        pending_train_updates = 0
         batch_iterator = iter(iter_training_batches(
             config, train_conversations, runtime, device, rank,
             world_size, smoke, skip_batches=start_micro_step,
@@ -1237,6 +1239,9 @@ def run(
 
         optimizer_step = start_step
         for micro_step in range(start_micro_step, max_micro_steps):
+            if update_started_at is None:
+                # Start after the previous update's validation/checkpoint work.
+                update_started_at = time.monotonic()
             profile_sync()
             data_started = time.monotonic() if config.profile_steps else 0.0
             try:
@@ -1315,6 +1320,9 @@ def run(
             pending_text_target_ce_sum.zero_()
             pending_text_target_ce_count.zero_()
 
+            pending_train_seconds += time.monotonic() - update_started_at
+            pending_train_updates += 1
+
             profile_times = None
             if config.profile_steps:
                 profile_times = torch.cat((
@@ -1354,7 +1362,11 @@ def run(
                     "loss/audio_nonsemantic": float(reduced_nonsem.detach()),
                     "lr": optimizer.param_groups[0]["lr"],
                     "grad_norm": grad_norm,
-                    "samples_per_second": global_batch_size / max(time.monotonic() - last_update_time, 1e-9),
+                    "samples_per_second": (
+                        global_batch_size * pending_train_updates
+                        / max(pending_train_seconds, 1e-9)
+                    ),
+                    "timing/train_update_sec_mean": pending_train_seconds / pending_train_updates,
                     "gpu_peak_bytes": torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0,
                 }
                 if profile_times is not None:
@@ -1365,7 +1377,8 @@ def run(
                         "timing/optimizer_sec": profile_times[3],
                         "timing/profiled_phase_sum_sec": sum(profile_times),
                     })
-                last_update_time = time.monotonic()
+                pending_train_seconds = 0.0
+                pending_train_updates = 0
                 last_record = record
                 if log_file:
                     log_file.write(json.dumps(record) + "\n")
@@ -1472,6 +1485,10 @@ def run(
                         )
                         reload_checks.append({"step": optimizer_step, "loss": reload_loss})
                 barrier()
+
+            # Validation, checkpoint writes, and reload checks are not training
+            # work. Start the next timing window only after they have completed.
+            update_started_at = None
 
         if log_file:
             log_file.close()

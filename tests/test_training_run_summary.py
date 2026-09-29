@@ -22,14 +22,17 @@ class TrainingRunSummaryTest(unittest.TestCase):
             }), encoding="utf-8")
             (run_dir / "run.json").write_text(json.dumps({
                 "best_inference_checkpoint": "/runs/train_001/checkpoints/best_inference/lora.safetensors",
+                "starting_generation_cer": 0.3,
+                "inference_checkpoint_status": "validated_generation_improves_base",
             }), encoding="utf-8")
             (run_dir / "metrics.jsonl").write_text(
                 '{"step":1,"samples_per_second":4.0}\n'
                 '{"step":2,"samples_per_second":6.0}\n', encoding="utf-8",
             )
             (run_dir / "free_running_metrics.jsonl").write_text(
-                '{"step":500,"val/generation_cer":0.4,"val/generation_wer":0.8}\n'
-                '{"step":1000,"val/generation_cer":0.2,"val/generation_wer":0.5}\n',
+                '{"step":0,"val/generation_baseline":true,"val/generation_cer":0.3}\n'
+                '{"step":500,"val/generation_cer":0.4,"val/generation_wer":0.8,"val/generation_empty_samples":0}\n'
+                '{"step":1000,"val/generation_cer":0.2,"val/generation_wer":0.5,"val/generation_empty_samples":0}\n',
                 encoding="utf-8",
             )
             (run_dir / "ranks" / "rank_000.json").write_text(
@@ -56,8 +59,12 @@ class TrainingRunSummaryTest(unittest.TestCase):
                 run_dir.mkdir()
                 (run_dir / "config.json").write_text("{}", encoding="utf-8")
                 if cer is not None:
+                    (run_dir / "run.json").write_text(json.dumps({
+                        "starting_generation_cer": 0.3,
+                        "inference_checkpoint_status": "validated_generation_improves_base",
+                    }), encoding="utf-8")
                     (run_dir / "free_running_metrics.jsonl").write_text(
-                        json.dumps({"step": 3, "val/generation_cer": cer}) + "\n",
+                        json.dumps({"step": 3, "val/generation_cer": cer, "val/generation_empty_samples": 0}) + "\n",
                         encoding="utf-8",
                     )
 
@@ -70,7 +77,10 @@ class TrainingRunSummaryTest(unittest.TestCase):
             run_dir = Path(tmp) / "train_001"
             run_dir.mkdir()
             (run_dir / "config.json").write_text("{}", encoding="utf-8")
-            (run_dir / "run.json").write_text(json.dumps({"starting_generation_cer": 0.3}), encoding="utf-8")
+            (run_dir / "run.json").write_text(json.dumps({
+                "starting_generation_cer": 0.3,
+                "inference_checkpoint_status": "validated_generation_improves_base",
+            }), encoding="utf-8")
             (run_dir / "free_running_metrics.jsonl").write_text(
                 '{"step":0,"val/generation_baseline":true,"val/generation_cer":0.3}\n'
                 '{"step":100,"val/generation_cer":0.4,"val/generation_empty_samples":0}\n'
@@ -84,6 +94,20 @@ class TrainingRunSummaryTest(unittest.TestCase):
         self.assertEqual(summary["starting_generation_cer"], 0.3)
         self.assertEqual(summary["best_generation_cer"], 0.25)
         self.assertEqual(summary["best_generation_step"], 300)
+
+    def test_summary_does_not_score_runs_without_validated_baselines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "train_without_baseline"
+            run_dir.mkdir()
+            (run_dir / "config.json").write_text("{}", encoding="utf-8")
+            (run_dir / "free_running_metrics.jsonl").write_text(
+                '{"step":100,"val/generation_cer":0.01,"val/generation_empty_samples":0}\n',
+                encoding="utf-8",
+            )
+            summary = summarize_training_run(run_dir)
+
+        self.assertIsNone(summary["best_generation_cer"])
+        self.assertIsNone(summary["best_generation_step"])
 
 
 if __name__ == "__main__":

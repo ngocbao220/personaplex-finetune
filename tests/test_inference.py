@@ -605,7 +605,7 @@ class SmokeGenerationReportTest(unittest.TestCase):
 
 
 class InferenceCliGenerationTest(unittest.TestCase):
-    def _run_cli(self, config_text, arguments=()):
+    def _run_cli(self, config_text, arguments=(), smoke_result=None):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "infer.yaml"
             config_path.write_text(config_text, encoding="utf-8")
@@ -621,6 +621,7 @@ class InferenceCliGenerationTest(unittest.TestCase):
                      load=lambda: [sample],
                  )) as dataset_factory, \
                  patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+                smoke.return_value = smoke_result
                 status = inference_smoke.main()
             return status, smoke, dataset_factory
 
@@ -646,6 +647,13 @@ class InferenceCliGenerationTest(unittest.TestCase):
         self.assertEqual(status, 0)
         dataset_factory.assert_called_once_with("manifest.jsonl", 100.0)
         self.assertEqual(smoke.call_args.kwargs["sample"].sample_id, "sample-0")
+
+    def test_cli_returns_failure_when_smoke_has_empty_or_non_improving_text(self):
+        config = "adapter:\n  path: adapter.safetensors\n"
+        for status_name in ("empty_transcript", "does_not_improve_over_base"):
+            with self.subTest(status=status_name):
+                status, _, _ = self._run_cli(config, smoke_result=status_name)
+                self.assertEqual(status, 2)
 
     def test_validation_sample_id_reproduces_the_seeded_heldout_split_and_window(self):
         class Dataset:

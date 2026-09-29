@@ -14,6 +14,7 @@ from personaplex_finetuning.train import (
     evenly_spaced_validation_samples,
     evaluate_free_running,
     generation_checkpoint_score,
+    inference_config_snapshot,
     load_training_state,
     model_forward_train,
     lora_prefixes_for_stage,
@@ -146,6 +147,39 @@ class TrainTest(unittest.TestCase):
             ),
             0.1,
         )
+
+    def test_inference_config_snapshot_keeps_training_dataset_model_and_generation(self) -> None:
+        from personaplex_finetuning.config import load_config
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_config = root / "train.json"
+            source_config.write_text(json.dumps({
+                "model": {"root": str(root / "base"), "source": str(root / "moshi"), "device": "cuda"},
+                "data": {
+                    "prepared_dir": str(root / "prepared"),
+                    "val_manifest": str(root / "custom-val.jsonl"),
+                },
+                "lora": {"qlora": True, "quant_type": "fp4"},
+                "seed": 77,
+                "generation": {"use_sampling": False, "top_k_text": 9},
+            }), encoding="utf-8")
+            training_config = load_config(source_config)
+            snapshot = inference_config_snapshot(
+                training_config, root / "adapter" / "lora.safetensors", root / "outputs",
+            )
+            snapshot_path = root / "inference.json"
+            snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+            inference_config = load_config(snapshot_path)
+
+        self.assertEqual(inference_config.model_root, training_config.model_root)
+        self.assertEqual(inference_config.personaplex_source, training_config.personaplex_source)
+        self.assertEqual(inference_config.manifest, training_config.manifest)
+        self.assertEqual(inference_config.val_manifest, training_config.val_manifest)
+        self.assertEqual(inference_config.device, training_config.device)
+        self.assertEqual(inference_config.qlora, training_config.qlora)
+        self.assertEqual(inference_config.generation_settings, training_config.generation_settings)
 
     def test_free_running_validation_scores_generated_text_on_the_requested_window(self) -> None:
         from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
