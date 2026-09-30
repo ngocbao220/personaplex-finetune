@@ -41,14 +41,15 @@ class RuntimePaths:
     model_root: Path
     source: Path
 
-    def validate(self) -> ResolvedRuntimePaths:
+    def validate(self, require_model: bool = True) -> ResolvedRuntimePaths:
         root = Path(self.model_root).resolve()
         source = Path(self.source).resolve()
         required = {
-            "model.safetensors": root / "model.safetensors",
             "tokenizer-e351c8d8-checkpoint125.safetensors": root / "tokenizer-e351c8d8-checkpoint125.safetensors",
             "tokenizer_spm_32k_3.model": root / "tokenizer_spm_32k_3.model",
         }
+        if require_model:
+            required["model.safetensors"] = root / "model.safetensors"
         required_source = source / "moshi" / "models" / "loaders.py"
         if not required_source.is_file():
             raise FileNotFoundError(
@@ -58,7 +59,7 @@ class RuntimePaths:
             if not path.is_file():
                 raise FileNotFoundError(f"required local PersonaPlex asset missing: {path} ({name})")
         return ResolvedRuntimePaths(
-            source=source, model_root=root, moshi_weight=required["model.safetensors"],
+            source=source, model_root=root, moshi_weight=root / "model.safetensors",
             mimi_weight=required["tokenizer-e351c8d8-checkpoint125.safetensors"],
             tokenizer=required["tokenizer_spm_32k_3.model"],
         )

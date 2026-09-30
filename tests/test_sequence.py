@@ -3,7 +3,11 @@ from dataclasses import replace
 from pathlib import Path
 
 from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
-from personaplex_finetuning.sequence import PersonaPlexTrainingExampleBuilder, pad_training_example
+from personaplex_finetuning.sequence import (
+    PersonaPlexTrainingExampleBuilder,
+    align_dialogue_text_targets,
+    pad_training_example,
+)
 
 
 class FakeCodec:
@@ -31,6 +35,15 @@ class FakeTokenizer:
         return [len(text), len(text) + 1]
 
 
+class RecordingTokenizer(FakeTokenizer):
+    def __init__(self):
+        self.inputs = []
+
+    def encode(self, text):
+        self.inputs.append(text)
+        return super().encode(text)
+
+
 def sample() -> PreparedSample:
     return PreparedSample(
         sample_id="conv_0001",
@@ -50,6 +63,47 @@ def sample() -> PreparedSample:
 
 
 class SequenceBuilderTest(unittest.TestCase):
+    def test_alignment_diagnostic_reports_local_overflow_below_total_frame_capacity(self):
+        late_word = replace(
+            sample(), words=(Word("agent", "x", 0.9, 0.95),),
+            window_start_sec=0.0, window_end_sec=1.0,
+        )
+
+        result = align_dialogue_text_targets(late_word, 10, 10.0, FakeTokenizer())
+
+        self.assertEqual(result.required_tokens, 2)
+        self.assertEqual(result.placed_tokens, 1)
+        self.assertEqual(result.overflow_word.word, "x")
+
+    def test_word_tokens_use_sentencepiece_prefix_without_an_extra_leading_space(self):
+        tokenizer = RecordingTokenizer()
+        builder = PersonaPlexTrainingExampleBuilder(
+            codec=FakeCodec(), tokenizer=tokenizer, initial_tokens=[1] * 17, zero_token=-1
+        )
+
+        builder.build(sample())
+
+        self.assertIn("Hello", tokenizer.inputs)
+        self.assertIn("there", tokenizer.inputs)
+        self.assertNotIn(" Hello", tokenizer.inputs)
+        self.assertNotIn(" there", tokenizer.inputs)
+
+    def test_vietnamese_target_normalization_does_not_modify_source_word_alignment(self):
+        tokenizer = RecordingTokenizer()
+        vietnamese_sample = replace(
+            sample(), words=(Word("agent", "người", 10.0, 10.3),),
+        )
+        builder = PersonaPlexTrainingExampleBuilder(
+            codec=FakeCodec(), tokenizer=tokenizer, initial_tokens=[1] * 17,
+            zero_token=-1, normalize_vietnamese_diacritics=True,
+        )
+
+        example = builder.build(vietnamese_sample)
+
+        self.assertIn("nguoi", tokenizer.inputs)
+        self.assertNotIn("người", tokenizer.inputs)
+        self.assertEqual(example.word_alignments[0].word, "người")
+
     def test_prefers_cached_stereo_mimi_codes_when_available(self) -> None:
         class CachedCodec(FakeCodec):
             def __init__(self):

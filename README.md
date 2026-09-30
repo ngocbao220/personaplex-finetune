@@ -11,10 +11,13 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 ```bash
 python -m tools.validate_dataset --config configs/config.yaml
 python -m tools.inspect_sample --config configs/config.yaml --index 0
+python -m tools.check_text_chunk_capacity --config configs/config.yaml
 ```
 
 - `validate_dataset`: kiểm tra manifest, WAV stereo, transcript và prompt.
 - `inspect_sample`: xem sequence PersonaPlex và loss mask của một mẫu.
+- `check_text_chunk_capacity`: mã hóa Mimi thực tế và kiểm tra transcript có đặt đủ token lên chunk `duration_sec` không; mặc định quét 10 hội thoại đầu.
+- Thêm `--all` để quét toàn bộ manifest hoặc `--sample-id ID` để chỉ quét một hội thoại. Tool chỉ nạp Mimi và tokenizer, không nạp model ngôn ngữ 7B.
 - `--config`: chọn YAML; `--index`: chọn mẫu theo thứ tự.
 
 ## Chạy thử và huấn luyện
@@ -62,6 +65,7 @@ Các override dạng `key=value` thay YAML cho lần chạy đó. Tham số chí
 | `optim.lr` | Learning rate. |
 | `gradient_checkpointing` | Giảm bộ nhớ GPU khi huấn luyện. |
 | `data.swap_roles_after_pass` | Luân phiên LEFT/RIGHT làm agent giữa các epoch; cần voice prompt và text prompt cho cả hai phía. |
+| `data.normalize_vietnamese_diacritics` | Bỏ dấu khỏi text target và CER/WER; mặc định `false`, không sửa transcript nguồn hoặc prompt. |
 | `--resume-from` | Tiếp tục adapter và trạng thái optimizer từ checkpoint. |
 
 ## Inference

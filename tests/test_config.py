@@ -31,6 +31,18 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(loaded.weight_decay, 0.1)
             self.assertEqual(loaded.pct_start, 0.05)
 
+    def test_vietnamese_diacritic_normalization_is_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.yaml"
+            config.write_text(
+                'model: {root: /models/base, source: /source}\n'
+                'data: {prepared_dir: /data, normalize_vietnamese_diacritics: true}\n'
+            )
+
+            loaded = load_config(config)
+
+            self.assertTrue(loaded.normalize_vietnamese_diacritics)
+
     def test_reads_moshi_loss_and_logging_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "train.json"

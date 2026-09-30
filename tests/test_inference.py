@@ -460,6 +460,14 @@ class GenerationSettingsTest(unittest.TestCase):
         self.assertEqual(metrics["wer"], 0.0)
         self.assertEqual(metrics["cer"], 0.0)
 
+    def test_text_error_metrics_can_ignore_vietnamese_diacritics_when_enabled(self):
+        self.assertGreater(inference.text_error_metrics("người", "nguoi")["cer"], 0.0)
+        metrics = inference.text_error_metrics(
+            "Đặng Thị Hương", "Dang Thi Huong", normalize_vietnamese_diacritics=True,
+        )
+        self.assertEqual(metrics["wer"], 0.0)
+        self.assertEqual(metrics["cer"], 0.0)
+
     def test_text_error_metrics_are_unavailable_without_reference_targets(self):
         self.assertIsNone(inference.text_error_metrics("  ", "Xin chào"))
 

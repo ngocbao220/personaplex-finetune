@@ -40,6 +40,7 @@ from .objective import (
 )
 from .runtime import RuntimePaths, load_runtime
 from .sequence import PersonaPlexTrainingExampleBuilder, pad_training_example
+from .text_normalization import strip_vietnamese_diacritics
 
 
 def limit_cpu_threads(torch_module) -> int:
@@ -71,6 +72,7 @@ def build_example(config: Config, sample, runtime, dialogue_codes=None):
     builder = PersonaPlexTrainingExampleBuilder(
         runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token,
         pause_frames=pause_frames,
+        normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
     )
     # PersonaPlex LMModel.forward_train applies its native per-stream delays.
     return builder.build(sample, dialogue_codes=dialogue_codes)
@@ -176,6 +178,7 @@ def training_contract(config: Config, train_conversations: list) -> dict:
         "no_eval": config.no_eval,
         "swap_roles_after_pass": config.swap_roles_after_pass,
         "prompt_aug_prob": config.prompt_aug_prob,
+        "normalize_vietnamese_diacritics": config.normalize_vietnamese_diacritics,
         "learning_rate": config.learning_rate, "weight_decay": config.weight_decay,
         "depformer_learning_rate": config.depformer_learning_rate,
         "pct_start": config.pct_start,
@@ -210,17 +213,23 @@ def unwrap_parallel_model(model):
     return model
 
 
-def inspect_training_sample(sample, tokenizer) -> dict[str, object]:
+def inspect_training_sample(
+    sample, tokenizer, normalize_vietnamese_diacritics: bool = False,
+) -> dict[str, object]:
     """Validate and describe the actual agent-text target before optimization."""
     if sample.agent_channel != 0 or sample.user_channel != 1:
         raise ValueError(f"{sample.sample_id}: expected LEFT=agent and RIGHT=user")
-    words = [
+    source_words = [
         word.word for word in sample.words
         if word.speaker == "agent" and sample.window_start_sec <= word.start < sample.window_end_sec
     ]
-    if not words:
+    if not source_words:
         raise ValueError(f"{sample.sample_id}: training window has no agent text target")
-    text = " ".join(words)
+    target_words = [
+        strip_vietnamese_diacritics(word) if normalize_vietnamese_diacritics else word
+        for word in source_words
+    ]
+    text = " ".join(target_words)
     tokens = tokenizer.encode(text)
     decoded = tokenizer.decode(tokens)
     normalize = lambda value: " ".join(value.split())
@@ -235,7 +244,7 @@ def inspect_training_sample(sample, tokenizer) -> dict[str, object]:
         "window_end_sec": sample.window_end_sec,
         "agent_channel": sample.agent_channel,
         "user_channel": sample.user_channel,
-        "agent_word_count": len(words),
+        "agent_word_count": len(source_words),
         "token_count": len(tokens),
         "text_prompt": sample.text_prompt,
         "agent_text": text,
@@ -1000,7 +1009,9 @@ def evaluate_free_running(runtime, samples: list, config: Config) -> dict:
             generation=getattr(config, "generation_settings", GenerationSettings()),
             seed=config.seed + len(evaluated),
         )
-        metrics = text_error_metrics(reference, hypothesis)
+        metrics = text_error_metrics(
+            reference, hypothesis, config.normalize_vietnamese_diacritics,
+        )
         if metrics is not None:
             evaluated.append((metrics, sample.sample_id, reference, hypothesis, window.window_start_sec, window.window_end_sec))
         if len(evaluated) >= config.free_running_eval_samples:
@@ -1220,6 +1231,7 @@ def run(
             "save_every_steps": config.save_every_steps,
             "randomize_train": config.randomize_train,
             "prompt_aug_prob": config.prompt_aug_prob,
+            "normalize_vietnamese_diacritics": config.normalize_vietnamese_diacritics,
             "static_chunking": config.static_chunking,
             "swap_roles_after_pass": config.swap_roles_after_pass,
             "gradient_checkpointing": config.gradient_checkpointing,
@@ -1256,7 +1268,9 @@ def run(
     inspection = None
     for sample in train_samples:
         try:
-            inspection = inspect_training_sample(sample, runtime.tokenizer)
+            inspection = inspect_training_sample(
+                sample, runtime.tokenizer, config.normalize_vietnamese_diacritics,
+            )
             break
         except ValueError as exc:
             if "no agent text target" not in str(exc):

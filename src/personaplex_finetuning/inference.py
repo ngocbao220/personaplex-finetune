@@ -18,6 +18,7 @@ from .data import PreparedSample
 from .generation import GenerationSettings, generation_from_config
 from .lora import inject_lora, load_adapter
 from .runtime import RuntimePaths, load_runtime
+from .text_normalization import strip_vietnamese_diacritics
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,15 @@ def _edit_distance(left: list[str] | str, right: list[str] | str) -> int:
     return previous[-1]
 
 
-def text_error_metrics(reference: str, hypothesis: str) -> dict[str, float | int] | None:
+def text_error_metrics(
+    reference: str,
+    hypothesis: str,
+    normalize_vietnamese_diacritics: bool = False,
+) -> dict[str, float | int] | None:
     """Compute normalized Vietnamese-friendly WER and whitespace-free CER."""
+    if normalize_vietnamese_diacritics:
+        reference = strip_vietnamese_diacritics(reference)
+        hypothesis = strip_vietnamese_diacritics(hypothesis)
     reference_words, reference_characters = _normalize_text_for_metrics(reference)
     hypothesis_words, hypothesis_characters = _normalize_text_for_metrics(hypothesis)
     if not reference_words:
@@ -252,7 +260,7 @@ def generate(
             decoded = runtime.codec.mimi.decode(tokens[:, 1:9]).squeeze().detach().float().cpu().numpy()
             pcm_frames.append(decoded)
             token = int(tokens[0, 0, 0])
-            ignored_tokens = (0, runtime.tokenizer.padding_id, runtime.tokenizer.end_padding_id)
+            ignored_tokens = (0, runtime.tokenizer.padding_id, getattr(runtime.tokenizer, "end_padding_id", 0))
             if token not in ignored_tokens:
                 text_token_ids.append(token)
     if not pcm_frames:
@@ -317,7 +325,7 @@ def generate_text_with_runtime(
                 if tokens is None:
                     continue
                 token = int(tokens[0, 0, 0])
-                ignored_tokens = (0, runtime.tokenizer.padding_id, runtime.tokenizer.end_padding_id)
+                ignored_tokens = (0, runtime.tokenizer.padding_id, getattr(runtime.tokenizer, "end_padding_id", 0))
                 if token not in ignored_tokens:
                     token_ids.append(token)
         processor = runtime.tokenizer._processor
@@ -474,8 +482,9 @@ def smoke(
             message = f"{name} inference produced an empty transcript"
             logger.warning(message)
             output_warnings.append(message)
-    base_text_metrics = text_error_metrics(reference_text, base_text)
-    finetuned_text_metrics = text_error_metrics(reference_text, finetuned_text)
+    normalize_diacritics = getattr(config, "normalize_vietnamese_diacritics", False)
+    base_text_metrics = text_error_metrics(reference_text, base_text, normalize_diacritics)
+    finetuned_text_metrics = text_error_metrics(reference_text, finetuned_text, normalize_diacritics)
     if not finetuned_text.strip():
         text_quality_status = "empty_transcript"
     elif finetuned_text_metrics is None:

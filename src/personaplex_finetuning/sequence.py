@@ -6,7 +6,8 @@ import math
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
-from .data import PreparedSample
+from .data import PreparedSample, Word
+from .text_normalization import strip_vietnamese_diacritics
 
 
 class Codec(Protocol):
@@ -34,6 +35,79 @@ class WordTokenAlignment:
     end_sec: float
     start_frame: int
     token_frames: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class DialogueTextTargets:
+    tokens: tuple[int, ...]
+    word_alignments: tuple[WordTokenAlignment, ...]
+    required_tokens: int
+    placed_tokens: int
+    overflow_word: Word | None = None
+
+
+def align_dialogue_text_targets(
+    sample: PreparedSample,
+    frames: int,
+    frame_rate: float,
+    tokenizer: Tokenizer,
+    normalize_vietnamese_diacritics: bool = False,
+) -> DialogueTextTargets:
+    """Place agent word tokens on the Mimi grid and report any overflow."""
+    if frames < 1 or frame_rate <= 0:
+        raise ValueError("text target alignment requires positive frames and frame_rate")
+
+    prepared_words: list[tuple[Word, tuple[int, ...]]] = []
+    required_tokens = 0
+    for word in sample.words:
+        if not sample.window_start_sec <= word.start < sample.window_end_sec:
+            continue
+        if word.start >= sample.audio.duration_sec:
+            raise ValueError(
+                f"{sample.sample_id}: word {word.word!r} starts beyond decoded conversation audio "
+                f"at {word.start:.3f}s"
+            )
+        tokens: tuple[int, ...] = ()
+        if word.speaker == "agent":
+            target_word = (
+                strip_vietnamese_diacritics(word.word)
+                if normalize_vietnamese_diacritics else word.word
+            )
+            tokens = tuple(tokenizer.encode(target_word))
+            if not tokens:
+                raise ValueError(f"{sample.sample_id}: word {word.word!r} has no tokenizer tokens")
+            required_tokens += len(tokens)
+        prepared_words.append((word, tokens))
+
+    text = [tokenizer.padding_id] * frames
+    alignments: list[WordTokenAlignment] = []
+    placed_tokens = 0
+    for word, word_tokens in prepared_words:
+        frame = min(frames - 1, int((word.start - sample.window_start_sec) * frame_rate))
+        start_frame = frame
+        if word.speaker != "agent":
+            alignments.append(WordTokenAlignment(
+                word.speaker, word.word, word.start, word.end, start_frame
+            ))
+            continue
+        token_frames: list[int] = []
+        for token in word_tokens:
+            while frame < frames and text[frame] != tokenizer.padding_id:
+                frame += 1
+            if frame >= frames:
+                return DialogueTextTargets(
+                    tuple(text), tuple(alignments), required_tokens, placed_tokens, word,
+                )
+            if frame > 0 and text[frame - 1] == tokenizer.padding_id:
+                text[frame - 1] = tokenizer.end_padding_id
+            text[frame] = token
+            token_frames.append(frame)
+            placed_tokens += 1
+            frame += 1
+        alignments.append(WordTokenAlignment(
+            word.speaker, word.word, word.start, word.end, start_frame, tuple(token_frames)
+        ))
+    return DialogueTextTargets(tuple(text), tuple(alignments), required_tokens, placed_tokens)
 
 
 @dataclass(frozen=True)
@@ -84,7 +158,7 @@ class PersonaPlexTrainingExampleBuilder:
 
     def __init__(
         self, codec: Codec, tokenizer: Tokenizer, initial_tokens: Sequence[int], zero_token: int,
-        pause_frames: int = 6,
+        pause_frames: int = 6, normalize_vietnamese_diacritics: bool = False,
     ) -> None:
         self.codec = codec
         self.tokenizer = tokenizer
@@ -93,6 +167,7 @@ class PersonaPlexTrainingExampleBuilder:
         if pause_frames < 0:
             raise ValueError("pause frame count must be non-negative")
         self.pause_frames = pause_frames
+        self.normalize_vietnamese_diacritics = normalize_vietnamese_diacritics
         if codec.codebooks != 8 or len(self.initial_tokens) != 17:
             raise ValueError("PersonaPlex requires 8 codebooks per speaker and 17 initial tokens")
 
@@ -191,45 +266,18 @@ class PersonaPlexTrainingExampleBuilder:
         )
 
     def _dialogue_text(self, sample: PreparedSample, frames: int) -> tuple[tuple[int, ...], tuple[WordTokenAlignment, ...]]:
-        text = [self.tokenizer.padding_id] * frames
-        alignments: list[WordTokenAlignment] = []
-        for word in sample.words:
-            if not sample.window_start_sec <= word.start < sample.window_end_sec:
-                continue
-            if word.start >= sample.audio.duration_sec:
-                raise ValueError(
-                    f"{sample.sample_id}: word {word.word!r} starts beyond decoded conversation audio "
-                    f"at {word.start:.3f}s"
-                )
-            frame = min(frames - 1, int((word.start - sample.window_start_sec) * self.codec.frame_rate))
-            start_frame = frame
-            if word.speaker != "agent":
-                alignments.append(WordTokenAlignment(
-                    word.speaker, word.word, word.start, word.end, start_frame
-                ))
-                continue
-            token_frames: list[int] = []
-            word_tokens = self.tokenizer.encode(" " + word.word)
-            if not word_tokens:
-                raise ValueError(f"{sample.sample_id}: word {word.word!r} has no tokenizer tokens")
-            for token in word_tokens:
-                while frame < frames and text[frame] != self.tokenizer.padding_id:
-                    frame += 1
-                if frame >= frames:
-                    raise ValueError(
-                        f"{sample.sample_id}: text target for word {word.word!r} at "
-                        f"{word.start:.3f}s overflows the {sample.window_start_sec:.3f}-"
-                        f"{sample.window_end_sec:.3f}s chunk; transcript tokens would be lost"
-                    )
-                if frame > 0 and text[frame - 1] == self.tokenizer.padding_id:
-                    text[frame - 1] = self.tokenizer.end_padding_id
-                text[frame] = token
-                token_frames.append(frame)
-                frame += 1
-            alignments.append(WordTokenAlignment(
-                word.speaker, word.word, word.start, word.end, start_frame, tuple(token_frames)
-            ))
-        return tuple(text), tuple(alignments)
+        result = align_dialogue_text_targets(
+            sample, frames, self.codec.frame_rate, self.tokenizer,
+            self.normalize_vietnamese_diacritics,
+        )
+        if result.overflow_word is not None:
+            word = result.overflow_word
+            raise ValueError(
+                f"{sample.sample_id}: text target for word {word.word!r} at "
+                f"{word.start:.3f}s overflows the {sample.window_start_sec:.3f}-"
+                f"{sample.window_end_sec:.3f}s chunk; transcript tokens would be lost"
+            )
+        return result.tokens, result.word_alignments
 
     def _assert_codebooks(self, streams: tuple[tuple[int, ...], ...], label: str) -> None:
         if len(streams) != 8 or len({len(stream) for stream in streams}) != 1:
