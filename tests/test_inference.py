@@ -446,6 +446,7 @@ class InferenceCliTest(unittest.TestCase):
         )), patch.object(inference_smoke, "PreparedDataset", return_value=SimpleNamespace(
             load=lambda: [sample],
         )), patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+            smoke.return_value = None
             self.assertEqual(inference_smoke.main(), 0)
 
         self.assertEqual(smoke.call_args.kwargs["input_file"], Path("external.wav").resolve())
@@ -621,6 +622,11 @@ class SmokeGenerationReportTest(unittest.TestCase):
 
 
 class InferenceCliGenerationTest(unittest.TestCase):
+    def test_external_audio_window_starts_at_configured_offset_and_caps_at_eof(self):
+        self.assertEqual(inference._input_audio_window(45.0, 12.0, 100.0), (12.0, 45.0))
+        with self.assertRaisesRegex(ValueError, "outside audio duration"):
+            inference._input_audio_window(45.0, 45.0, 10.0)
+
     def _run_cli(self, config_text, arguments=(), smoke_result=None):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "infer.yaml"
@@ -664,6 +670,37 @@ class InferenceCliGenerationTest(unittest.TestCase):
         dataset_factory.assert_called_once_with("manifest.jsonl", 100.0)
         self.assertEqual(smoke.call_args.kwargs["sample"].sample_id, "sample-0")
 
+    def test_inference_config_selects_sample_and_external_audio_window(self):
+        samples = [
+            SimpleNamespace(sample_id="first", window_start_sec=0.0, window_end_sec=30.0),
+            SimpleNamespace(sample_id="chosen", window_start_sec=0.0, window_end_sec=30.0),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "infer.yaml"
+            config_path.write_text(
+                "adapter:\n  path: adapter.safetensors\n"
+                "inference:\n  sample_id: chosen\n  start: 12\n"
+                "  window_seconds: 100\n  input_file: recording.wav\n",
+                encoding="utf-8",
+            )
+            with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path)]), \
+                 patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
+                     manifest="manifest.jsonl", window_seconds=None,
+                     free_running_eval_window_seconds=30.0,
+                 )), \
+                 patch.object(inference_smoke, "PreparedDataset", return_value=SimpleNamespace(
+                     load=lambda: samples,
+                 )) as dataset_factory, \
+                 patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+                smoke.return_value = None
+                self.assertEqual(inference_smoke.main(), 0)
+
+        dataset_factory.assert_called_once_with("manifest.jsonl", 100.0)
+        self.assertEqual(smoke.call_args.kwargs["sample"].sample_id, "chosen")
+        self.assertEqual(smoke.call_args.kwargs["input_file"], Path("recording.wav").resolve())
+        self.assertEqual(smoke.call_args.kwargs["input_start_sec"], 12.0)
+        self.assertEqual(smoke.call_args.kwargs["input_window_seconds"], 100.0)
+
     def test_cli_returns_failure_when_smoke_has_empty_or_non_improving_text(self):
         config = "adapter:\n  path: adapter.safetensors\n"
         for status_name in ("empty_transcript", "does_not_improve_over_base"):
@@ -700,6 +737,7 @@ class InferenceCliGenerationTest(unittest.TestCase):
                 window_seconds=30.0, test_manifest=None,
             )), patch.object(inference_smoke, "PreparedDataset", return_value=dataset), \
                  patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+                smoke.return_value = None
                 self.assertEqual(inference_smoke.main(), 0)
 
         self.assertEqual(dataset.split_called, (0.1, 9))

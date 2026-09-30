@@ -103,6 +103,20 @@ def _prepare_input_audio(input_file: Path, output_dir: Path) -> Path:
     return normalized_path
 
 
+def _input_audio_window(
+    duration_sec: float,
+    start_sec: float | None,
+    window_seconds: float | None,
+) -> tuple[float, float]:
+    start = 0.0 if start_sec is None else start_sec
+    if start < 0 or start >= duration_sec:
+        raise ValueError(f"input start {start:g}s is outside audio duration {duration_sec:g}s")
+    if window_seconds is not None and window_seconds <= 0:
+        raise ValueError("input window_seconds must be positive")
+    end = duration_sec if window_seconds is None else min(start + window_seconds, duration_sec)
+    return start, end
+
+
 def resolve_adapter_checkpoint(adapter: Path) -> tuple[Path, int, int, Path | None, tuple[str, ...]]:
     """Resolve adapter weights, LoRA dimensions/targets, and the training base-model path."""
     adapter = Path(adapter).expanduser()
@@ -377,6 +391,8 @@ def smoke(
     adapter: Path,
     output_dir: Path,
     input_file: Path | None = None,
+    input_start_sec: float | None = None,
+    input_window_seconds: float | None = None,
     generation: GenerationSettings | None = None,
 ) -> str:
     settings = GenerationSettings() if generation is None else generation
@@ -403,12 +419,17 @@ def smoke(
         if audio.ndim == 1:
             audio = audio[None, :]
 
+        audio_duration_sec = audio.shape[-1] / sample_rate
+        window_start_sec, window_end_sec = _input_audio_window(
+            audio_duration_sec, input_start_sec, input_window_seconds,
+        )
+
         sample = replace(
             sample,
             conversation_wav=normalized_input,
             user_channel=0,
-            window_start_sec=0.0,
-            window_end_sec=audio.shape[-1] / sample_rate,
+            window_start_sec=window_start_sec,
+            window_end_sec=window_end_sec,
             words=(),
         )
 

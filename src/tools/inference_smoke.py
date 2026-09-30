@@ -117,7 +117,14 @@ def main() -> int:
     # model is loaded, so a typo cannot silently produce a different generation.
     generation = generation_from_config(raw_conf)
     sample_index = args.index if args.index is not None else int(inf_sec.get("sample_index", 0) if hasattr(inf_sec, "get") else 0)
-    start_sec = args.start if args.start is not None else (float(inf_sec.get("start_sec")) if (hasattr(inf_sec, "get") and inf_sec.get("start_sec") is not None) else None)
+    configured_sample_id = inf_sec.get("sample_id") if hasattr(inf_sec, "get") else None
+    sample_id = args.sample_id if args.sample_id is not None else configured_sample_id
+    configured_start = inf_sec.get("start") if hasattr(inf_sec, "get") else None
+    if configured_start is None and hasattr(inf_sec, "get"):
+        configured_start = inf_sec.get("start_sec")  # Backward compatibility with older infer.yaml files.
+    start_sec = args.start
+    if start_sec is None and configured_start is not None:
+        start_sec = float(configured_start)
     output_root = Path(
         args.output_dir
         if args.output_dir is not None
@@ -127,13 +134,15 @@ def main() -> int:
     if input_file is None and hasattr(inf_sec, "get") and inf_sec.get("input_file"):
         input_file = Path(inf_sec.get("input_file"))
 
-    window_seconds = (
-        args.window_seconds
-        if args.window_seconds is not None
-        else config.window_seconds
-        if config.window_seconds is not None
-        else config.free_running_eval_window_seconds
-    )
+    configured_window = inf_sec.get("window_seconds") if hasattr(inf_sec, "get") else None
+    if args.window_seconds is not None:
+        window_seconds = args.window_seconds
+    elif configured_window is not None:
+        window_seconds = float(configured_window)
+    elif config.window_seconds is not None:
+        window_seconds = config.window_seconds
+    else:
+        window_seconds = config.free_running_eval_window_seconds
     if window_seconds <= 0:
         parser.error("--window-seconds must be positive")
 
@@ -182,16 +191,17 @@ def main() -> int:
         else:
             raise ValueError("test split requested, but data.test_manifest is not configured")
 
-        if args.sample_id is not None:
-            matching = [sample for sample in samples if sample.sample_id == args.sample_id]
+        if sample_id is not None:
+            matching = [sample for sample in samples if sample.sample_id == sample_id]
             if not matching:
-                raise ValueError(f"sample_id {args.sample_id!r} is not present in the {args.split} split")
+                raise ValueError(f"sample_id {sample_id!r} is not present in the {args.split} split")
             sample = matching[0]
         else:
             if not 0 <= sample_index < len(samples):
                 raise IndexError(f"sample index {sample_index} is outside the {args.split} split (size={len(samples)})")
             sample = samples[sample_index]
-        sample = select_inference_window(sample, start_sec, window_seconds)
+        if input_file is None:
+            sample = select_inference_window(sample, start_sec, window_seconds)
     except Exception as exc:
         run_record.update({
             "status": "failed",
@@ -222,6 +232,8 @@ def main() -> int:
             adapter=adapter_path,
             output_dir=output_dir,
             input_file=input_file,
+            input_start_sec=start_sec,
+            input_window_seconds=window_seconds,
             generation=generation,
         )
     except Exception as exc:
