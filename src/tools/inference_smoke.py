@@ -60,7 +60,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--window-seconds", type=float, default=None,
-        help="Override data.window_seconds for this inference run.",
+        help="Override data.window_seconds; defaults to the configured free-running eval window when unset.",
     )
     parser.add_argument(
         "--input-path",
@@ -104,7 +104,13 @@ def main() -> int:
     if input_file is None and hasattr(inf_sec, "get") and inf_sec.get("input_file"):
         input_file = Path(inf_sec.get("input_file"))
 
-    window_seconds = config.window_seconds if args.window_seconds is None else args.window_seconds
+    window_seconds = (
+        args.window_seconds
+        if args.window_seconds is not None
+        else config.window_seconds
+        if config.window_seconds is not None
+        else config.free_running_eval_window_seconds
+    )
     if window_seconds <= 0:
         parser.error("--window-seconds must be positive")
     if args.split == "train":
