@@ -80,7 +80,7 @@ python -m tools.inference_smoke --config configs/infer.yaml \
 
 - `--adapter`: checkpoint LoRA cần nạp.
 - `--window-seconds`, `--start`: độ dài và thời điểm bắt đầu đoạn audio.
-- `--output-dir`: nơi lưu audio, transcript và báo cáo.
+- `--output-dir`: thư mục gốc; mỗi lần chạy tạo `infer_<YYYYMMDD_HHMMSS_microseconds>/` riêng, gồm WAV, transcript, `config.json`, `run.json` và `inference.log`. Config `inference.output_dir` cũng được hiểu là thư mục gốc.
 
 ## Log huấn luyện
 

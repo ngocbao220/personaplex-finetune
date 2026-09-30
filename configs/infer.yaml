@@ -26,4 +26,4 @@ inference:
   sample_index: 0
   start_sec: null          # Exact start time in seconds (null = default dataset window)
   input_file: null         # Optional external WAV/MP3 user audio file
-  output_dir: outputs/inference
+  output_dir: outputs/inference # Mỗi lần chạy lưu riêng trong outputs/inference/infer_<date>/.

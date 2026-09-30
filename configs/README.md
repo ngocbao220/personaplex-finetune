@@ -9,7 +9,7 @@ Thư mục chứa các tệp cấu hình phục vụ huấn luyện và suy lu�
 | Tên File | Mục Đích & Ý Nghĩa |
 | :--- | :--- |
 | **`config.yaml`** | File cấu hình tổng thể (Master Config). Khai báo các module mặc định (`defaults`) gồm `model: server`, `data: otospeech`, `lora: default`, `train: 104h`. Dùng với `python -m personaplex_finetuning.train`, có thể khởi chạy đa GPU qua `python -m accelerate.commands.launch`. |
-| **`infer.yaml`** | File cấu hình chuyên dụng cho quá trình suy luận (Inference Smoke Test). Tích hợp cấu hình mô hình, đường dẫn adapter checkpoint LoRA, mẫu giọng nói (voice prompt), system text prompt và siêu tham số lấy mẫu (`generation`). |
+| **`infer.yaml`** | File cấu hình chuyên dụng cho quá trình suy luận (Inference Smoke Test). Tích hợp cấu hình mô hình, đường dẫn adapter checkpoint LoRA, mẫu giọng nói (voice prompt), system text prompt và siêu tham số lấy mẫu (`generation`). Mỗi lần chạy lưu vào thư mục `infer_<date>` bên dưới `inference.output_dir`. |
 
 ---
 
