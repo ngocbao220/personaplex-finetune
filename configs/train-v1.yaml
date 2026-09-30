@@ -1,0 +1,77 @@
+# PersonaPlex LoRA fine-tuning: 500h dataset, 2x B200.
+# Estimate max_steps from the kept chunks reported at startup:
+# ceil(2 * num_train_chunks / global_batch_size), for two role passes.
+
+seed: 42
+duration_sec: 100
+sample_number: null
+sample_index: null
+batch_size: 1                 # Per GPU; global batch = 1 * 4 * 2 = 8.
+max_steps: 4300               # Approx. two passes over 475h after 5% validation split.
+profile_steps: false
+no_eval: false
+free_running_eval_every_steps: 500
+free_running_eval_samples: 3
+free_running_eval_window_seconds: 100
+validation_max_samples: 32
+
+model:
+  root: /home/voice/data/voice/personaplex-7b-v1
+  source: ../src
+  device: cuda
+
+data:
+  prepared_dir: ../data
+  window_seconds: null
+  shuffle: true
+  randomize_train: false
+  prompt_aug_prob: 0.0
+  normalize_vietnamese_diacritics: false
+  static_chunking: false
+  swap_roles_after_pass: true
+  val_ratio: 0.05
+  val_manifest: null
+  test_manifest_path: null
+
+lora:
+  enable: true
+  rank: 128
+  alpha: 256
+  scaling: 2.0
+  qlora: false
+  quant_type: nf4
+  ft_embed: false
+
+optim:
+  lr: 2.0e-6
+  weight_decay: 0.1
+  pct_start: 0.05
+
+train:
+  output_dir: ../runs/train-v1
+  depformer_learning_rate: 5.0e-6
+  stage: joint
+  gradient_accumulation_steps: 4
+  warmup_steps: 0
+  eval_every_steps: 500
+  save_every_steps: 500
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  gradient_checkpointing: true
+  mixed_precision: bf16
+
+first_codebook_weight_multiplier: 1.0
+text_padding_weight: 0.3
+log_freq: 1
+ckpt_freq: 500
+
+# Keep these settings in sync with configs/infer.yaml for comparable generation.
+generation:
+  use_sampling: true
+  temp: 0.8
+  temp_text: 0.7
+  top_k: 250
+  top_k_text: 25
+  audio_silence_frame_cnt: 6
