@@ -1673,6 +1673,7 @@ def run(
                     batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
                 )
                 pending_text_target_ce_sum += target_ce_sum
+                pending_text_target_ce_count += target_ce_count.detach()
                 diag_t_corr, diag_t_cnt, diag_t_loss, diag_cb_corr, diag_cb_cnt, diag_cb_loss = codebook_diagnostic_stats(
                     batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
                 )
