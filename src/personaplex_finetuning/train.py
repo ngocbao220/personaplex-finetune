@@ -29,6 +29,7 @@ from .data import (
 from .batching import (
     RankStrideBatchSampler, RawAudioDataset, collate_raw_audio, post_encode_collate,
 )
+from .chunk_filter import ChunkFilterResult, expected_mimi_frames, filter_text_capacity_chunks
 from .lora import adapter_state_dict, inject_lora, load_adapter
 from .generation import GenerationSettings
 from .inference import generate_text_with_runtime, resolve_adapter_checkpoint, text_error_metrics
@@ -38,7 +39,7 @@ from .objective import (
     text_padding_mask_torch,
     torch_weighted_cross_entropy_stats,
 )
-from .runtime import RuntimePaths, load_runtime
+from .runtime import PERSONAPLEX_MIMI_FRAME_RATE, RuntimePaths, SentencePieceTokenizer, load_runtime
 from .sequence import PersonaPlexTrainingExampleBuilder, pad_training_example
 from .text_normalization import strip_vietnamese_diacritics
 
@@ -75,7 +76,53 @@ def build_example(config: Config, sample, runtime, dialogue_codes=None):
         normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
     )
     # PersonaPlex LMModel.forward_train applies its native per-stream delays.
-    return builder.build(sample, dialogue_codes=dialogue_codes)
+    example = builder.build(sample, dialogue_codes=dialogue_codes)
+    expected_frames = expected_mimi_frames(config.duration_sec, runtime.codec.frame_rate)
+    if example.dialogue_frames > expected_frames:
+        raise RuntimeError(
+            f"{sample.sample_id}: Mimi returned {example.dialogue_frames} frames for a "
+            f"{config.duration_sec:g}s chunk; maximum is {expected_frames}"
+        )
+    return example
+
+
+def dataset_load_summary(label: str, report) -> str:
+    return (
+        f"[Dataset load] split={label} manifest_entries={report.manifest_entries} "
+        f"loaded={report.loaded_samples} skipped_out_of_bounds_samples={report.skipped_out_of_bounds} "
+        f"skipped_invalid_samples={report.skipped_invalid}"
+    )
+
+
+def chunk_filter_payload(label: str, candidate_count: int, result: ChunkFilterResult) -> dict:
+    return {
+        "split": label,
+        "candidate_chunks": candidate_count,
+        "kept_chunks": len(result.kept),
+        "skipped_out_of_bounds_chunks": result.skipped_out_of_bounds,
+        "skipped_text_overflow_chunks": result.skipped_text_overflow,
+        "rejected": [
+            {
+                "sample_id": item.sample_id,
+                "window_start_sec": item.window_start_sec,
+                "window_end_sec": item.window_end_sec,
+                "reason": item.reason,
+                "roles": list(item.roles),
+                "word": item.word.word,
+                "word_start_sec": item.word.start,
+            }
+            for item in result.rejected
+        ],
+    }
+
+
+def chunk_filter_summary(payload: dict) -> str:
+    return (
+        f"[Chunk filter] split={payload['split']} candidates={payload['candidate_chunks']} "
+        f"kept={payload['kept_chunks']} "
+        f"skipped_out_of_bounds_chunks={payload['skipped_out_of_bounds_chunks']} "
+        f"skipped_text_overflow_chunks={payload['skipped_text_overflow_chunks']}"
+    )
 
 
 def effective_global_batch_size(per_process_batch_size: int, num_processes: int, gradient_accumulation_steps: int) -> int:
@@ -97,6 +144,7 @@ def validate_resume_step(start_step: int, max_steps: int) -> None:
 
 def validate_resume_checkpoint(
     config: Config, resume_from: str, prefixes: tuple[str, ...], train_conversations: list,
+    train_chunks: list | None = None,
 ) -> tuple[Path, int]:
     """Require a complete checkpoint compatible with this exact LoRA run."""
     adapter, rank, alpha, model_root, adapter_prefixes = resolve_adapter_checkpoint(Path(resume_from))
@@ -122,7 +170,7 @@ def validate_resume_checkpoint(
     if not run_config_file.is_file():
         raise RuntimeError(f"resume checkpoint has no run config to verify training data/objective: {run_config_file}")
     saved_run = json.loads(run_config_file.read_text(encoding="utf-8"))
-    expected_contract = training_contract(config, train_conversations)
+    expected_contract = training_contract(config, train_conversations, train_chunks)
     saved_contract = saved_run.get("training_contract")
     if saved_contract != expected_contract:
         differing = sorted(
@@ -136,7 +184,7 @@ def validate_resume_checkpoint(
     return adapter, step
 
 
-def training_contract(config: Config, train_conversations: list) -> dict:
+def training_contract(config: Config, train_conversations: list, train_chunks: list | None = None) -> dict:
     """Inputs that must remain fixed to resume the same batch and loss trajectory."""
     manifest = Path(config.manifest).expanduser().resolve()
     digest = hashlib.sha256()
@@ -167,9 +215,20 @@ def training_contract(config: Config, train_conversations: list) -> dict:
         }
         source_digest.update(json.dumps(item, sort_keys=True, ensure_ascii=False).encode("utf-8"))
         source_digest.update(b"\n")
+    chunk_items = [
+        (sample.sample_id, str(Path(sample.conversation_wav).expanduser().resolve()),
+         sample.window_start_sec, sample.window_end_sec)
+        for sample in (train_chunks or [])
+    ]
+    chunk_digest = hashlib.sha256(
+        json.dumps(chunk_items, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     return {
         "manifest": str(manifest), "manifest_sha256": digest.hexdigest(),
         "prepared_sources_sha256": source_digest.hexdigest(),
+        "text_capacity_filter_version": 1,
+        "kept_train_chunks_sha256": chunk_digest,
+        "kept_train_chunk_count": len(chunk_items),
         "seed": config.seed, "duration_sec": config.duration_sec,
         "sample_number": config.sample_number, "shuffle": config.shuffle,
         "val_ratio": config.val_ratio,
@@ -368,10 +427,12 @@ def _initialize_audio_worker(_worker_id: int) -> None:
     torch.set_num_threads(1)
 
 
-def iter_training_batches(config, conversations, runtime, device, rank: int, world_size: int, smoke: bool, skip_batches: int = 0):
-    """Moshi-style iterator: fixed conversation chunks, rank stride, then small batches."""
+def iter_training_batches(config, chunks, runtime, device, rank: int, world_size: int, smoke: bool, skip_batches: int = 0):
+    """Iterate the prefiltered fixed chunks with rank stride and small batches."""
     epoch = 0
-    samples = duration_chunks(conversations, config.duration_sec)
+    samples = list(chunks)
+    if not samples:
+        raise ValueError("no training chunks remain after dataset filtering")
     use_prefetch = hasattr(runtime.codec, "encode_conversation_stereo_batch")
     loader = sampler = None
     if use_prefetch:
@@ -418,7 +479,7 @@ def iter_training_batches(config, conversations, runtime, device, rank: int, wor
         common_batch_count = len(loader) if use_prefetch else common_batch_count
         if common_batch_count == 0:
             raise ValueError(
-                f"only {len(samples)} duration chunks for world_size={world_size} and "
+                f"only {len(samples)} filtered duration chunks for world_size={world_size} and "
                 f"batch_size_per_gpu={config.per_device_batch_size}; use sample_number=null/full data "
                 "or run a one-GPU overfit config with batch_size=1"
             )
@@ -466,7 +527,7 @@ def iter_training_batches(config, conversations, runtime, device, rank: int, wor
                 ]
             else:
                 examples = [build_example(config, sample, runtime) for sample in prepared_batch]
-            fixed_frames = round(config.duration_sec * runtime.codec.frame_rate) + max(
+            fixed_frames = expected_mimi_frames(config.duration_sec, runtime.codec.frame_rate) + max(
                 (example.prompt_frames for example in examples), default=0
             )
             examples = [
@@ -1010,7 +1071,7 @@ def evaluate_free_running(runtime, samples: list, config: Config) -> dict:
             seed=config.seed + len(evaluated),
         )
         metrics = text_error_metrics(
-            reference, hypothesis, config.normalize_vietnamese_diacritics,
+            reference, hypothesis, getattr(config, "normalize_vietnamese_diacritics", False),
         )
         if metrics is not None:
             evaluated.append((metrics, sample.sample_id, reference, hypothesis, window.window_start_sec, window.window_end_sec))
@@ -1118,26 +1179,40 @@ def run(
         return value
     # Dataset loading
     test_samples = []
+    dataset_load_reports = {}
+
+    def read_dataset(manifest, label: str, split_by_conversation: bool = False):
+        dataset = PreparedDataset(manifest, config.window_seconds)
+        try:
+            if split_by_conversation:
+                return dataset.split(val_ratio=config.val_ratio, seed=config.seed)
+            return dataset.load()
+        finally:
+            report = dataset.load_report
+            dataset_load_reports[label] = report
+            if main_process and report.manifest_entries:
+                print(dataset_load_summary(label, report), flush=True)
+
     if config.eval_on_train_samples:
         if config.no_eval or config.sample_number is None:
             raise ValueError("eval_on_train_samples requires evaluation enabled and a finite sample_number")
         if config.val_manifest_path is not None:
             raise ValueError("eval_on_train_samples cannot be combined with a separate validation manifest")
-        train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
+        train_samples = read_dataset(config.manifest, "train")
         val_samples = []
     elif config.val_manifest:
-        train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
-        val_samples = PreparedDataset(config.val_manifest, config.window_seconds).load()
+        train_samples = read_dataset(config.manifest, "train")
+        val_samples = read_dataset(config.val_manifest, "validation")
     elif (config.eval_every_steps > 0 or config.free_running_eval_every_steps > 0) and not config.no_eval:
-        train_samples, val_samples = PreparedDataset(config.manifest, config.window_seconds).split(
-            val_ratio=config.val_ratio, seed=config.seed
+        train_samples, val_samples = read_dataset(
+            config.manifest, "train+validation", split_by_conversation=True,
         )
     else:
-        train_samples = PreparedDataset(config.manifest, config.window_seconds).load()
+        train_samples = read_dataset(config.manifest, "train")
         val_samples = []
 
     if config.test_manifest:
-        test_samples = PreparedDataset(config.test_manifest, config.window_seconds).load()
+        test_samples = read_dataset(config.test_manifest, "test")
     train_groups = {key for sample in train_samples for key in conversation_group_keys(sample)}
     val_groups = {key for sample in val_samples for key in conversation_group_keys(sample)}
     test_groups = {key for sample in test_samples for key in conversation_group_keys(sample)}
@@ -1163,17 +1238,62 @@ def run(
         for sample in train_samples:
             sample.swapped_roles()
     val_samples = duration_chunks(val_samples, config.duration_sec) if val_samples else []
-    if config.eval_on_train_samples:
-        # Explicitly scoped overfit gate: monitor autoregressive behavior on the
-        # exact fixed training examples. Full runs continue using disjoint splits.
-        val_samples = list(train_samples)
     test_samples = duration_chunks(test_samples, config.duration_sec) if test_samples else []
+
+    resolved = RuntimePaths(config.model_root, config.personaplex_source).validate(require_model=False)
+    filter_tokenizer = SentencePieceTokenizer(resolved.tokenizer)
+    filter_payloads = {}
+
+    def filter_split(label: str, chunks: list, check_role_swap: bool = False) -> list:
+        result = filter_text_capacity_chunks(
+            chunks, filter_tokenizer, PERSONAPLEX_MIMI_FRAME_RATE,
+            normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
+            swap_roles=check_role_swap,
+        )
+        payload = chunk_filter_payload(label, len(chunks), result)
+        filter_payloads[label] = payload
+        if main_process:
+            print(chunk_filter_summary(payload), flush=True)
+            for item in payload["rejected"]:
+                print(
+                    f"[Skipped chunk] split={label} sample={item['sample_id']} "
+                    f"chunk={item['window_start_sec']:.3f}-{item['window_end_sec']:.3f}s "
+                    f"reason={item['reason']} roles={','.join(item['roles'])} "
+                    f"word={item['word']!r}@{item['word_start_sec']:.3f}s",
+                    flush=True,
+                )
+        return list(result.kept)
+
+    train_candidate_count = len(train_samples)
+    train_samples = filter_split("train", train_samples, config.swap_roles_after_pass)
+    if config.eval_on_train_samples:
+        # Reuse the exact kept training chunks; do not classify them twice.
+        val_samples = list(train_samples)
+        filter_payloads["validation"] = {
+            "split": "validation", "candidate_chunks": 0,
+            "kept_chunks": len(val_samples), "skipped_out_of_bounds_chunks": 0,
+            "skipped_text_overflow_chunks": 0, "rejected": [],
+            "reused_from": "train",
+        }
+    else:
+        val_samples = filter_split("validation", val_samples)
+    test_samples = filter_split("test", test_samples)
+    minimum_chunks = world_size * config.per_device_batch_size
+    if len(train_samples) < minimum_chunks:
+        raise ValueError(
+            f"only {len(train_samples)} train chunks remain after filtering "
+            f"(candidates={train_candidate_count}, skipped_out_of_bounds_chunks="
+            f"{filter_payloads['train']['skipped_out_of_bounds_chunks']}, skipped_text_overflow_chunks="
+            f"{filter_payloads['train']['skipped_text_overflow_chunks']}); at least {minimum_chunks} "
+            f"are required for world_size={world_size}, batch_size_per_gpu={config.per_device_batch_size}"
+        )
 
     resume_adapter_file = None
     adapter_resume_step = 0
     if resume_from:
         resume_adapter_file, adapter_resume_step = validate_resume_checkpoint(
             config, resume_from, lora_prefixes_for_stage(config), train_conversations,
+            train_chunks=train_samples,
         )
         validate_resume_step(adapter_resume_step, 1 if smoke else config.max_steps)
 
@@ -1187,7 +1307,25 @@ def run(
             "model_root": str(config.model_root),
             "personaplex_source": str(config.personaplex_source),
             "manifest": str(config.manifest),
-            "training_contract": training_contract(config, train_conversations),
+            "training_contract": training_contract(config, train_conversations, train_samples),
+            "dataset_load": {
+                label: {
+                    "manifest_entries": report.manifest_entries,
+                    "loaded_samples": report.loaded_samples,
+                    "skipped_out_of_bounds_samples": report.skipped_out_of_bounds,
+                    "skipped_invalid_samples": report.skipped_invalid,
+                }
+                for label, report in dataset_load_reports.items()
+            },
+            "chunk_filter": {
+                label: {
+                    "candidate_chunks": payload["candidate_chunks"],
+                    "kept_chunks": payload["kept_chunks"],
+                    "skipped_out_of_bounds_chunks": payload["skipped_out_of_bounds_chunks"],
+                    "skipped_text_overflow_chunks": payload["skipped_text_overflow_chunks"],
+                }
+                for label, payload in filter_payloads.items()
+            },
             "codec_cache_dir": str(config.codec_cache_dir) if config.codec_cache_dir else None,
             "output_dir": str(run_dir),
             "duration_sec": config.duration_sec,
@@ -1237,12 +1375,30 @@ def run(
             "gradient_checkpointing": config.gradient_checkpointing,
             "mixed_precision": config.mixed_precision,
             "num_train_samples": len(train_samples),
+            "num_train_candidate_chunks": train_candidate_count,
             "num_val_samples": len(val_samples),
             "num_test_samples": len(test_samples),
             "num_train_conversations": len(train_conversations),
+            "num_train_conversations_with_kept_chunks": len({sample.sample_id for sample in train_samples}),
             "num_train_role_views": len(train_samples),
         }
         (run_dir / "config.json").write_text(json.dumps(config_record, indent=2) + "\n", encoding="utf-8")
+        filter_report = {
+            "dataset_load": {
+                label: {
+                    "manifest_entries": report.manifest_entries,
+                    "loaded_samples": report.loaded_samples,
+                    "skipped_out_of_bounds_samples": report.skipped_out_of_bounds,
+                    "skipped_invalid_samples": report.skipped_invalid,
+                    "rejected_entries": list(report.rejected_entries),
+                }
+                for label, report in dataset_load_reports.items()
+            },
+            "chunk_filter": filter_payloads,
+        }
+        (run_dir / "data_filter_report.json").write_text(
+            json.dumps(filter_report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
+        )
         print(json.dumps(config_record))
         print(f"[Main Process] Active across {world_size} process(es) on device {device}")
 
@@ -1265,6 +1421,11 @@ def run(
         load_model_weights=True,
         codec_cache_dir=config.codec_cache_dir,
     )
+    if not math.isclose(runtime.codec.frame_rate, PERSONAPLEX_MIMI_FRAME_RATE, rel_tol=0, abs_tol=1e-6):
+        raise RuntimeError(
+            f"loaded Mimi frame_rate={runtime.codec.frame_rate:g} does not match "
+            f"PersonaPlex frame grid {PERSONAPLEX_MIMI_FRAME_RATE:g}"
+        )
     inspection = None
     for sample in train_samples:
         try:
@@ -1453,7 +1614,7 @@ def run(
         pending_train_seconds = 0.0
         pending_train_updates = 0
         batch_iterator = iter(iter_training_batches(
-            config, train_conversations, runtime, device, rank,
+            config, train_samples, runtime, device, rank,
             world_size, smoke, skip_batches=start_micro_step,
         ))
         samples_seen = 0

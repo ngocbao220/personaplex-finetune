@@ -69,11 +69,25 @@ class SequenceBuilderTest(unittest.TestCase):
             window_start_sec=0.0, window_end_sec=1.0,
         )
 
-        result = align_dialogue_text_targets(late_word, 10, 10.0, FakeTokenizer())
+        result = align_dialogue_text_targets(late_word, 1, 10.0, FakeTokenizer())
 
         self.assertEqual(result.required_tokens, 2)
         self.assertEqual(result.placed_tokens, 1)
         self.assertEqual(result.overflow_word.word, "x")
+
+    def test_late_word_overflows_instead_of_moving_tokens_before_timestamp(self):
+        late_word = replace(
+            sample(), words=(Word("agent", "x", 0.9, 0.95),),
+            window_start_sec=0.0, window_end_sec=1.0,
+        )
+
+        result = align_dialogue_text_targets(late_word, 10, 10.0, FakeTokenizer())
+
+        self.assertEqual(result.overflow_word.word, "x")
+        self.assertEqual(result.placed_tokens, 1)
+        self.assertEqual(result.tokens[-1], 1)
+        self.assertFalse(any(token in (1, 2) for token in result.tokens[:-1]))
+        self.assertEqual(result.word_alignments, ())
 
     def test_word_tokens_use_sentencepiece_prefix_without_an_extra_leading_space(self):
         tokenizer = RecordingTokenizer()

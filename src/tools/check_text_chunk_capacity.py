@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import math
 import sys
 
 from personaplex_finetuning.config import load_config
+from personaplex_finetuning.chunk_filter import expected_mimi_frames
 from personaplex_finetuning.data import PreparedDataset, duration_chunks, limit_conversations
 from personaplex_finetuning.runtime import MimiCodec, RuntimePaths, SentencePieceTokenizer
 from personaplex_finetuning.sequence import align_dialogue_text_targets
@@ -60,7 +60,7 @@ def _frame_count(codebooks, label: str) -> int:
 def scan(config, conversations, codec, tokenizer) -> tuple[int, int]:
     chunks = duration_chunks(conversations, config.duration_sec)
     checked = overflows = 0
-    expected_frames = math.ceil(config.duration_sec * codec.frame_rate - 1e-6)
+    expected_frames = expected_mimi_frames(config.duration_sec, codec.frame_rate)
     print(
         f"Conversations={len(conversations)} chunks={len(chunks)} "
         f"duration_sec={config.duration_sec:g} Mimi={codec.frame_rate:g}Hz "

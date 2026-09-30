@@ -18,6 +18,7 @@ python -m tools.check_text_chunk_capacity --config configs/config.yaml
 - `inspect_sample`: xem sequence PersonaPlex và loss mask của một mẫu.
 - `check_text_chunk_capacity`: mã hóa Mimi thực tế và kiểm tra transcript có đặt đủ token lên chunk `duration_sec` không; mặc định quét 10 hội thoại đầu.
 - Thêm `--all` để quét toàn bộ manifest hoặc `--sample-id ID` để chỉ quét một hội thoại. Tool chỉ nạp Mimi và tokenizer, không nạp model ngôn ngữ 7B.
+- Khi train, log riêng số manifest entry bị bỏ vì timestamp ngoài audio và số chunk bị bỏ vì out-of-bounds/text-token overflow. Chi tiết nằm trong `data_filter_report.json` của run; overflow làm bỏ cả chunk, và cả hai role view nếu bật role swap.
 - `--config`: chọn YAML; `--index`: chọn mẫu theo thứ tự.
 
 ## Chạy thử và huấn luyện

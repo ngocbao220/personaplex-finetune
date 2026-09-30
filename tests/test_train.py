@@ -34,12 +34,33 @@ from personaplex_finetuning.train import (
     validate_resume_step,
     validate_resume_checkpoint,
     training_contract,
+    dataset_load_summary,
+    chunk_filter_payload,
+    chunk_filter_summary,
     write_tensorboard_scalars,
     verify_reloaded_adapter,
 )
 
 
 class TrainTest(unittest.TestCase):
+    def test_startup_summaries_distinguish_out_of_bounds_from_text_overflow(self) -> None:
+        from personaplex_finetuning.chunk_filter import ChunkFilterResult, RejectedChunk
+        from personaplex_finetuning.data import DatasetLoadReport, Word
+
+        load = DatasetLoadReport(10, 8, 1, 1)
+        self.assertIn("skipped_out_of_bounds_samples=1", dataset_load_summary("train", load))
+        self.assertIn("skipped_invalid_samples=1", dataset_load_summary("train", load))
+
+        rejected = RejectedChunk(
+            "conv", 0.0, 100.0, "text_overflow", ("left-agent",),
+            Word("agent", "hello", 99.9, 100.0),
+        )
+        payload = chunk_filter_payload("train", 4, ChunkFilterResult((), (rejected,)))
+        summary = chunk_filter_summary(payload)
+        self.assertIn("skipped_out_of_bounds_chunks=0", summary)
+        self.assertIn("skipped_text_overflow_chunks=1", summary)
+        self.assertEqual(payload["rejected"][0]["word"], "hello")
+
     def test_resume_requires_complete_matching_checkpoint(self) -> None:
         from safetensors.torch import save_file
         from personaplex_finetuning.config import Config
@@ -102,6 +123,12 @@ class TrainTest(unittest.TestCase):
             changed = training_contract(config, [sample.with_window(0.0, 1.0, "Speak English.")])
             self.assertNotEqual(original["prepared_sources_sha256"], changed["prepared_sources_sha256"])
 
+            kept = training_contract(config, [sample], [sample.with_window(0.0, 1.0)])
+            rejected = training_contract(config, [sample], [])
+            self.assertNotEqual(kept["kept_train_chunks_sha256"], rejected["kept_train_chunks_sha256"])
+            self.assertEqual(kept["kept_train_chunk_count"], 1)
+            self.assertEqual(rejected["kept_train_chunk_count"], 0)
+
     def test_training_iterator_switches_voice_text_and_channels_on_role_epoch(self) -> None:
         from personaplex_finetuning.data import AudioInfo, PreparedSample
         from personaplex_finetuning.train import iter_training_batches
@@ -146,7 +173,11 @@ class TrainTest(unittest.TestCase):
         with patch("personaplex_finetuning.train.build_example", return_value=example), \
              patch("personaplex_finetuning.train.pad_training_example", side_effect=lambda item, *_args: item), \
              patch("personaplex_finetuning.train.post_encode_collate", return_value={"codes": "batch"}):
-            batches = iter_training_batches(config, [sample], runtime, "cpu", 0, 1, smoke=True)
+            from personaplex_finetuning.data import duration_chunks
+            batches = iter_training_batches(
+                config, duration_chunks([sample], config.duration_sec),
+                runtime, "cpu", 0, 1, smoke=True,
+            )
             left_pass = [next(batches)[-1][0] for _ in range(2)]
             right_pass = next(batches)[-1][0]
 

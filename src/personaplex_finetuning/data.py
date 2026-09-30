@@ -15,6 +15,19 @@ class ValidationError(ValueError):
     """Raised when a prepared sample does not meet the training contract."""
 
 
+class OutOfBoundsError(ValidationError):
+    """Raised when a word timestamp extends beyond its source audio."""
+
+
+@dataclass(frozen=True)
+class DatasetLoadReport:
+    manifest_entries: int = 0
+    loaded_samples: int = 0
+    skipped_out_of_bounds: int = 0
+    skipped_invalid: int = 0
+    rejected_entries: tuple[str, ...] = ()
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -389,6 +402,7 @@ class PreparedDataset:
     def __init__(self, manifest: str | Path, window_seconds: float | None = None) -> None:
         self.manifest = Path(manifest).resolve()
         self.window_seconds = window_seconds
+        self.load_report = DatasetLoadReport()
         if window_seconds is not None and window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
 
@@ -397,9 +411,13 @@ class PreparedDataset:
             raise ValidationError(f"manifest does not exist: {self.manifest}")
         samples: list[PreparedSample] = []
         rejected: list[str] = []
+        skipped_out_of_bounds = 0
+        skipped_invalid = 0
+        manifest_entries = 0
         for line_number, line in enumerate(self.manifest.read_text(encoding="utf-8").splitlines(), 1):
             if not line.strip():
                 continue
+            manifest_entries += 1
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError as exc:
@@ -413,7 +431,18 @@ class PreparedDataset:
                     detail += f" ({sample_id})"
                 detail += f": {exc}"
                 rejected.append(detail)
+                if isinstance(exc, OutOfBoundsError):
+                    skipped_out_of_bounds += 1
+                else:
+                    skipped_invalid += 1
                 logger.warning("Skipping invalid prepared sample: %s", detail)
+        self.load_report = DatasetLoadReport(
+            manifest_entries=manifest_entries,
+            loaded_samples=len(samples),
+            skipped_out_of_bounds=skipped_out_of_bounds,
+            skipped_invalid=skipped_invalid,
+            rejected_entries=tuple(rejected),
+        )
         if not samples:
             if rejected:
                 raise ValidationError(
@@ -553,7 +582,7 @@ class PreparedDataset:
             if speaker is None or not word:
                 raise ValidationError(f"{sample_id}: word {index} has invalid speaker or text")
             if start < 0 or end <= start or end > duration_sec + 0.05:
-                raise ValidationError(f"{sample_id}: word {index} is outside audio bounds")
+                raise OutOfBoundsError(f"{sample_id}: word {index} is outside audio bounds")
             if start < last_start:
                 raise ValidationError(f"{sample_id}: words are not sorted by start")
             last_start = start

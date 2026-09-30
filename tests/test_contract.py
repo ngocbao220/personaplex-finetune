@@ -155,10 +155,13 @@ class PreparedDatasetTest(unittest.TestCase):
             manifest = root / "train.jsonl"
             manifest.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
 
+            dataset = PreparedDataset(manifest)
             with self.assertLogs("personaplex_finetuning.data", level="WARNING") as logs:
-                samples = PreparedDataset(manifest).load()
+                samples = dataset.load()
 
         self.assertEqual([sample.sample_id for sample in samples], ["valid"])
+        self.assertEqual(dataset.load_report.skipped_out_of_bounds, 1)
+        self.assertEqual(dataset.load_report.skipped_invalid, 0)
         self.assertIn("line 1", logs.output[0])
         self.assertIn("invalid", logs.output[0])
         self.assertIn("word 0 is outside audio bounds", logs.output[0])
@@ -177,8 +180,13 @@ class PreparedDatasetTest(unittest.TestCase):
             manifest = root / "train.jsonl"
             manifest.write_text(json.dumps({"sample_id": "invalid", "sample_dir": "samples/invalid"}) + "\n")
 
+            dataset = PreparedDataset(manifest)
             with self.assertRaisesRegex(ValidationError, "invalid.*word 0 is outside audio bounds"):
-                PreparedDataset(manifest).load()
+                dataset.load()
+
+            self.assertEqual(dataset.load_report.manifest_entries, 1)
+            self.assertEqual(dataset.load_report.skipped_out_of_bounds, 1)
+            self.assertEqual(dataset.load_report.loaded_samples, 0)
 
     def test_rejects_absolute_sample_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

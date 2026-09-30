@@ -13,6 +13,8 @@ from pathlib import Path
 
 from .data import read_stereo_window
 
+PERSONAPLEX_MIMI_FRAME_RATE = 12.5
+
 
 def _pad_audio_window(audio, sample_rate: int, duration_sec: float):
     """Match the fixed final-chunk padding performed by the reference dataset loader."""
