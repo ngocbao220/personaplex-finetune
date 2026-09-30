@@ -66,7 +66,7 @@ def create_run_dir(output_root: Path, smoke: bool) -> Path:
     return run_dir
 
 
-def build_example(config: Config, sample, runtime, random_crop: bool = False, rng=None, dialogue_codes=None):
+def build_example(config: Config, sample, runtime, dialogue_codes=None):
     pause_frames = getattr(getattr(config, "generation_settings", None), "audio_silence_frame_cnt", 6)
     builder = PersonaPlexTrainingExampleBuilder(
         runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token,
@@ -853,7 +853,7 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
         selected_samples = evenly_spaced_validation_samples(val_samples, config.validation_max_samples)
         local_samples = selected_samples[rank::world_size]
         for sample in local_samples:
-            example = build_example(config, sample, runtime, random_crop=False)
+            example = build_example(config, sample, runtime)
             codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
             output = model_forward_train(unwrapped, codes)
             total, comps = loss_components(
@@ -1063,8 +1063,6 @@ def run(
 ) -> Path | None:
     if config.ft_embed:
         raise ValueError("lora.ft_embed=true is not implemented by this LoRA-only trainer")
-    if config.random_crop:
-        raise ValueError("data.random_crop=true conflicts with fixed duration_sec chunks and is not implemented")
     if config.randomize_train:
         raise ValueError("data.randomize_train=true is not implemented; fixed chunks may be shuffled with data.shuffle")
     if config.mixed_precision.lower() != "bf16":
@@ -1220,7 +1218,6 @@ def run(
             "validation_max_samples": config.validation_max_samples,
             "validation_generation_settings": config.generation_settings.as_dict(),
             "save_every_steps": config.save_every_steps,
-            "random_crop": config.random_crop,
             "randomize_train": config.randomize_train,
             "prompt_aug_prob": config.prompt_aug_prob,
             "static_chunking": config.static_chunking,

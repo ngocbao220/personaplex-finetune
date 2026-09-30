@@ -8,6 +8,7 @@ defaults:
   - _self_
 
 seed: 42
+duration_sec: 100
 profile_steps: false
 no_eval: false
 free_running_eval_every_steps: 500

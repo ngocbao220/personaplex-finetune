@@ -27,13 +27,9 @@ model:
 # ------------------------------------------------------------------------------
 data:
   prepared_dir: /storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared # Thư mục chứa train.jsonl & samples [path]
-  window_seconds: 30              # Cửa sổ audio mặc định khi load dataset [float: 20 -> 60]
-  target_window_seconds: 25       # Độ dài chunk mục tiêu khi chunking linh hoạt [float: 10 -> 30]
-  min_window_seconds: 10          # Độ dài chunk tối thiểu [float: 5 -> 15]
-  max_window_seconds: 30          # Độ dài chunk tối đa [float: 20 -> 40]
+  window_seconds: null            # null = nạp toàn hội thoại trước khi chia theo duration_sec
   shuffle: true                   # Xáo trộn dữ liệu giữa các epoch [true: xáo trộn, false: giữ nguyên thứ tự]
   randomize_train: false          # Biến thiên biên chunk ngẫu nhiên theo epoch [false: khuyên dùng với fixed chunks]
-  random_crop: false              # Cắt cúp thời gian ngẫu nhiên [false: tắt để giữ nguyên timeline chuẩn]
   prompt_aug_prob: 0.0            # Xác suất augment text prompt đa dạng hóa [float: 0.0 -> 0.5]
   static_chunking: false          # Bật chunking tĩnh đơn giản cho debug [false: tắt, true: bật]
   swap_roles_after_pass: true     # Đổi vai Agent <-> User sau mỗi epoch [true: học cả 2 chiều nói, false: giữ nguyên]

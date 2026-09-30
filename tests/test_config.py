@@ -144,9 +144,8 @@ class ConfigTest(unittest.TestCase):
 
         self.assertEqual(loaded.model_root, Path("/storage-voice/voice/vdt/baottn/personaplex-7b-v1"))
         self.assertEqual(loaded.prepared_dir, Path("/storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared"))
-        self.assertEqual(loaded.target_window_seconds, 25)
-        self.assertEqual(loaded.min_window_seconds, 10)
-        self.assertEqual(loaded.max_window_seconds, 30)
+        self.assertEqual(loaded.duration_sec, 100)
+        self.assertIsNone(loaded.window_seconds)
         self.assertEqual(loaded.per_device_batch_size, 2)
         self.assertEqual(loaded.num_workers, 4)
         self.assertFalse(loaded.randomize_train)

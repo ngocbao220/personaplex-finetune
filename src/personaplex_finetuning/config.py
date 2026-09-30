@@ -21,7 +21,7 @@ class Config:
     output_dir: Path
     codec_cache_dir: Path | None = None
     seed: int = 42
-    window_seconds: float = 30.0
+    window_seconds: float | None = None
     shuffle: bool = False
     randomize_train: bool = False
     max_steps: int = 300
@@ -43,15 +43,11 @@ class Config:
     eval_every_steps: int = 0
     save_every_steps: int = 50
     val_ratio: float = 0.05
-    random_crop: bool = False
     prompt_aug_prob: float = 0.0
     static_chunking: bool = False
     swap_roles_after_pass: bool = False
     val_manifest_path: Path | None = None
     test_manifest_path: Path | None = None
-    target_window_seconds: float = 25.0
-    min_window_seconds: float = 10.0
-    max_window_seconds: float = 30.0
     gradient_checkpointing: bool = False
     mixed_precision: str = "bf16"
     duration_sec: float = 100.0
@@ -277,7 +273,11 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         output_dir=resolve(train if isinstance(train, dict) else {}, "output_dir", "../runs/overfit_10"),
         codec_cache_dir=codec_cache_dir,
         seed=int(raw.get("seed", 42)),
-        window_seconds=float(data.get("window_seconds", 30.0)),
+        window_seconds=(
+            float(data["window_seconds"])
+            if data.get("window_seconds") is not None
+            else None
+        ),
         shuffle=bool(data.get("shuffle", False)),
         randomize_train=bool(data.get("randomize_train", False)),
         max_steps=max_steps,
@@ -299,15 +299,11 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         eval_every_steps=max(0, int(train.get("eval_every_steps", 0))) if isinstance(train, dict) else 0,
         save_every_steps=max(1, int(train.get("save_every_steps", 50))) if isinstance(train, dict) else 50,
         val_ratio=float(data.get("val_ratio", 0.05)),
-        random_crop=bool(data.get("random_crop", False)),
         prompt_aug_prob=float(data.get("prompt_aug_prob", 0.0)),
         static_chunking=bool(data.get("static_chunking", False)),
         swap_roles_after_pass=bool(data.get("swap_roles_after_pass", False)),
         val_manifest_path=val_manifest_path,
         test_manifest_path=test_manifest_path,
-        target_window_seconds=float(data.get("target_window_seconds", 25.0)),
-        min_window_seconds=float(data.get("min_window_seconds", 10.0)),
-        max_window_seconds=float(data.get("max_window_seconds", 30.0)),
 gradient_checkpointing=bool(raw.get("gradient_checkpointing", train.get("gradient_checkpointing", False))),
         mixed_precision=str(train.get("mixed_precision", "bf16")),
         duration_sec=duration_sec,

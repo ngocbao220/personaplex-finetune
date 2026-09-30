@@ -28,17 +28,9 @@ class ProductionFeaturesTest(unittest.TestCase):
         )
 
     def test_deterministic_sample_window(self):
-        start, end = self.sample.sample_window(window_seconds=10.0, random_crop=False)
+        start, end = self.sample.sample_window(window_seconds=10.0)
         self.assertEqual(start, 1.2)
         self.assertEqual(end, 11.2)
-
-    def test_random_sample_window_bounds(self):
-        rng = random.Random(42)
-        for _ in range(20):
-            start, end = self.sample.sample_window(window_seconds=15.0, random_crop=True, rng=rng)
-            self.assertGreaterEqual(start, 0.0)
-            self.assertLessEqual(end, 100.0)
-            self.assertAlmostEqual(end - start, 15.0, places=4)
 
     def test_augmented_prompt_presets(self):
         rng = random.Random(42)

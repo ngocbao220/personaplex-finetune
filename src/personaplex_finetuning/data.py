@@ -87,28 +87,15 @@ class PreparedSample:
             user_channel=self.agent_channel,
         )
 
-    def sample_window(self, window_seconds: float, random_crop: bool = False, rng=None) -> tuple[float, float]:
-        """Crop window. If random_crop=True, picks a speech-centered random window across the full audio."""
+    def sample_window(self, window_seconds: float) -> tuple[float, float]:
+        """Return the deterministic window beginning at the first agent word."""
         agent_words = [word for word in self.words if word.speaker == "agent"]
         if not agent_words:
             start = 0.0
             end = min(self.audio.duration_sec, start + window_seconds)
             return start, end
 
-        if not random_crop or self.audio.duration_sec <= window_seconds:
-            start = agent_words[0].start
-            end = min(self.audio.duration_sec, start + window_seconds)
-            return start, end
-
-        if rng is None:
-            import random
-            rng = random
-
-        # Pick a random agent word so the window contains active agent dialogue
-        target_word = rng.choice(agent_words)
-        max_start = max(0.0, self.audio.duration_sec - window_seconds)
-        offset = rng.uniform(0.0, min(window_seconds * 0.8, target_word.start))
-        start = max(0.0, min(max_start, target_word.start - offset))
+        start = agent_words[0].start
         end = min(self.audio.duration_sec, start + window_seconds)
         return start, end
 
@@ -152,10 +139,10 @@ class PreparedSample:
             ]
         return str(rng.choice(candidates))
 
-    def dynamic_sample(self, window_seconds: float, random_crop: bool = True, prompt_aug_prob: float = 0.3, rng=None) -> PreparedSample:
-        """Return a copy of this sample with dynamic window slicing and optional prompt augmentation."""
-        start, end = self.sample_window(window_seconds, random_crop=random_crop, rng=rng)
-        prompt = self.get_augmented_prompt(prompt_aug_prob=prompt_aug_prob, rng=rng) if random_crop else self.text_prompt
+    def dynamic_sample(self, window_seconds: float, prompt_aug_prob: float = 0.3, rng=None) -> PreparedSample:
+        """Return a deterministically sliced sample with optional prompt augmentation."""
+        start, end = self.sample_window(window_seconds)
+        prompt = self.get_augmented_prompt(prompt_aug_prob=prompt_aug_prob, rng=rng)
         return self.with_window(start, end, prompt)
 
 
@@ -399,10 +386,10 @@ def read_stereo_window(path: Path, start_sec: float, end_sec: float, sample_rate
 
 
 class PreparedDataset:
-    def __init__(self, manifest: str | Path, window_seconds: float = 30.0) -> None:
+    def __init__(self, manifest: str | Path, window_seconds: float | None = None) -> None:
         self.manifest = Path(manifest).resolve()
         self.window_seconds = window_seconds
-        if window_seconds <= 0:
+        if window_seconds is not None and window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
 
     def load(self) -> list[PreparedSample]:
@@ -512,8 +499,14 @@ class PreparedDataset:
         agent_words = [word for word in words if word.speaker == "agent"]
         if not agent_words:
             raise ValidationError(f"{sample_id}: no agent words")
-        start = agent_words[0].start
-        end = min(audio.duration_sec, start + self.window_seconds)
+        # Full-conversation loading is required before duration-based chunking.
+        # An explicit window remains available for small/debug dataset reads.
+        start = 0.0 if self.window_seconds is None else agent_words[0].start
+        end = (
+            audio.duration_sec
+            if self.window_seconds is None
+            else min(audio.duration_sec, start + self.window_seconds)
+        )
         return PreparedSample(
             sample_id=sample_id,
             conversation_wav=conversation,

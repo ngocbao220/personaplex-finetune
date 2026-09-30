@@ -210,6 +210,25 @@ class PreparedDatasetTest(unittest.TestCase):
             (0.0, 30.0), (30.0, 60.0), (60.0, 90.0), (90.0, 95.0),
         ])
 
+    def test_full_conversation_load_preserves_timeline_for_100_second_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sample_dir = root / "samples" / "conv_0001"
+            sample_dir.mkdir(parents=True)
+            write_stereo_wav(sample_dir / "conversation.wav", frames=24000 * 205)
+            write_stereo_wav(sample_dir / "voice_prompt_left.wav", frames=24000)
+            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt_left": "x"}))
+            (sample_dir / "words.json").write_text(json.dumps([
+                {"speaker": "agent", "word": "Hi", "start": 5.0, "end": 5.2},
+            ]))
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps({"sample_id": "conv_0001", "sample_dir": "samples/conv_0001"}) + "\n")
+            chunks = duration_chunks(PreparedDataset(manifest, window_seconds=None).load(), 100.0)
+
+        self.assertEqual([(chunk.window_start_sec, chunk.window_end_sec) for chunk in chunks], [
+            (0.0, 100.0), (100.0, 200.0), (200.0, 300.0),
+        ])
+
     def test_split_keeps_entries_from_one_conversation_together(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
