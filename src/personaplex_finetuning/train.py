@@ -391,6 +391,22 @@ def text_supervision_counts(batch, model_output, padding_id: int):
     return ((~is_padding) & valid).sum(), (is_padding & valid).sum()
 
 
+def text_prediction_diagnostic_counts(batch, model_output, padding_id: int):
+    """Count PAD prediction outcomes over the valid, loss-supervised text positions."""
+    labels = batch["labels"][:, 0, :]
+    valid = batch["loss_mask"][:, 0, :] & model_output.text_mask[:, 0]
+    is_padding_target = text_padding_mask_torch(labels, padding_id)
+    predictions = model_output.text_logits[:, 0].argmax(dim=-1)
+    is_padding_prediction = text_padding_mask_torch(predictions, padding_id)
+    nonpadding_target = valid & ~is_padding_target
+    padding_target = valid & is_padding_target
+    return torch.stack((
+        ((predictions == labels) & padding_target).sum(),
+        (is_padding_prediction & valid).sum(),
+        (is_padding_prediction & nonpadding_target).sum(),
+    ))
+
+
 def tokenizer_text_padding_ids(tokenizer) -> tuple[int, ...]:
     ids = [int(tokenizer.padding_id)]
     end_padding_id = getattr(tokenizer, "end_padding_id", None)
@@ -733,6 +749,12 @@ def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_
         ("loss/audio_semantic", record["loss/audio_semantic"]),
         ("loss/audio_nonsemantic", record["loss/audio_nonsemantic"]),
         ("accuracy/text", record.get("accuracy/text", 0.0)),
+        ("accuracy/text_nonpad", record.get("accuracy/text_nonpad", 0.0)),
+        ("accuracy/text_pad", record.get("accuracy/text_pad", 0.0)),
+        ("target_pad_pct", record.get("target_pad_pct", 0.0)),
+        ("predicted_pad_pct", record.get("predicted_pad_pct", 0.0)),
+        ("probability/pad_given_nonpad_target", record.get("probability/pad_given_nonpad_target", 0.0)),
+        ("probability/correct_given_nonpad_target", record.get("probability/correct_given_nonpad_target", 0.0)),
         ("accuracy/audio_total", record.get("accuracy/audio_total", 0.0)),
         ("train/valid_token_pct", record.get("valid_token_pct", 0.0)),
         ("train/learning_rate", record["lr"]),
@@ -1866,6 +1888,7 @@ def run(
         pending_text_target_ce_sum = torch.zeros((), dtype=torch.float32, device=device)
         pending_text_target_ce_count = torch.zeros((), dtype=torch.int64, device=device)
         pending_text_target_correct = torch.zeros((), dtype=torch.int64, device=device)
+        pending_text_prediction_counts = torch.zeros(3, dtype=torch.int64, device=device)
         pending_audio_cb_correct = torch.zeros(16, dtype=torch.int64, device=device)
         pending_audio_cb_count = torch.zeros(16, dtype=torch.int64, device=device)
         pending_audio_cb_loss_sum = torch.zeros(16, dtype=torch.float32, device=device)
@@ -1917,6 +1940,9 @@ def run(
                     batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
                 )
                 pending_text_target_correct += diag_t_corr
+                pending_text_prediction_counts += text_prediction_diagnostic_counts(
+                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
+                )
                 pending_audio_cb_correct += diag_cb_corr
                 pending_audio_cb_count += diag_cb_cnt
                 pending_audio_cb_loss_sum += diag_cb_loss
@@ -1966,6 +1992,7 @@ def run(
                 pending_text_target_tokens.float(), pending_text_padding_positions.float(),
                 pending_text_target_ce_sum, pending_text_target_ce_count.float(),
                 pending_text_target_correct.float(),
+                pending_text_prediction_counts.float(),
             ]))
             global_audio_cb_stats = all_reduce_sum(torch.stack([
                 pending_audio_cb_correct.float(),
@@ -1980,6 +2007,23 @@ def run(
             text_token_acc = float(
                 global_text_stats[4] / global_text_stats[3].clamp_min(1.0)
             ) if global_text_stats[3] > 0 else 0.0
+            text_nonpad_count = global_text_stats[0]
+            text_pad_count = global_text_stats[1]
+            total_text_count = text_nonpad_count + text_pad_count
+            text_pad_correct = global_text_stats[5]
+            predicted_pad_count = global_text_stats[6]
+            predicted_pad_nonpad_count = global_text_stats[7]
+            text_nonpad_accuracy = float(
+                global_text_stats[4] / text_nonpad_count.clamp_min(1.0)
+            ) if text_nonpad_count > 0 else 0.0
+            text_pad_accuracy = float(
+                text_pad_correct / text_pad_count.clamp_min(1.0)
+            ) if text_pad_count > 0 else 0.0
+            target_pad_pct = float(text_pad_count / total_text_count.clamp_min(1.0) * 100.0)
+            predicted_pad_pct = float(predicted_pad_count / total_text_count.clamp_min(1.0) * 100.0)
+            pad_given_nonpad_target = float(
+                predicted_pad_nonpad_count / text_nonpad_count.clamp_min(1.0)
+            ) if text_nonpad_count > 0 else 0.0
 
             audio_cb_corr_reduced = global_audio_cb_stats[0]
             audio_cb_cnt_reduced = global_audio_cb_stats[1]
@@ -2004,6 +2048,7 @@ def run(
             pending_text_target_ce_sum.zero_()
             pending_text_target_ce_count.zero_()
             pending_text_target_correct.zero_()
+            pending_text_prediction_counts.zero_()
             pending_audio_cb_correct.zero_()
             pending_audio_cb_count.zero_()
             pending_audio_cb_loss_sum.zero_()
@@ -2051,6 +2096,12 @@ def run(
                     "loss/audio_semantic": float(reduced_sem.detach()),
                     "loss/audio_nonsemantic": float(reduced_nonsem.detach()),
                     "accuracy/text": text_token_acc,
+                    "accuracy/text_nonpad": text_nonpad_accuracy,
+                    "accuracy/text_pad": text_pad_accuracy,
+                    "target_pad_pct": target_pad_pct,
+                    "predicted_pad_pct": predicted_pad_pct,
+                    "probability/pad_given_nonpad_target": pad_given_nonpad_target,
+                    "probability/correct_given_nonpad_target": text_nonpad_accuracy,
                     "accuracy/audio_total": mean_audio_acc,
                     **{f"loss/audio_cb{i}": cb_losses[i] for i in range(16)},
                     **{f"accuracy/audio_cb{i}": cb_accuracies[i] for i in range(16)},
