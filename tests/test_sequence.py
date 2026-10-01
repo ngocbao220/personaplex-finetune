@@ -110,7 +110,7 @@ class SequenceBuilderTest(unittest.TestCase):
         )
         builder = PersonaPlexTrainingExampleBuilder(
             codec=FakeCodec(), tokenizer=tokenizer, initial_tokens=[1] * 17,
-            zero_token=-1, normalize_vietnamese_diacritics=True,
+            zero_token=-1, vietnamese_text_mode="no_diacritics",
         )
 
         example = builder.build(vietnamese_sample)
@@ -118,6 +118,22 @@ class SequenceBuilderTest(unittest.TestCase):
         self.assertIn("nguoi", tokenizer.inputs)
         self.assertNotIn("người", tokenizer.inputs)
         self.assertEqual(example.word_alignments[0].word, "người")
+
+    def test_telex_target_encoding_does_not_modify_source_word_alignment(self):
+        tokenizer = RecordingTokenizer()
+        vietnamese_sample = replace(
+            sample(), words=(Word("agent", "tương", 10.0, 10.3),),
+        )
+        builder = PersonaPlexTrainingExampleBuilder(
+            codec=FakeCodec(), tokenizer=tokenizer, initial_tokens=[1] * 17,
+            zero_token=-1, vietnamese_text_mode="telex",
+        )
+
+        example = builder.build(vietnamese_sample)
+
+        self.assertIn("tuowng", tokenizer.inputs)
+        self.assertNotIn("tương", tokenizer.inputs)
+        self.assertEqual(example.word_alignments[0].word, "tương")
 
     def test_prefers_cached_stereo_mimi_codes_when_available(self) -> None:
         class CachedCodec(FakeCodec):

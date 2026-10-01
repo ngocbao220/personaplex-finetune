@@ -60,7 +60,7 @@ def test_scan_checks_contiguous_duration_chunks_and_both_role_views(capsys):
     config = SimpleNamespace(
         duration_sec=1.0,
         swap_roles_after_pass=True,
-        normalize_vietnamese_diacritics=False,
+        vietnamese_text_mode="diacritics",
     )
 
     checked, failures = scan(config, [short], FakeCodec(), FakeTokenizer())

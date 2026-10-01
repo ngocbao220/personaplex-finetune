@@ -26,7 +26,7 @@ data:
   shuffle: true
   randomize_train: false
   prompt_aug_prob: 0.0
-  normalize_vietnamese_diacritics: false
+  vietnamese_text_mode: diacritics
   static_chunking: false
   swap_roles_after_pass: true
   val_ratio: 0.05

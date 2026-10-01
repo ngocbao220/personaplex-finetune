@@ -66,7 +66,9 @@ Các override dạng `key=value` thay YAML cho lần chạy đó. Tham số chí
 | `optim.lr` | Learning rate. |
 | `gradient_checkpointing` | Giảm bộ nhớ GPU khi huấn luyện. |
 | `data.swap_roles_after_pass` | Luân phiên LEFT/RIGHT làm agent giữa các epoch; cần voice prompt và text prompt cho cả hai phía. |
-| `data.normalize_vietnamese_diacritics` | Bỏ dấu khỏi text target và CER/WER; mặc định `false`, không sửa transcript nguồn hoặc prompt. |
+| `data.vietnamese_text_mode` | Dạng text target: `diacritics` (mặc định), `no_diacritics`, hoặc `telex`. |
+
+Chọn Telex khi chạy training bằng Hydra override `data.vietnamese_text_mode=telex`.
 | `--resume-from` | Tiếp tục adapter và trạng thái optimizer từ checkpoint. |
 | `--force-filter` | Bỏ cache và chạy lại cả validate sample lẫn lọc chunk overflow. Mặc định cache tự tái sử dụng và tự tạo lại nếu manifest, asset hoặc thiết lập liên quan thay đổi. |
 
@@ -95,6 +97,8 @@ Thêm `--force-filter` để xác thực manifest và lọc chunk lại thay vì
 - `--adapter`: checkpoint LoRA cần nạp.
 - `--window-seconds`, `--start`: độ dài và thời điểm bắt đầu đoạn audio.
 - `--output-dir`: thư mục gốc; mỗi lần chạy tạo `infer_<YYYYMMDD_HHMMSS_microseconds>/` riêng, gồm WAV, transcript, `config.json`, `run.json` và `inference.log`. Config `inference.output_dir` cũng được hiểu là thư mục gốc.
+
+Với `data.vietnamese_text_mode=telex`, model học và xuất text Telex; CER/WER được tính trên dạng Telex. Inference cũng ghi thêm `base_unicode.txt` và `finetuned_unicode.txt` để đọc transcript có dấu.
 
 ## Full fine-tuning
 

@@ -31,17 +31,49 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(loaded.weight_decay, 0.1)
             self.assertEqual(loaded.pct_start, 0.05)
 
-    def test_vietnamese_diacritic_normalization_is_opt_in(self) -> None:
+    def test_vietnamese_text_mode_can_disable_diacritics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "train.yaml"
             config.write_text(
                 'model: {root: /models/base, source: /source}\n'
-                'data: {prepared_dir: /data, normalize_vietnamese_diacritics: true}\n'
+                'data: {prepared_dir: /data, vietnamese_text_mode: no_diacritics}\n'
             )
 
             loaded = load_config(config)
 
-            self.assertTrue(loaded.normalize_vietnamese_diacritics)
+            self.assertEqual(loaded.vietnamese_text_mode, "no_diacritics")
+
+    def test_vietnamese_text_mode_can_select_telex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.yaml"
+            config.write_text(
+                'model: {root: /models/base, source: /source}\n'
+                'data: {prepared_dir: /data, vietnamese_text_mode: telex}\n'
+            )
+
+            loaded = load_config(config)
+
+            self.assertEqual(loaded.vietnamese_text_mode, "telex")
+
+    def test_vietnamese_text_mode_rejects_unknown_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.yaml"
+            config.write_text(
+                'model: {root: /models/base, source: /source}\n'
+                'data: {prepared_dir: /data, vietnamese_text_mode: vni}\n'
+            )
+
+            with self.assertRaisesRegex(ValueError, "vietnamese_text_mode"):
+                load_config(config)
+
+    def test_hydra_data_override_selects_telex(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        loaded = load_config(
+            root / "configs" / "config.yaml",
+            overrides=["data.vietnamese_text_mode=telex"],
+        )
+
+        self.assertEqual(loaded.vietnamese_text_mode, "telex")
 
     def test_reads_moshi_loss_and_logging_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,6 +181,26 @@ class ConfigTest(unittest.TestCase):
 
         self.assertEqual(loaded.sample_number, 10)
         self.assertFalse(loaded.shuffle)
+
+    def test_overfit_text_mode_configs_use_train_free_inference_and_greedy_generation(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "configs"
+        for variant, mode in (
+            ("v0", "diacritics"),
+            ("v1", "no_diacritics"),
+            ("v2", "telex"),
+        ):
+            with self.subTest(variant=variant):
+                loaded = load_config(root / f"overfit-10-train-{variant}.yaml")
+
+                self.assertEqual(loaded.sample_number, 10)
+                self.assertFalse(loaded.shuffle)
+                self.assertTrue(loaded.eval_on_train_samples)
+                self.assertFalse(loaded.no_eval)
+                self.assertEqual(loaded.vietnamese_text_mode, mode)
+                self.assertFalse(loaded.generation_settings.use_sampling)
+                self.assertEqual(loaded.generation_settings.temp, 0.0)
+                self.assertEqual(loaded.generation_settings.temp_text, 0.0)
+                self.assertEqual(loaded.output_dir.name, f"train-{variant}")
 
     def test_full_standalone_config_loads_every_feature_setting(self) -> None:
         root = Path(__file__).resolve().parents[1]

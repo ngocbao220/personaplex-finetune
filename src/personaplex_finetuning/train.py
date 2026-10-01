@@ -44,7 +44,7 @@ from .objective import (
 )
 from .runtime import PERSONAPLEX_MIMI_FRAME_RATE, RuntimePaths, SentencePieceTokenizer, load_runtime
 from .sequence import PersonaPlexTrainingExampleBuilder, pad_training_example
-from .text_normalization import strip_vietnamese_diacritics
+from .text_normalization import normalize_vietnamese_text
 
 
 def limit_cpu_threads(torch_module) -> int:
@@ -98,7 +98,7 @@ def build_example(config: Config, sample, runtime, dialogue_codes=None):
     builder = PersonaPlexTrainingExampleBuilder(
         runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token,
         pause_frames=pause_frames,
-        normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
+        vietnamese_text_mode=config.vietnamese_text_mode,
     )
     # PersonaPlex LMModel.forward_train applies its native per-stream delays.
     example = builder.build(sample, dialogue_codes=dialogue_codes)
@@ -267,7 +267,7 @@ def training_contract(config: Config, train_conversations: list, train_chunks: l
         "no_eval": config.no_eval,
         "swap_roles_after_pass": config.swap_roles_after_pass,
         "prompt_aug_prob": config.prompt_aug_prob,
-        "normalize_vietnamese_diacritics": config.normalize_vietnamese_diacritics,
+        "vietnamese_text_mode": config.vietnamese_text_mode,
         "learning_rate": config.learning_rate, "weight_decay": config.weight_decay,
         "depformer_learning_rate": config.depformer_learning_rate,
         "pct_start": config.pct_start,
@@ -345,7 +345,7 @@ def unwrap_parallel_model(model):
 
 
 def inspect_training_sample(
-    sample, tokenizer, normalize_vietnamese_diacritics: bool = False,
+    sample, tokenizer, vietnamese_text_mode: str = "diacritics",
 ) -> dict[str, object]:
     """Validate and describe the actual agent-text target before optimization."""
     if sample.agent_channel != 0 or sample.user_channel != 1:
@@ -356,10 +356,7 @@ def inspect_training_sample(
     ]
     if not source_words:
         raise ValueError(f"{sample.sample_id}: training window has no agent text target")
-    target_words = [
-        strip_vietnamese_diacritics(word) if normalize_vietnamese_diacritics else word
-        for word in source_words
-    ]
+    target_words = [normalize_vietnamese_text(word, vietnamese_text_mode) for word in source_words]
     text = " ".join(target_words)
     tokens = tokenizer.encode(text)
     decoded = tokenizer.decode(tokens)
@@ -1193,7 +1190,7 @@ def evaluate_free_running(runtime, samples: list, config: Config) -> dict:
             seed=config.seed + len(evaluated),
         )
         metrics = text_error_metrics(
-            reference, hypothesis, getattr(config, "normalize_vietnamese_diacritics", False),
+            reference, hypothesis, vietnamese_text_mode=config.vietnamese_text_mode,
         )
         if metrics is not None:
             evaluated.append((metrics, sample.sample_id, reference, hypothesis, window.window_start_sec, window.window_end_sec))
@@ -1430,7 +1427,7 @@ def run(
             try:
                 result = filter_text_capacity_chunks(
                     chunks, filter_tokenizer, PERSONAPLEX_MIMI_FRAME_RATE,
-                    normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
+                    vietnamese_text_mode=config.vietnamese_text_mode,
                     swap_roles=check_role_swap,
                     num_workers=config.filter_num_workers,
                     cache_path=config.prepared_dir / ".filter-cache" / f"training-{label}.jsonl",
@@ -1444,7 +1441,7 @@ def run(
                             "sample_index": config.sample_index,
                             "val_ratio": config.val_ratio, "seed": config.seed,
                             "eval_on_train_samples": config.eval_on_train_samples,
-                            "normalize_vietnamese_diacritics": config.normalize_vietnamese_diacritics,
+                            "vietnamese_text_mode": config.vietnamese_text_mode,
                             "swap_roles": check_role_swap,
                             "chunks": [(s.sample_id, s.window_start_sec, s.window_end_sec) for s in chunks],
                         },
@@ -1602,7 +1599,7 @@ def run(
             "save_every_steps": config.save_every_steps,
             "randomize_train": config.randomize_train,
             "prompt_aug_prob": config.prompt_aug_prob,
-            "normalize_vietnamese_diacritics": config.normalize_vietnamese_diacritics,
+            "vietnamese_text_mode": config.vietnamese_text_mode,
             "static_chunking": config.static_chunking,
             "swap_roles_after_pass": config.swap_roles_after_pass,
             "gradient_checkpointing": config.gradient_checkpointing,
@@ -1664,7 +1661,7 @@ def run(
     for sample in train_samples:
         try:
             inspection = inspect_training_sample(
-                sample, runtime.tokenizer, config.normalize_vietnamese_diacritics,
+                sample, runtime.tokenizer, config.vietnamese_text_mode,
             )
             break
         except ValueError as exc:

@@ -30,7 +30,11 @@ from .full_checkpoint import load_full_weights, resolve_full_checkpoint
 from .generation import GenerationSettings, generation_from_config
 from .lora import inject_lora, load_adapter
 from .runtime import RuntimePaths, load_runtime
-from .text_normalization import strip_vietnamese_diacritics
+from .text_normalization import (
+    decode_vietnamese_telex,
+    normalize_vietnamese_text,
+    strip_vietnamese_diacritics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +77,14 @@ def _edit_distance(left: list[str] | str, right: list[str] | str) -> int:
 def text_error_metrics(
     reference: str,
     hypothesis: str,
-    normalize_vietnamese_diacritics: bool = False,
+    vietnamese_text_mode: str = "diacritics",
 ) -> dict[str, float | int] | None:
     """Compute normalized Vietnamese-friendly WER and whitespace-free CER."""
-    if normalize_vietnamese_diacritics:
+    mode = vietnamese_text_mode
+    if mode == "telex":
+        reference = normalize_vietnamese_text(reference, "telex")
+        hypothesis = normalize_vietnamese_text(hypothesis, "telex")
+    elif mode == "no_diacritics":
         reference = strip_vietnamese_diacritics(reference)
         hypothesis = strip_vietnamese_diacritics(hypothesis)
     reference_words, reference_characters = _normalize_text_for_metrics(reference)
@@ -93,6 +101,16 @@ def text_error_metrics(
         "word_errors": word_errors,
         "character_errors": character_errors,
     }
+
+
+def write_generated_text(output_text: Path, text: str, vietnamese_text_mode: str) -> Path | None:
+    """Write model text and, for Telex runs, a decoded Unicode inspection copy."""
+    output_text.write_text(text, encoding="utf-8")
+    if vietnamese_text_mode != "telex":
+        return None
+    unicode_path = output_text.with_name(f"{output_text.stem}_unicode{output_text.suffix}")
+    unicode_path.write_text(decode_vietnamese_telex(text), encoding="utf-8")
+    return unicode_path
 
 
 def _prepare_input_audio(input_file: Path, output_dir: Path) -> Path:
@@ -321,7 +339,7 @@ def generate(
     else:
         pieces = [runtime.tokenizer._processor.id_to_piece(t) for t in text_token_ids]
         cleaned_text = "".join(pieces).replace(" ", " ").strip()
-    output_text.write_text(cleaned_text, encoding="utf-8")
+    write_generated_text(output_text, cleaned_text, config.vietnamese_text_mode)
 
 
 def generate_text_with_runtime(
@@ -511,7 +529,12 @@ def smoke(
         generation=settings, seed=seed,
     )
     output_warnings = []
-    for name in ("dialogue_original.wav", "user.wav", "base.wav", "finetuned.wav", "base.txt", "finetuned.txt"):
+    required_outputs = [
+        "dialogue_original.wav", "user.wav", "base.wav", "finetuned.wav", "base.txt", "finetuned.txt",
+    ]
+    if config.vietnamese_text_mode == "telex":
+        required_outputs.extend(("base_unicode.txt", "finetuned_unicode.txt"))
+    for name in required_outputs:
         path = output_dir / name
         if not path.is_file() or path.stat().st_size == 0:
             message = f"inference output is missing or empty: {path}"
@@ -572,9 +595,13 @@ def smoke(
             message = f"{name} inference produced an empty transcript"
             logger.warning(message)
             output_warnings.append(message)
-    normalize_diacritics = getattr(config, "normalize_vietnamese_diacritics", False)
-    base_text_metrics = text_error_metrics(reference_text, base_text, normalize_diacritics)
-    finetuned_text_metrics = text_error_metrics(reference_text, finetuned_text, normalize_diacritics)
+    text_mode = config.vietnamese_text_mode
+    base_text_metrics = text_error_metrics(
+        reference_text, base_text, vietnamese_text_mode=text_mode,
+    )
+    finetuned_text_metrics = text_error_metrics(
+        reference_text, finetuned_text, vietnamese_text_mode=text_mode,
+    )
     if not finetuned_text.strip():
         text_quality_status = "empty_transcript"
     elif finetuned_text_metrics is None:
@@ -614,6 +641,7 @@ def smoke(
                 ),
                 "generation": settings.label(),
                 "generation_settings": settings.as_dict(),
+                "vietnamese_text_mode": text_mode,
                 "seed": seed,
                 "stereo_mapping": (
                     "Input channel 0 = User context" if input_file is not None

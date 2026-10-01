@@ -275,7 +275,7 @@ class LoRADiagnosticRunner:
             self.runtime.tokenizer,
             self.runtime.initial_tokens,
             self.runtime.zero_token,
-            normalize_vietnamese_diacritics=self.config.normalize_vietnamese_diacritics,
+            vietnamese_text_mode=self.config.vietnamese_text_mode,
         )
         example = builder.build(self.sample)
         codes = torch.tensor(example.input_codes, device=self.device).unsqueeze(0)
@@ -414,7 +414,7 @@ class LoRADiagnosticRunner:
             self.runtime.tokenizer,
             self.runtime.initial_tokens,
             self.runtime.zero_token,
-            normalize_vietnamese_diacritics=self.config.normalize_vietnamese_diacritics,
+            vietnamese_text_mode=self.config.vietnamese_text_mode,
         )
         example = builder.build(self.sample)
         codes = torch.tensor(example.input_codes, device=self.device).unsqueeze(0)
@@ -639,12 +639,12 @@ class LoRADiagnosticRunner:
         greedy_metrics = text_error_metrics(
             reference_text,
             greedy_hypothesis,
-            normalize_vietnamese_diacritics=self.config.normalize_vietnamese_diacritics,
+            vietnamese_text_mode=self.config.vietnamese_text_mode,
         )
         sampling_metrics = text_error_metrics(
             reference_text,
             sampling_hypothesis,
-            normalize_vietnamese_diacritics=self.config.normalize_vietnamese_diacritics,
+            vietnamese_text_mode=self.config.vietnamese_text_mode,
         )
 
         print("\n  [EVALUATION METRICS]")

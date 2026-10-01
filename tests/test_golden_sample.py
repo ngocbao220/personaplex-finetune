@@ -312,7 +312,7 @@ class GoldenSampleTest(unittest.TestCase):
             config = SimpleNamespace(
                 device="cpu", model_root=MODEL_ROOT, personaplex_source=PROJECT_ROOT / "src",
                 manifest=root / "train.jsonl", window_seconds=5.0,
-                normalize_vietnamese_diacritics=False,
+                vietnamese_text_mode="diacritics",
             )
             output_dir = root / "debug"
             with patch.object(inspect_sample, "load_config", return_value=config), \

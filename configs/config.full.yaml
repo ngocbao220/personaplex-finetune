@@ -31,7 +31,7 @@ data:
   shuffle: true                   # Xáo trộn dữ liệu giữa các epoch [true: xáo trộn, false: giữ nguyên thứ tự]
   randomize_train: false          # Biến thiên biên chunk ngẫu nhiên theo epoch [false: khuyên dùng với fixed chunks]
   prompt_aug_prob: 0.0            # Xác suất augment text prompt đa dạng hóa [float: 0.0 -> 0.5]
-  normalize_vietnamese_diacritics: false # Bỏ dấu ở text target agent và metric CER/WER 
+  vietnamese_text_mode: diacritics # diacritics, no_diacritics, or telex
   static_chunking: false          # Bật chunking tĩnh đơn giản cho debug [false: tắt, true: bật]
   swap_roles_after_pass: true     # Đổi vai Agent <-> User sau mỗi epoch [true: học cả 2 chiều nói, false: giữ nguyên]
   val_ratio: 0.05                 # Tỷ lệ chia tập validation nếu chưa có val.jsonl [float: 0.01 -> 0.2]

@@ -506,10 +506,28 @@ class GenerationSettingsTest(unittest.TestCase):
     def test_text_error_metrics_can_ignore_vietnamese_diacritics_when_enabled(self):
         self.assertGreater(inference.text_error_metrics("người", "nguoi")["cer"], 0.0)
         metrics = inference.text_error_metrics(
-            "Đặng Thị Hương", "Dang Thi Huong", normalize_vietnamese_diacritics=True,
+            "Đặng Thị Hương", "Dang Thi Huong", vietnamese_text_mode="no_diacritics",
         )
         self.assertEqual(metrics["wer"], 0.0)
         self.assertEqual(metrics["cer"], 0.0)
+
+    def test_text_error_metrics_compare_telex_targets(self):
+        metrics = inference.text_error_metrics(
+            "tương", "tuowng", vietnamese_text_mode="telex",
+        )
+
+        self.assertEqual(metrics["wer"], 0.0)
+        self.assertEqual(metrics["cer"], 0.0)
+
+    def test_telex_inference_writes_encoded_and_unicode_text_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            encoded_path = Path(tmp) / "finetuned.txt"
+
+            unicode_path = inference.write_generated_text(encoded_path, "tuowng", "telex")
+
+            self.assertEqual(encoded_path.read_text(encoding="utf-8"), "tuowng")
+            self.assertEqual(unicode_path.name, "finetuned_unicode.txt")
+            self.assertEqual(unicode_path.read_text(encoding="utf-8"), "tương")
 
     def test_text_error_metrics_are_unavailable_without_reference_targets(self):
         self.assertIsNone(inference.text_error_metrics("  ", "Xin chào"))
@@ -918,4 +936,3 @@ class InferenceCliGenerationTest(unittest.TestCase):
             self.assertEqual(selected_sample.voice_prompt_wav, new_voice.resolve())
             self.assertEqual(selected_sample.text_prompt, "New custom prompt")
             self.assertIsNone(smoke.call_args.kwargs["input_file"])
-

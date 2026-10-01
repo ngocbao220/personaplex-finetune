@@ -48,8 +48,8 @@ def _filter_chunk(
     chunk: PreparedSample,
     tokenizer: Tokenizer,
     frame_rate: float,
-    normalize_vietnamese_diacritics: bool,
     swap_roles: bool,
+    vietnamese_text_mode: str,
 ) -> RejectedChunk | None:
     duration = chunk.window_end_sec - chunk.window_start_sec
     if duration <= 0:
@@ -74,7 +74,7 @@ def _filter_chunk(
     for role, role_chunk in roles:
         targets = align_dialogue_text_targets(
             role_chunk, frames, frame_rate, tokenizer,
-            normalize_vietnamese_diacritics,
+            vietnamese_text_mode,
         )
         if targets.overflow_word is not None:
             overflow_roles.append((role, targets.overflow_word))
@@ -90,17 +90,17 @@ def _filter_chunk(
 _WORKER_FILTER_ARGS = None
 
 
-def _initialize_filter_worker(tokenizer, frame_rate, normalize_vietnamese_diacritics, swap_roles):
+def _initialize_filter_worker(tokenizer, frame_rate, swap_roles, vietnamese_text_mode):
     global _WORKER_FILTER_ARGS
     _WORKER_FILTER_ARGS = (
-        tokenizer, frame_rate, normalize_vietnamese_diacritics, swap_roles,
+        tokenizer, frame_rate, swap_roles, vietnamese_text_mode,
     )
 
 
 def _filter_chunk_worker(chunk: PreparedSample) -> RejectedChunk | None:
-    tokenizer, frame_rate, normalize_vietnamese_diacritics, swap_roles = _WORKER_FILTER_ARGS
+    tokenizer, frame_rate, swap_roles, vietnamese_text_mode = _WORKER_FILTER_ARGS
     return _filter_chunk(
-        chunk, tokenizer, frame_rate, normalize_vietnamese_diacritics, swap_roles,
+        chunk, tokenizer, frame_rate, swap_roles, vietnamese_text_mode,
     )
 
 
@@ -126,12 +126,12 @@ def filter_text_capacity_chunks(
     chunks: list[PreparedSample],
     tokenizer: Tokenizer,
     frame_rate: float,
-    normalize_vietnamese_diacritics: bool = False,
     swap_roles: bool = False,
     num_workers: int = 1,
     cache_path=None,
     cache_fingerprint: str | None = None,
     force_filter: bool = False,
+    vietnamese_text_mode: str = "diacritics",
 ) -> ChunkFilterResult:
     """Keep chunks whose configured agent role views fit without retiming text."""
     if frame_rate <= 0:
@@ -180,12 +180,12 @@ def filter_text_capacity_chunks(
             max_workers=active_workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_initialize_filter_worker,
-            initargs=(tokenizer, frame_rate, normalize_vietnamese_diacritics, swap_roles),
+            initargs=(tokenizer, frame_rate, swap_roles, vietnamese_text_mode),
         ) as executor:
             decisions = list(executor.map(_filter_chunk_worker, worker_chunks, chunksize=tasks_per_worker))
     else:
         decisions = [
-            _filter_chunk(chunk, tokenizer, frame_rate, normalize_vietnamese_diacritics, swap_roles)
+            _filter_chunk(chunk, tokenizer, frame_rate, swap_roles, vietnamese_text_mode)
             for chunk in chunks
         ]
 

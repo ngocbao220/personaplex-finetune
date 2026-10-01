@@ -255,7 +255,7 @@ def main() -> int:
     runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source), device)
     builder = PersonaPlexTrainingExampleBuilder(
         runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token,
-        normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
+        vietnamese_text_mode=config.vietnamese_text_mode,
     )
     example = native_debug_delay(builder.build(sample), runtime.initial_tokens, runtime.delays, runtime.zero_token)
     payload = build_debug_payload(sample, example, runtime.tokenizer, runtime.codec.frame_rate, runtime.delays)

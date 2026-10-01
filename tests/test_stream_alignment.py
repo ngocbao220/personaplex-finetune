@@ -249,7 +249,7 @@ class LiveInstrumentedAlignmentAuditor:
             self.runtime.tokenizer,
             self.runtime.initial_tokens,
             self.runtime.zero_token,
-            normalize_vietnamese_diacritics=self.config.normalize_vietnamese_diacritics,
+            vietnamese_text_mode=self.config.vietnamese_text_mode,
         )
         example = builder.build(self.sample)
         raw_codes = [list(stream) for stream in example.input_codes]

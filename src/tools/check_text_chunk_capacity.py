@@ -65,7 +65,7 @@ def scan(config, conversations, codec, tokenizer) -> tuple[int, int]:
         f"Conversations={len(conversations)} chunks={len(chunks)} "
         f"duration_sec={config.duration_sec:g} Mimi={codec.frame_rate:g}Hz "
         f"expected_frames={expected_frames} "
-        f"normalize_vietnamese_diacritics={config.normalize_vietnamese_diacritics}",
+        f"vietnamese_text_mode={config.vietnamese_text_mode}",
         flush=True,
     )
 
@@ -84,7 +84,7 @@ def scan(config, conversations, codec, tokenizer) -> tuple[int, int]:
         for role, role_chunk in roles:
             result = align_dialogue_text_targets(
                 role_chunk, agent_frames, codec.frame_rate, tokenizer,
-                config.normalize_vietnamese_diacritics,
+                config.vietnamese_text_mode,
             )
             checked += 1
             failed = result.overflow_word is not None or frame_mismatch

@@ -10,6 +10,11 @@ Thư mục chứa các tệp cấu hình phục vụ huấn luyện và suy lu�
 | :--- | :--- |
 | **`config.yaml`** | File cấu hình tổng thể (Master Config). Khai báo các module mặc định (`defaults`) gồm `model: server`, `data: otospeech`, `lora: default`, `train: 104h`. Dùng với `python -m personaplex_finetuning.train`, có thể khởi chạy đa GPU qua `python -m accelerate.commands.launch`. |
 | **`infer.yaml`** | File cấu hình chuyên dụng cho quá trình suy luận (Inference Smoke Test). Tích hợp cấu hình mô hình, đường dẫn adapter checkpoint LoRA, mẫu giọng nói (voice prompt), system text prompt và siêu tham số lấy mẫu (`generation`). Mỗi lần chạy lưu vào thư mục `infer_<date>` bên dưới `inference.output_dir`. |
+| **`overfit-10-train-v0.yaml`** | Overfit 10 mẫu với target text có dấu; free-infer trên chính tập train bằng greedy. |
+| **`overfit-10-train-v1.yaml`** | Overfit 10 mẫu với target text bỏ dấu; free-infer trên chính tập train bằng greedy. |
+| **`overfit-10-train-v2.yaml`** | Overfit 10 mẫu với target text Telex; free-infer trên chính tập train bằng greedy. |
+
+Ba cấu hình overfit kế thừa thiết lập chung từ `overfit.yaml`; mỗi bản ghi kết quả vào `runs/train-v0`, `runs/train-v1` hoặc `runs/train-v2`. Chạy bằng `python -m personaplex_finetuning.train --config configs/overfit-10-train-v0.yaml` và thay hậu tố phiên bản tương ứng.
 
 ---
 

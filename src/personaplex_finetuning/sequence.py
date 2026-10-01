@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol, Sequence
 
 from .data import PreparedSample, Word
-from .text_normalization import strip_vietnamese_diacritics
+from .text_normalization import normalize_vietnamese_text
 
 
 class Codec(Protocol):
@@ -51,7 +51,7 @@ def align_dialogue_text_targets(
     frames: int,
     frame_rate: float,
     tokenizer: Tokenizer,
-    normalize_vietnamese_diacritics: bool = False,
+    vietnamese_text_mode: str = "diacritics",
 ) -> DialogueTextTargets:
     """Place agent word tokens on the Mimi grid and report any overflow."""
     if frames < 1 or frame_rate <= 0:
@@ -69,10 +69,7 @@ def align_dialogue_text_targets(
             )
         tokens: tuple[int, ...] = ()
         if word.speaker == "agent":
-            target_word = (
-                strip_vietnamese_diacritics(word.word)
-                if normalize_vietnamese_diacritics else word.word
-            )
+            target_word = normalize_vietnamese_text(word.word, vietnamese_text_mode)
             tokens = tuple(tokenizer.encode(target_word))
             if not tokens:
                 raise ValueError(f"{sample.sample_id}: word {word.word!r} has no tokenizer tokens")
@@ -158,7 +155,7 @@ class PersonaPlexTrainingExampleBuilder:
 
     def __init__(
         self, codec: Codec, tokenizer: Tokenizer, initial_tokens: Sequence[int], zero_token: int,
-        pause_frames: int = 6, normalize_vietnamese_diacritics: bool = False,
+        pause_frames: int = 6, vietnamese_text_mode: str = "diacritics",
     ) -> None:
         self.codec = codec
         self.tokenizer = tokenizer
@@ -167,7 +164,7 @@ class PersonaPlexTrainingExampleBuilder:
         if pause_frames < 0:
             raise ValueError("pause frame count must be non-negative")
         self.pause_frames = pause_frames
-        self.normalize_vietnamese_diacritics = normalize_vietnamese_diacritics
+        self.vietnamese_text_mode = vietnamese_text_mode
         if codec.codebooks != 8 or len(self.initial_tokens) != 17:
             raise ValueError("PersonaPlex requires 8 codebooks per speaker and 17 initial tokens")
 
@@ -250,7 +247,7 @@ class PersonaPlexTrainingExampleBuilder:
     def _dialogue_text(self, sample: PreparedSample, frames: int) -> tuple[tuple[int, ...], tuple[WordTokenAlignment, ...]]:
         result = align_dialogue_text_targets(
             sample, frames, self.codec.frame_rate, self.tokenizer,
-            self.normalize_vietnamese_diacritics,
+            self.vietnamese_text_mode,
         )
         if result.overflow_word is not None:
             word = result.overflow_word

@@ -1,0 +1,9 @@
+defaults:
+  - overfit
+  - _self_
+
+data:
+  vietnamese_text_mode: diacritics
+
+train:
+  output_dir: ../runs/train-v0

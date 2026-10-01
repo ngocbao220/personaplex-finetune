@@ -46,7 +46,7 @@ class Config:
     save_every_steps: int = 50
     val_ratio: float = 0.05
     prompt_aug_prob: float = 0.0
-    normalize_vietnamese_diacritics: bool = False
+    vietnamese_text_mode: str = "diacritics"
     static_chunking: bool = False
     swap_roles_after_pass: bool = False
     val_manifest_path: Path | None = None
@@ -199,6 +199,12 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     train_method = str(train.get("method", "lora")).lower()
     if train_method not in {"lora", "full"}:
         raise ValueError("train.method must be lora or full")
+    configured_text_mode = data.get("vietnamese_text_mode")
+    vietnamese_text_mode = str(configured_text_mode or "diacritics").lower()
+    if vietnamese_text_mode not in {"diacritics", "no_diacritics", "telex"}:
+        raise ValueError(
+            "data.vietnamese_text_mode must be diacritics, no_diacritics, or telex"
+        )
     root = path.parent
 
     def resolve(section: dict[str, Any], key: str, default: str | None = None) -> Path:
@@ -308,7 +314,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         save_every_steps=max(1, int(train.get("save_every_steps", 50))) if isinstance(train, dict) else 50,
         val_ratio=float(data.get("val_ratio", 0.05)),
         prompt_aug_prob=float(data.get("prompt_aug_prob", 0.0)),
-        normalize_vietnamese_diacritics=bool(data.get("normalize_vietnamese_diacritics", False)),
+        vietnamese_text_mode=vietnamese_text_mode,
         static_chunking=bool(data.get("static_chunking", False)),
         swap_roles_after_pass=bool(data.get("swap_roles_after_pass", False)),
         val_manifest_path=val_manifest_path,
