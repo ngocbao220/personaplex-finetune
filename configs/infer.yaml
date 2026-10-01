@@ -23,7 +23,7 @@ generation:
 
 # Inference input and evaluation settings
 inference:
-  filter_num_workers: 64   # CPU workers used only to filter invalid manifest windows.
+  filter_num_workers: 64   # CPU workers for prepared-sample validation and chunk overflow filtering.
   sample_id: null          # Manifest sample_id; also selects voice/text conditioning for input_file
   start: null               # Start time in seconds within the selected audio
   window_seconds: 100       # Maximum audio duration to infer

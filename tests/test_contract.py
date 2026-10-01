@@ -1,8 +1,11 @@
 import json
+import io
 import tempfile
 import unittest
 import wave
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from personaplex_finetuning.data import (
     AudioInfo,
@@ -29,6 +32,39 @@ def write_stereo_wav(path: Path, frames: int = 24000) -> None:
 
 
 class PreparedDatasetTest(unittest.TestCase):
+    def test_prepared_sample_filter_cache_hit_and_force_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sample_dir = root / "samples" / "one"
+            sample_dir.mkdir(parents=True)
+            write_stereo_wav(sample_dir / "conversation.wav")
+            write_stereo_wav(sample_dir / "voice_prompt_left.wav")
+            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt_left": "Be helpful."}))
+            (sample_dir / "words.json").write_text(json.dumps([
+                {"speaker": "agent", "word": "Hello", "start": 0.0, "end": 0.2},
+            ]))
+            manifest = root / "train.jsonl"
+            entry = {"sample_id": "one", "sample_dir": "samples/one"}
+            manifest.write_text(json.dumps(entry) + "\n")
+
+            first = PreparedDataset(manifest).load()
+            cached = PreparedDataset(manifest)
+            with patch.object(cached, "_load_entry", side_effect=AssertionError("cache miss")):
+                second = cached.load()
+            self.assertEqual(first, second)
+            self.assertEqual(cached.load_report.loaded_samples, 1)
+
+            forced = PreparedDataset(manifest, force_filter=True)
+            with patch.object(forced, "_load_entry", wraps=forced._load_entry) as loader:
+                forced.load()
+            loader.assert_called_once()
+
+            manifest.write_text(json.dumps(entry) + "\n\n")
+            invalidated = PreparedDataset(manifest)
+            with patch.object(invalidated, "_load_entry", wraps=invalidated._load_entry) as loader:
+                invalidated.load()
+            loader.assert_called_once()
+
     def test_sample_number_caps_raw_conversations_and_none_keeps_all(self) -> None:
         samples = [
             PreparedSample(
@@ -165,6 +201,36 @@ class PreparedDatasetTest(unittest.TestCase):
         self.assertIn("line 1", logs.output[0])
         self.assertIn("invalid", logs.output[0])
         self.assertIn("word 0 is outside audio bounds", logs.output[0])
+
+    def test_parallel_prepared_sample_filter_matches_and_reports_active_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = []
+            for index in range(64):
+                sample_id = f"sample_{index:03d}"
+                sample_dir = root / "samples" / sample_id
+                sample_dir.mkdir(parents=True)
+                write_stereo_wav(sample_dir / "conversation.wav")
+                write_stereo_wav(sample_dir / "voice_prompt_left.wav")
+                (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt_left": "Be helpful."}))
+                end = 2.0 if index == 0 else 0.2
+                (sample_dir / "words.json").write_text(json.dumps([
+                    {"speaker": "agent", "word": "Hello", "start": 0.0, "end": end},
+                ]))
+                entries.append({"sample_id": sample_id, "sample_dir": f"samples/{sample_id}"})
+            manifest = root / "train.jsonl"
+            manifest.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+
+            dataset = PreparedDataset(manifest, filter_num_workers=2)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                with self.assertLogs("personaplex_finetuning.data", level="WARNING"):
+                    samples = dataset.load()
+
+        self.assertEqual(len(samples), 63)
+        self.assertEqual(dataset.load_report.skipped_out_of_bounds, 1)
+        self.assertEqual(dataset.load_report.skipped_invalid, 0)
+        self.assertIn("configured=2 active=2 mode=processes", output.getvalue())
 
     def test_reports_validation_reason_when_all_manifest_samples_are_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

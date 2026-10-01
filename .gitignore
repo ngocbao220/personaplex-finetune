@@ -9,6 +9,7 @@ outputs/
 runs/
 reports/
 assets/
+.filter-cache/
 configs/server.local.yaml
 *.safetensors
 *.pt

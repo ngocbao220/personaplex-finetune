@@ -20,6 +20,7 @@ from personaplex_finetuning.config import load_config
 from personaplex_finetuning.chunk_filter import filter_text_capacity_chunks
 from personaplex_finetuning.data import PreparedDataset
 from personaplex_finetuning.inference import generation_from_config, resolve_adapter_checkpoint, smoke
+from personaplex_finetuning.filter_cache import filter_fingerprint
 from personaplex_finetuning.runtime import (
     PERSONAPLEX_MIMI_FRAME_RATE,
     RuntimePaths,
@@ -97,6 +98,10 @@ def main() -> int:
         "--output-dir", default=None,
         help="Output root; each run is saved in a new infer_<date> subdirectory.",
     )
+    parser.add_argument(
+        "--force-filter", action="store_true",
+        help="Revalidate prepared samples and rebuild inference chunk-filter caches.",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -173,6 +178,7 @@ def main() -> int:
         "split": args.split,
         "input_file": str(input_file) if input_file is not None else None,
         "generation": generation.as_dict(),
+        "force_filter": args.force_filter,
         "output_dir": str(output_dir),
         "log_file": str(log_path),
     }
@@ -182,22 +188,37 @@ def main() -> int:
     logger.info("generation=%s", generation.label())
 
     try:
+        inference_workers = max(1, int(inf_sec.get("filter_num_workers", getattr(config, "filter_num_workers", 1))))
+        dataset_filter_options = {}
+        if inference_workers != 1 or args.force_filter:
+            dataset_filter_options = {
+                "filter_num_workers": inference_workers,
+                "force_filter": args.force_filter,
+            }
         logger.info("loading split=%s window_seconds=%s", args.split, window_seconds)
         if args.split == "train":
-            samples = PreparedDataset(config.manifest, window_seconds).load()
+            samples = PreparedDataset(
+                config.manifest, window_seconds, **dataset_filter_options,
+            ).load()
         elif args.split == "validation":
             if config.val_manifest is not None:
-                samples = PreparedDataset(config.val_manifest, window_seconds).load()
+                samples = PreparedDataset(
+                    config.val_manifest, window_seconds, **dataset_filter_options,
+                ).load()
             else:
-                _, samples = PreparedDataset(config.manifest, window_seconds).split(
+                dataset = PreparedDataset(
+                    config.manifest, window_seconds, **dataset_filter_options,
+                )
+                _, samples = dataset.split(
                     val_ratio=config.val_ratio, seed=config.seed,
                 )
         elif config.test_manifest is not None:
-            samples = PreparedDataset(config.test_manifest, window_seconds).load()
+            samples = PreparedDataset(
+                config.test_manifest, window_seconds, **dataset_filter_options,
+            ).load()
         else:
             raise ValueError("test split requested, but data.test_manifest is not configured")
 
-        inference_workers = max(1, int(inf_sec.get("filter_num_workers", config.filter_num_workers)))
         chunk_filter_record = {"enabled": input_file is None}
         tokenizer = None
         if input_file is None:
@@ -213,6 +234,20 @@ def main() -> int:
                     PERSONAPLEX_MIMI_FRAME_RATE,
                     normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
                     num_workers=inference_workers,
+                    cache_path=config.prepared_dir / ".filter-cache" / f"inference-{args.split}.jsonl",
+                    cache_fingerprint=filter_fingerprint(
+                        [config.val_manifest if args.split == "validation" and config.val_manifest else
+                         config.test_manifest if args.split == "test" else config.manifest],
+                        {
+                            "kind": "inference-windows", "split": args.split,
+                            "window_seconds": window_seconds, "start": start_sec,
+                            "sample_id": sample_id, "sample_index": sample_index,
+                            "val_ratio": config.val_ratio, "seed": config.seed,
+                            "normalize_vietnamese_diacritics": config.normalize_vietnamese_diacritics,
+                            "chunks": [(s.sample_id, s.window_start_sec, s.window_end_sec) for s in samples],
+                        }, resolved.tokenizer,
+                    ),
+                    force_filter=args.force_filter,
                 )
                 samples = list(filter_result.kept)
                 chunk_filter_record.update({
@@ -225,7 +260,7 @@ def main() -> int:
                 })
                 logger.info(
                     "[Chunk filter] split=inference candidates=%d kept=%d skipped_out_of_bounds=%d "
-                    "skipped_text_overflow=%d workers=%d",
+                    "skipped_text_overflow=%d configured_workers=%d",
                     candidates_before_filter, len(samples), filter_result.skipped_out_of_bounds,
                     filter_result.skipped_text_overflow, inference_workers,
                 )
@@ -271,6 +306,19 @@ def main() -> int:
                     PERSONAPLEX_MIMI_FRAME_RATE,
                     normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
                     num_workers=inference_workers,
+                    cache_path=config.prepared_dir / ".filter-cache" / f"inference-{args.split}-exact.jsonl",
+                    cache_fingerprint=filter_fingerprint(
+                        [config.val_manifest if args.split == "validation" and config.val_manifest else
+                         config.test_manifest if args.split == "test" else config.manifest],
+                        {
+                            "kind": "inference-exact-window", "split": args.split,
+                            "window_seconds": window_seconds, "start": sample.window_start_sec,
+                            "sample_id": sample.sample_id,
+                            "normalize_vietnamese_diacritics": config.normalize_vietnamese_diacritics,
+                            "chunks": [(sample.sample_id, sample.window_start_sec, sample.window_end_sec)],
+                        }, resolved.tokenizer,
+                    ),
+                    force_filter=args.force_filter,
                 )
                 if not exact_window_result.kept:
                     rejection = exact_window_result.rejected[0]

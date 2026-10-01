@@ -31,6 +31,7 @@ from .batching import (
     RankStrideBatchSampler, RawAudioDataset, collate_raw_audio, post_encode_collate,
 )
 from .chunk_filter import ChunkFilterResult, expected_mimi_frames, filter_text_capacity_chunks
+from .filter_cache import filter_fingerprint
 from .lora import adapter_state_dict, inject_lora, load_adapter
 from .generation import GenerationSettings
 from .inference import generate_text_with_runtime, resolve_adapter_checkpoint, text_error_metrics
@@ -1133,6 +1134,7 @@ def run(
     config: Config,
     smoke: bool = False,
     resume_from: str | None = None,
+    force_filter: bool = False,
 ) -> Path | None:
     if config.ft_embed:
         raise ValueError("lora.ft_embed=true is not implemented by this LoRA-only trainer")
@@ -1183,16 +1185,38 @@ def run(
     dataset_load_reports = {}
 
     def read_dataset(manifest, label: str, split_by_conversation: bool = False):
-        dataset = PreparedDataset(manifest, config.window_seconds)
-        try:
-            if split_by_conversation:
-                return dataset.split(val_ratio=config.val_ratio, seed=config.seed)
-            return dataset.load()
-        finally:
-            report = dataset.load_report
-            dataset_load_reports[label] = report
-            if main_process and report.manifest_entries:
-                print(dataset_load_summary(label, report), flush=True)
+        dataset = PreparedDataset(
+            manifest, config.window_seconds,
+            filter_num_workers=config.filter_num_workers if main_process else 1,
+            force_filter=force_filter and main_process,
+        )
+
+        def load_local():
+            try:
+                if split_by_conversation:
+                    return dataset.split(val_ratio=config.val_ratio, seed=config.seed)
+                return dataset.load()
+            finally:
+                report = dataset.load_report
+                dataset_load_reports[label] = report
+                if main_process and report.manifest_entries:
+                    print(dataset_load_summary(label, report), flush=True)
+
+        if distributed:
+            state = [None]
+            result = None
+            if main_process:
+                try:
+                    result = load_local()
+                except Exception as exc:
+                    state[0] = f"{type(exc).__name__}: {exc}"
+            torch.distributed.broadcast_object_list(state, src=0, device=device)
+            if state[0] is not None:
+                raise RuntimeError(f"prepared-sample filtering failed on rank 0: {state[0]}")
+            if main_process:
+                return result
+            return load_local()  # Rank 0 has completed the shared validated-sample cache.
+        return load_local()
 
     if config.eval_on_train_samples:
         if config.no_eval or config.sample_number is None:
@@ -1256,9 +1280,33 @@ def run(
                     normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
                     swap_roles=check_role_swap,
                     num_workers=config.filter_num_workers,
+                    cache_path=config.prepared_dir / ".filter-cache" / f"training-{label}.jsonl",
+                    cache_fingerprint=filter_fingerprint(
+                        [path for path in (config.manifest, config.val_manifest, config.test_manifest) if path],
+                        {
+                            "kind": "training-chunks", "split": label,
+                            "duration_sec": config.duration_sec,
+                            "window_seconds": config.window_seconds,
+                            "sample_number": config.sample_number,
+                            "sample_index": config.sample_index,
+                            "val_ratio": config.val_ratio, "seed": config.seed,
+                            "eval_on_train_samples": config.eval_on_train_samples,
+                            "normalize_vietnamese_diacritics": config.normalize_vietnamese_diacritics,
+                            "swap_roles": check_role_swap,
+                            "chunks": [(s.sample_id, s.window_start_sec, s.window_end_sec) for s in chunks],
+                        },
+                        resolved.tokenizer,
+                    ),
+                    force_filter=force_filter,
                 )
-                kept_objects = {id(sample) for sample in result.kept}
-                kept_indices = [index for index, sample in enumerate(chunks) if id(sample) in kept_objects]
+                kept_keys = {
+                    (sample.sample_id, sample.window_start_sec, sample.window_end_sec)
+                    for sample in result.kept
+                }
+                kept_indices = [
+                    index for index, sample in enumerate(chunks)
+                    if (sample.sample_id, sample.window_start_sec, sample.window_end_sec) in kept_keys
+                ]
                 filter_state[0] = (kept_indices, result.rejected, None)
             except Exception as exc:
                 filter_error = exc
@@ -1385,6 +1433,7 @@ def run(
             "per_device_batch_size": config.per_device_batch_size,
             "num_workers": 0 if smoke else config.num_workers,
             "filter_num_workers": config.filter_num_workers,
+            "force_filter": force_filter,
             "prefetch_factor": config.prefetch_factor,
             "pin_memory": config.pin_memory,
             "persistent_workers": config.persistent_workers and not smoke and config.num_workers > 0,
@@ -2082,6 +2131,7 @@ def main() -> int:
     parser.add_argument("--qlora", action="store_true", default=None, help="Enable 4-bit QLoRA")
     parser.add_argument("--no-qlora", dest="qlora", action="store_false", help="Disable QLoRA")
     parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint directory to resume from")
+    parser.add_argument("--force-filter", action="store_true", help="Revalidate prepared samples and rebuild chunk-filter caches")
 
     args, unknown = parser.parse_known_args()
     overrides = [arg for arg in unknown if "=" in arg]
@@ -2103,6 +2153,7 @@ def main() -> int:
         config,
         smoke=args.smoke,
         resume_from=args.resume_from,
+        force_filter=args.force_filter,
     )
     return 0
 

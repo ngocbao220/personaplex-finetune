@@ -68,6 +68,7 @@ Các override dạng `key=value` thay YAML cho lần chạy đó. Tham số chí
 | `data.swap_roles_after_pass` | Luân phiên LEFT/RIGHT làm agent giữa các epoch; cần voice prompt và text prompt cho cả hai phía. |
 | `data.normalize_vietnamese_diacritics` | Bỏ dấu khỏi text target và CER/WER; mặc định `false`, không sửa transcript nguồn hoặc prompt. |
 | `--resume-from` | Tiếp tục adapter và trạng thái optimizer từ checkpoint. |
+| `--force-filter` | Bỏ cache và chạy lại cả validate sample lẫn lọc chunk overflow. Mặc định cache tự tái sử dụng và tự tạo lại nếu manifest, asset hoặc thiết lập liên quan thay đổi. |
 
 ## Inference
 
@@ -77,6 +78,8 @@ python -m tools.inference_smoke --config configs/infer.yaml \
   --window-seconds 30 --start 0 \
   --output-dir outputs/inference
 ```
+
+Thêm `--force-filter` để xác thực manifest và lọc chunk lại thay vì dùng cache.
 
 - `--adapter`: checkpoint LoRA cần nạp.
 - `--window-seconds`, `--start`: độ dài và thời điểm bắt đầu đoạn audio.

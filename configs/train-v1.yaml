@@ -56,7 +56,7 @@ train:
   eval_every_steps: 500
   save_every_steps: 500
   num_workers: 4               # DataLoader audio workers per GPU.
-  filter_num_workers: 64       # CPU workers used only to filter invalid chunks.
+  filter_num_workers: 64       # CPU workers for prepared-sample validation and chunk overflow filtering.
   prefetch_factor: 2
   pin_memory: true
   persistent_workers: true

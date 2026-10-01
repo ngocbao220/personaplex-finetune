@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
 import wave
 import dataclasses
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -398,10 +401,48 @@ def read_stereo_window(path: Path, start_sec: float, end_sec: float, sample_rate
     return audio
 
 
+_PREPARED_SAMPLE_WORKER = None
+
+
+def _prepared_sample_rejection(line_number: int, sample_id: str | None, error: ValidationError) -> str:
+    detail = f"line {line_number}"
+    if sample_id:
+        detail += f" ({sample_id})"
+    return f"{detail}: {error}"
+
+
+def _initialize_prepared_sample_worker(manifest: str, window_seconds: float | None) -> None:
+    global _PREPARED_SAMPLE_WORKER
+    _PREPARED_SAMPLE_WORKER = PreparedDataset(manifest, window_seconds)
+
+
+def _load_prepared_sample_worker(item: tuple[int, dict[str, Any]]):
+    line_number, entry = item
+    sample_id = entry.get("sample_id") if isinstance(entry, dict) else None
+    try:
+        return _PREPARED_SAMPLE_WORKER._load_entry(entry, line_number), None, False
+    except ValidationError as exc:
+        return (
+            None,
+            _prepared_sample_rejection(line_number, sample_id, exc),
+            isinstance(exc, OutOfBoundsError),
+        )
+
+
 class PreparedDataset:
-    def __init__(self, manifest: str | Path, window_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        manifest: str | Path,
+        window_seconds: float | None = None,
+        filter_num_workers: int = 1,
+        force_filter: bool = False,
+    ) -> None:
         self.manifest = Path(manifest).resolve()
         self.window_seconds = window_seconds
+        if filter_num_workers < 1:
+            raise ValueError("filter_num_workers must be positive")
+        self.filter_num_workers = filter_num_workers
+        self.force_filter = force_filter
         self.load_report = DatasetLoadReport()
         if window_seconds is not None and window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
@@ -409,11 +450,45 @@ class PreparedDataset:
     def load(self) -> list[PreparedSample]:
         if not self.manifest.is_file():
             raise ValidationError(f"manifest does not exist: {self.manifest}")
+        from .filter_cache import filter_fingerprint, load_filter_manifest, save_filter_manifest
+
+        cache_path = self.manifest.parent / ".filter-cache" / f"prepared-{self.manifest.stem}.jsonl"
+        fingerprint = filter_fingerprint(
+            [self.manifest], {"kind": "prepared-samples", "window_seconds": self.window_seconds},
+        )
+        if not self.force_filter:
+            cached = load_filter_manifest(cache_path, fingerprint)
+            if cached is not None and "samples" in cached and "report" in cached:
+                raw_report = cached["report"]
+                self.load_report = DatasetLoadReport(
+                    manifest_entries=raw_report["manifest_entries"],
+                    loaded_samples=raw_report["loaded_samples"],
+                    skipped_out_of_bounds=raw_report["skipped_out_of_bounds"],
+                    skipped_invalid=raw_report["skipped_invalid"],
+                    rejected_entries=tuple(raw_report["rejected_entries"]),
+                )
+                print(
+                    f"[Prepared sample filter workers] manifest={self.manifest} "
+                    f"configured={self.filter_num_workers} active=0 mode=cache",
+                    flush=True,
+                )
+                print(
+                    f"[Prepared sample filter cache] hit path={cache_path} samples={len(cached['samples'])}",
+                    flush=True,
+                )
+                if not cached["samples"]:
+                    raise ValidationError(
+                        f"no valid samples in {self.manifest}; skipped "
+                        f"{self.load_report.skipped_out_of_bounds} out-of-bounds and "
+                        f"{self.load_report.skipped_invalid} invalid entries"
+                    )
+                return cached["samples"]
         samples: list[PreparedSample] = []
         rejected: list[str] = []
         skipped_out_of_bounds = 0
         skipped_invalid = 0
         manifest_entries = 0
+        entries: list[tuple[int, dict[str, Any]]] = []
         for line_number, line in enumerate(self.manifest.read_text(encoding="utf-8").splitlines(), 1):
             if not line.strip():
                 continue
@@ -422,26 +497,75 @@ class PreparedDataset:
                 entry = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValidationError(f"invalid JSONL at line {line_number}: {exc}") from exc
-            sample_id = entry.get("sample_id") if isinstance(entry, dict) else None
-            try:
-                samples.append(self._load_entry(entry, line_number))
-            except ValidationError as exc:
-                detail = f"line {line_number}"
-                if sample_id:
-                    detail += f" ({sample_id})"
-                detail += f": {exc}"
-                rejected.append(detail)
-                if isinstance(exc, OutOfBoundsError):
-                    skipped_out_of_bounds += 1
-                else:
-                    skipped_invalid += 1
-                logger.warning("Skipping invalid prepared sample: %s", detail)
+            entries.append((line_number, entry))
+
+        worker_chunksize = 8
+        task_count = math.ceil(len(entries) / worker_chunksize)
+        use_process_pool = self.filter_num_workers > 1 and task_count >= 2
+        active_workers = min(self.filter_num_workers, task_count) if use_process_pool else 1
+        print(
+            f"[Prepared sample filter workers] manifest={self.manifest} entries={len(entries)} "
+            f"configured={self.filter_num_workers} active={active_workers} "
+            f"mode={'processes' if use_process_pool else 'sequential'}",
+            flush=True,
+        )
+        if use_process_pool:
+            with ProcessPoolExecutor(
+                max_workers=active_workers,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_initialize_prepared_sample_worker,
+                initargs=(str(self.manifest), self.window_seconds),
+            ) as executor:
+                outcomes = executor.map(
+                    _load_prepared_sample_worker, entries, chunksize=worker_chunksize,
+                )
+                for outcome in outcomes:
+                    sample, detail, out_of_bounds = outcome
+                    if sample is not None:
+                        samples.append(sample)
+                    else:
+                        rejected.append(detail)
+                        if out_of_bounds:
+                            skipped_out_of_bounds += 1
+                        else:
+                            skipped_invalid += 1
+                        logger.warning("Skipping invalid prepared sample: %s", detail)
+        else:
+            for line_number, entry in entries:
+                sample_id = entry.get("sample_id") if isinstance(entry, dict) else None
+                try:
+                    samples.append(self._load_entry(entry, line_number))
+                except ValidationError as exc:
+                    detail = _prepared_sample_rejection(line_number, sample_id, exc)
+                    rejected.append(detail)
+                    if isinstance(exc, OutOfBoundsError):
+                        skipped_out_of_bounds += 1
+                    else:
+                        skipped_invalid += 1
+                    logger.warning("Skipping invalid prepared sample: %s", detail)
         self.load_report = DatasetLoadReport(
             manifest_entries=manifest_entries,
             loaded_samples=len(samples),
             skipped_out_of_bounds=skipped_out_of_bounds,
             skipped_invalid=skipped_invalid,
             rejected_entries=tuple(rejected),
+        )
+        ids = [sample.sample_id for sample in samples]
+        if len(ids) != len(set(ids)):
+            raise ValidationError("manifest contains duplicate sample_id values")
+        save_filter_manifest(cache_path, fingerprint, {
+            "samples": samples,
+            "report": {
+                "manifest_entries": manifest_entries,
+                "loaded_samples": len(samples),
+                "skipped_out_of_bounds": skipped_out_of_bounds,
+                "skipped_invalid": skipped_invalid,
+                "rejected_entries": rejected,
+            },
+        })
+        print(
+            f"[Prepared sample filter cache] {'forced rebuild' if self.force_filter else 'built'} "
+            f"path={cache_path} samples={len(samples)}", flush=True,
         )
         if not samples:
             if rejected:
@@ -450,9 +574,6 @@ class PreparedDataset:
                     f"rejected entries: {'; '.join(rejected)}"
                 )
             raise ValidationError(f"manifest has no samples: {self.manifest}")
-        ids = [sample.sample_id for sample in samples]
-        if len(ids) != len(set(ids)):
-            raise ValidationError("manifest contains duplicate sample_id values")
         return samples
 
     def split(self, val_ratio: float = 0.05, seed: int = 42) -> tuple[list[PreparedSample], list[PreparedSample]]:
