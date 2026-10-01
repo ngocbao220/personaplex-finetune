@@ -12,6 +12,8 @@ from .data import PreparedSample, Word
 from .sequence import Tokenizer, align_dialogue_text_targets
 
 
+
+
 @dataclass(frozen=True)
 class RejectedChunk:
     sample_id: str
@@ -134,7 +136,15 @@ def filter_text_capacity_chunks(
     if num_workers < 1:
         raise ValueError("num_workers must be positive")
 
-    if num_workers > 1 and len(chunks) >= 64:
+    use_process_pool = num_workers > 1 and len(chunks) >= 64
+    active_workers = min(num_workers, len(chunks)) if use_process_pool else 1
+    print(
+        f"[Chunk filter workers] candidates={len(chunks)} configured={num_workers} "
+        f"active={active_workers} mode={'processes' if use_process_pool else 'sequential'}",
+        flush=True,
+    )
+
+    if use_process_pool:
         worker_chunks = _compact_chunks_for_workers(chunks)
         with ProcessPoolExecutor(
             max_workers=num_workers,
