@@ -358,6 +358,8 @@ def _export_context(sample: PreparedSample, output_dir: Path) -> None:
     audio, source_rate = sphn.read(str(sample.conversation_wav))
     if source_rate != 24000:
         audio = sphn.resample(audio, src_sample_rate=source_rate, dst_sample_rate=24000)
+    if audio.ndim == 1:
+        audio = audio[None, :]
     start = int(sample.window_start_sec * 24000)
     end = int(sample.window_end_sec * 24000)
     original_window = np.ascontiguousarray(audio[..., start:end])

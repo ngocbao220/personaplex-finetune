@@ -317,6 +317,7 @@ class LiveInstrumentedAlignmentAuditor:
             sample_rate=self.runtime.codec.sample_rate,
             frame_rate=self.runtime.codec.frame_rate,
             device=self.device,
+            audio_silence_frame_cnt=builder.pause_frames, # Match builder.pause_frames (6 frames)
             use_sampling=False, # Pure teacher forcing: tokens are provided from ground truth
         )
 
@@ -369,9 +370,12 @@ class LiveInstrumentedAlignmentAuditor:
         dialogue_frames = example.dialogue_frames
         total_steps = prompt_frames + dialogue_frames
 
-        print(f"  ✓ Prompt Frames:        {prompt_frames}")
+        print(f"  ✓ Voice Prompt Frames:  {example.voice_prompt_frames}")
+        print(f"  ✓ Pause Frames (x2):    {builder.pause_frames} x 2 = {builder.pause_frames * 2} frames (silence)")
+        print(f"  ✓ Text Prompt Tokens:   {example.text_prompt_frames} tokens")
+        print(f"  ✓ Total Prompt Frames:  {prompt_frames} ({example.voice_prompt_frames} + {builder.pause_frames} + {example.text_prompt_frames} + {builder.pause_frames})")
         print(f"  ✓ Dialogue Frames:      {dialogue_frames}")
-        print(f"  ✓ LMGen Captured Steps: {len(captured_lmgen_steps)}")
+        print(f"  ✓ LMGen Captured Steps: {len(captured_lmgen_steps)} (matches expected {total_steps - 1})")
 
         # ----------------------------------------------------------------------
         # 4. Compare Initial Tokens & Delays

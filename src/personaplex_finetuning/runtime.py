@@ -11,7 +11,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from .data import read_stereo_window
+from .data import read_audio_window, read_stereo_window
 
 PERSONAPLEX_MIMI_FRAME_RATE = 12.5
 
@@ -20,8 +20,8 @@ def _pad_audio_window(audio, sample_rate: int, duration_sec: float):
     """Match the fixed final-chunk padding performed by the reference dataset loader."""
     import numpy as np
 
-    if audio.ndim != 2 or audio.shape[0] != 2 or audio.shape[-1] == 0:
-        raise ValueError(f"cannot pad missing or non-stereo decoded audio: {audio.shape}")
+    if audio.ndim != 2 or audio.shape[0] not in (1, 2) or audio.shape[-1] == 0:
+        raise ValueError(f"cannot pad missing or non-stereo/mono decoded audio: {audio.shape}")
 
     expected_samples = round(sample_rate * duration_sec)
     if audio.shape[-1] >= expected_samples:
@@ -269,10 +269,12 @@ class MimiCodec:
     def encode_conversation(self, path: Path, channel: int, start_sec: float, end_sec: float):
         import torch
         duration_sec = end_sec - start_sec
-        audio = read_stereo_window(path, start_sec, end_sec, self.sample_rate, str(path))
-        audio = _pad_audio_window(audio, self.sample_rate, duration_sec)
         if channel not in (0, 1):
             raise ValueError(f"invalid conversation window {start_sec}:{end_sec} for {path}")
+        audio = read_audio_window(path, start_sec, end_sec, self.sample_rate, str(path), channels=(1, 2))
+        if channel >= audio.shape[0]:
+            raise ValueError(f"channel {channel} is unavailable in {audio.shape[0]}-channel audio: {path}")
+        audio = _pad_audio_window(audio, self.sample_rate, duration_sec)
         return self._encode(audio[channel : channel + 1], torch)
 
     def encode_voice_prompt(self, path: Path):

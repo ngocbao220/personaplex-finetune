@@ -359,8 +359,15 @@ def read_wav_info(path: Path) -> AudioInfo:
     return AudioInfo(sample_rate, channels, frames / sample_rate)
 
 
-def read_stereo_window(path: Path, start_sec: float, end_sec: float, sample_rate: int, sample_id: str):
-    """Decode one real stereo window; never turn a failed seek into padded silence."""
+def read_audio_window(
+    path: Path,
+    start_sec: float,
+    end_sec: float,
+    sample_rate: int,
+    sample_id: str,
+    channels: int | tuple[int, ...] = (1, 2),
+):
+    """Decode one real audio window (mono or stereo [C,T]); never turn a failed seek into padded silence."""
     import numpy as np
     import sphn
 
@@ -368,9 +375,13 @@ def read_stereo_window(path: Path, start_sec: float, end_sec: float, sample_rate
     if start_sec < 0 or duration_sec <= 0:
         raise ValueError(f"{sample_id}: invalid audio window {start_sec:.6f}-{end_sec:.6f}s")
 
+    allowed_channels = (channels,) if isinstance(channels, int) else tuple(channels)
+
     def channels_first(value):
         value = np.asarray(value, dtype=np.float32)
-        if value.ndim == 2 and value.shape[0] != 2 and value.shape[1] == 2:
+        if value.ndim == 1:
+            value = value[None, :]
+        elif value.ndim == 2 and value.shape[0] not in allowed_channels and value.shape[1] in allowed_channels:
             value = value.T
         return value
 
@@ -378,13 +389,14 @@ def read_stereo_window(path: Path, start_sec: float, end_sec: float, sample_rate
         str(path), start_sec=start_sec, duration_sec=duration_sec, sample_rate=sample_rate,
     )
     audio = channels_first(audio)
-    if audio.ndim == 2 and audio.shape == (2, 0):
+    if audio.ndim == 2 and audio.shape[-1] == 0:
         # sphn can return an empty time slice near a WAV boundary even when
         # the complete file decodes. Retry by slicing the decoded waveform.
         full_audio, decoded_rate = sphn.read(str(path), sample_rate=sample_rate)
         full_audio = channels_first(full_audio)
-        if decoded_rate <= 0 or full_audio.ndim != 2 or full_audio.shape[0] != 2:
-            raise ValueError(f"{sample_id}: cannot decode stereo WAV {path}; got {full_audio.shape}")
+        if decoded_rate <= 0 or full_audio.ndim != 2 or full_audio.shape[0] not in allowed_channels:
+            channel_str = "stereo" if allowed_channels == (2,) else f"{allowed_channels}-channel"
+            raise ValueError(f"{sample_id}: cannot decode {channel_str} WAV {path}; got {full_audio.shape}")
         start_frame = round(start_sec * decoded_rate)
         end_frame = start_frame + round(duration_sec * decoded_rate)
         audio = full_audio[:, start_frame:end_frame]
@@ -393,12 +405,24 @@ def read_stereo_window(path: Path, start_sec: float, end_sec: float, sample_rate
                 f"{sample_id}: requested WAV window {start_sec:.6f}-{end_sec:.6f}s "
                 f"lies beyond decoded audio ({full_audio.shape[-1] / decoded_rate:.6f}s): {path}"
             )
-    if decoded_rate != sample_rate or audio.ndim != 2 or audio.shape[0] != 2 or audio.shape[-1] == 0:
+    if decoded_rate != sample_rate or audio.ndim != 2 or audio.shape[0] not in allowed_channels or audio.shape[-1] == 0:
+        if allowed_channels == (2,):
+            channel_desc = "stereo [2,T]"
+        elif allowed_channels == (1,):
+            channel_desc = "mono [1,T]"
+        else:
+            channel_desc = f"mono or stereo ({', '.join(f'[{c},T]' for c in allowed_channels)})"
         raise ValueError(
-            f"{sample_id}: decoded audio must be stereo [2,T] at {sample_rate} Hz; "
+            f"{sample_id}: decoded audio must be {channel_desc} at {sample_rate} Hz; "
             f"got {audio.shape} at {decoded_rate} Hz: {path}"
         )
     return audio
+
+
+def read_stereo_window(path: Path, start_sec: float, end_sec: float, sample_rate: int, sample_id: str):
+    """Decode one real stereo window; never turn a failed seek into padded silence."""
+    return read_audio_window(path, start_sec, end_sec, sample_rate, sample_id, channels=(2,))
+
 
 
 _PREPARED_SAMPLE_WORKER = None

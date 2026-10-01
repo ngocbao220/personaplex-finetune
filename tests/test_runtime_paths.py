@@ -4,10 +4,31 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
+from personaplex_finetuning.data import read_stereo_window
 from personaplex_finetuning.runtime import MimiCodec, RuntimePaths
 
 
 class RuntimePathsTest(unittest.TestCase):
+    def test_inference_encodes_mono_channel_zero_and_preserves_stereo_channel_selection(self) -> None:
+        import torch  # Load before patch.dict(sys.modules) restores the module table.
+
+        mono = np.ones((1, 8), dtype=np.float32)
+        stereo = np.vstack((mono, mono * 2))
+        sources = {"mono.wav": mono[0], "mono2d.wav": mono, "stereo.wav": stereo}
+        fake_sphn = types.SimpleNamespace(read=lambda path, **_kwargs: (sources[path], 24_000))
+        codec = MimiCodec(object(), 24_000, 12.5, "cpu", object())
+
+        with patch.dict("sys.modules", {"sphn": fake_sphn}), patch.object(codec, "_encode", side_effect=lambda audio, _torch: audio.copy()):
+            np.testing.assert_array_equal(codec.encode_conversation(Path("mono.wav"), 0, 0, 8 / 24_000), mono)
+            np.testing.assert_array_equal(codec.encode_conversation(Path("mono2d.wav"), 0, 0, 8 / 24_000), mono)
+            np.testing.assert_array_equal(codec.encode_conversation(Path("stereo.wav"), 1, 0, 8 / 24_000), stereo[1:2])
+            with self.assertRaisesRegex(ValueError, "channel 1 is unavailable"):
+                codec.encode_conversation(Path("mono.wav"), 1, 0, 8 / 24_000)
+            with self.assertRaisesRegex(ValueError, "stereo \\[2,T\\]"):
+                read_stereo_window(Path("mono.wav"), 0, 8 / 24_000, 24_000, "training")
+
     def test_stereo_mimi_batch_matches_per_sample_channels_and_uses_disk_cache(self) -> None:
         import numpy as np
         import torch
