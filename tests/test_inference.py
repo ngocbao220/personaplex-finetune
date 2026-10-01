@@ -346,6 +346,32 @@ class InferenceStreamingTest(unittest.TestCase):
 
 
 class InferenceOutputWarningTest(unittest.TestCase):
+    def test_standalone_mono_input_builds_user_context_without_manifest_sample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_file = root / "outside.wav"
+            voice_prompt = root / "voice.wav"
+            input_file.write_bytes(b"wav")
+            voice_prompt.write_bytes(b"wav")
+            fake_sphn = types.SimpleNamespace(
+                read=lambda _path: (np.ones((1, 24_000), dtype=np.float32), 24_000),
+                write_wav=lambda path, _audio, _rate: Path(path).write_bytes(b"wav"),
+            )
+            with patch.dict(sys.modules, {"sphn": fake_sphn}), \
+                 patch.object(inference, "_export_context"), \
+                 patch.object(inference, "generate") as generate:
+                inference.smoke(
+                    SimpleNamespace(model_root=Path("model")), None, Path("adapter"), root / "output",
+                    input_file=input_file, voice_prompt_wav=voice_prompt, text_prompt="Trò chuyện tự nhiên",
+                )
+
+            sample = generate.call_args_list[0].args[1]
+            self.assertEqual(sample.sample_id, "outside")
+            self.assertEqual(sample.user_channel, 0)
+            self.assertEqual(sample.audio.channels, 1)
+            self.assertEqual(sample.text_prompt, "Trò chuyện tự nhiên")
+            self.assertEqual(sample.voice_prompt_wav, voice_prompt)
+
     def test_missing_outputs_warn_and_write_run_report_instead_of_raising(self):
         sample = SimpleNamespace(
             sample_id="sample-0",
@@ -622,6 +648,27 @@ class SmokeGenerationReportTest(unittest.TestCase):
 
 
 class InferenceCliGenerationTest(unittest.TestCase):
+    def test_explicit_prompts_skip_split_and_manifest_for_external_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "infer.yaml"
+            config_path.write_text("adapter:\n  path: adapter.safetensors\n", encoding="utf-8")
+            with patch.object(sys, "argv", [
+                "inference_smoke.py", "--config", str(config_path), "--input-file", "external.wav",
+                "--voice-prompt", "voice.wav", "--text-prompt", "Trò chuyện tự nhiên",
+                "--sample-id", "absent-from-train", "--output-dir", str(root / "outputs"),
+            ]), patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
+                manifest="train.jsonl", window_seconds=30.0,
+            )), patch.object(inference_smoke, "PreparedDataset") as dataset_factory, \
+                 patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+                smoke.return_value = "reference_unavailable"
+                self.assertEqual(inference_smoke.main(), 0)
+
+            dataset_factory.assert_not_called()
+            self.assertIsNone(smoke.call_args.kwargs["sample"])
+            self.assertEqual(smoke.call_args.kwargs["text_prompt"], "Trò chuyện tự nhiên")
+            self.assertEqual(smoke.call_args.kwargs["voice_prompt_wav"], Path("voice.wav").resolve())
+
     def test_external_audio_window_starts_at_configured_offset_and_caps_at_eof(self):
         self.assertEqual(inference._input_audio_window(45.0, 12.0, 100.0), (12.0, 45.0))
         with self.assertRaisesRegex(ValueError, "outside audio duration"):

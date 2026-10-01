@@ -79,6 +79,17 @@ python -m tools.inference_smoke --config configs/infer.yaml \
   --output-dir outputs/inference
 ```
 
+Với WAV/MP3 bên ngoài manifest, truyền trực tiếp cả hai prompt. Chế độ này không nạp manifest và không kiểm tra train/validation/test split:
+
+```bash
+python -m tools.inference_smoke --config configs/infer.yaml \
+  --adapter /path/to/checkpoint \
+  --input-file /path/to/user.wav \
+  --voice-prompt /path/to/agent_voice.wav \
+  --text-prompt "Bạn đang trò chuyện tự nhiên." \
+  --window-seconds 30 --output-dir outputs/inference
+```
+
 Thêm `--force-filter` để xác thực manifest và lọc chunk lại thay vì dùng cache.
 
 - `--adapter`: checkpoint LoRA cần nạp.

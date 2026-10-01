@@ -1,11 +1,4 @@
-"""
-python -m your_package.smoke \
-    --adapter outputs/checkpoint/adapter.pt \
-    --input-file ./test.mp3 \
-    --voice-prompt voice.wav
-    --text-prompt ""
-
-"""
+"""CLI for prepared-sample and standalone external-audio inference smoke runs."""
 
 from __future__ import annotations
 
@@ -94,6 +87,8 @@ def main() -> int:
         default=None,
         help="Optional WAV/MP3 input used instead of the sample conversation audio.",
     )
+    parser.add_argument("--voice-prompt", type=Path, help="Voice prompt WAV for standalone --input-file inference.")
+    parser.add_argument("--text-prompt", help="Text system prompt for standalone --input-file inference.")
     parser.add_argument(
         "--output-dir", default=None,
         help="Output root; each run is saved in a new infer_<date> subdirectory.",
@@ -144,6 +139,11 @@ def main() -> int:
     input_file = args.input_file
     if input_file is None and hasattr(inf_sec, "get") and inf_sec.get("input_file"):
         input_file = Path(inf_sec.get("input_file"))
+    if (args.voice_prompt is None) != (args.text_prompt is None):
+        parser.error("--voice-prompt and --text-prompt must be provided together")
+    if args.voice_prompt is not None and input_file is None:
+        parser.error("--voice-prompt and --text-prompt require --input-file")
+    direct_input = args.voice_prompt is not None
 
     configured_window = inf_sec.get("window_seconds") if hasattr(inf_sec, "get") else None
     if args.window_seconds is not None:
@@ -170,12 +170,13 @@ def main() -> int:
     started = time.perf_counter()
     adapter_path = Path(adapter_path).expanduser().resolve()
     input_file = input_file.expanduser().resolve() if input_file is not None else None
+    voice_prompt = args.voice_prompt.expanduser().resolve() if args.voice_prompt is not None else None
     run_record = {
         "status": "running",
         "started_at": started_at,
         "config": str(Path(args.config).expanduser().resolve()),
         "adapter": str(adapter_path),
-        "split": args.split,
+        "split": None if direct_input else args.split,
         "input_file": str(input_file) if input_file is not None else None,
         "generation": generation.as_dict(),
         "force_filter": args.force_filter,
@@ -195,8 +196,11 @@ def main() -> int:
                 "filter_num_workers": inference_workers,
                 "force_filter": args.force_filter,
             }
-        logger.info("loading split=%s window_seconds=%s", args.split, window_seconds)
-        if args.split == "train":
+        if direct_input:
+            samples = []
+            logger.info("using standalone input and explicit voice/text prompts")
+        elif args.split == "train":
+            logger.info("loading split=%s window_seconds=%s", args.split, window_seconds)
             samples = PreparedDataset(
                 config.manifest, window_seconds, **dataset_filter_options,
             ).load()
@@ -288,7 +292,9 @@ def main() -> int:
         run_record["chunk_filter"] = chunk_filter_record
         write_json(output_dir / "config.json", run_record)
 
-        if sample_id is not None:
+        if direct_input:
+            sample = None
+        elif sample_id is not None:
             matching = [sample for sample in samples if sample.sample_id == sample_id]
             if not matching:
                 raise ValueError(f"sample_id {sample_id!r} is not present in the {args.split} split")
@@ -342,18 +348,23 @@ def main() -> int:
         raise
 
     run_record.update({
-        "sample_id": sample.sample_id,
-        "window_start_sec": sample.window_start_sec,
-        "window_end_sec": sample.window_end_sec,
+        "sample_id": input_file.stem if direct_input else sample.sample_id,
+        "window_start_sec": None if direct_input else sample.window_start_sec,
+        "window_end_sec": None if direct_input else sample.window_end_sec,
         "chunk_filter": chunk_filter_record,
     })
     write_json(output_dir / "config.json", run_record)
-    logger.info(
-        "sample=%s split=%s window=%.3f-%.3fs",
-        sample.sample_id, args.split, sample.window_start_sec, sample.window_end_sec,
-    )
-    logger.info("voice_prompt=%s", getattr(sample, "voice_prompt_wav", "(unknown)"))
-    logger.info("text_prompt=%s", getattr(sample, "text_prompt", "(unknown)"))
+    if direct_input:
+        logger.info("input=%s start=%s max_window=%s", input_file, start_sec, window_seconds)
+        logger.info("voice_prompt=%s", voice_prompt)
+        logger.info("text_prompt=%s", args.text_prompt)
+    else:
+        logger.info(
+            "sample=%s split=%s window=%.3f-%.3fs",
+            sample.sample_id, args.split, sample.window_start_sec, sample.window_end_sec,
+        )
+        logger.info("voice_prompt=%s", getattr(sample, "voice_prompt_wav", "(unknown)"))
+        logger.info("text_prompt=%s", getattr(sample, "text_prompt", "(unknown)"))
 
     try:
         quality_status = smoke(
@@ -365,6 +376,7 @@ def main() -> int:
             input_start_sec=start_sec,
             input_window_seconds=window_seconds,
             generation=generation,
+            **({"voice_prompt_wav": voice_prompt, "text_prompt": args.text_prompt} if direct_input else {}),
         )
     except Exception as exc:
         run_record.update({

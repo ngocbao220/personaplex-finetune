@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import Config
-from .data import PreparedSample
+from .data import AudioInfo, PreparedSample
 from .generation import GenerationSettings, generation_from_config
 from .lora import inject_lora, load_adapter
 from .runtime import RuntimePaths, load_runtime
@@ -389,13 +389,15 @@ def _export_context(sample: PreparedSample, output_dir: Path) -> None:
 
 def smoke(
     config: Config,
-    sample: PreparedSample,
+    sample: PreparedSample | None,
     adapter: Path,
     output_dir: Path,
     input_file: Path | None = None,
     input_start_sec: float | None = None,
     input_window_seconds: float | None = None,
     generation: GenerationSettings | None = None,
+    voice_prompt_wav: Path | None = None,
+    text_prompt: str | None = None,
 ) -> str:
     settings = GenerationSettings() if generation is None else generation
     seed = int(getattr(config, "seed", 42))
@@ -412,6 +414,13 @@ def smoke(
         else:
             config = copy.copy(config)
             config.model_root = adapter_model_root
+    if sample is None:
+        if input_file is None:
+            raise ValueError("inference without external audio requires a prepared sample")
+        if voice_prompt_wav is None or text_prompt is None:
+            raise ValueError("external inference without a manifest sample requires voice and text prompts")
+        if not voice_prompt_wav.is_file():
+            raise FileNotFoundError(f"voice prompt does not exist: {voice_prompt_wav}")
     if input_file is not None:
         normalized_input = _prepare_input_audio(input_file, output_dir)
 
@@ -426,14 +435,28 @@ def smoke(
             audio_duration_sec, input_start_sec, input_window_seconds,
         )
 
-        sample = replace(
-            sample,
-            conversation_wav=normalized_input,
-            user_channel=0,
-            window_start_sec=window_start_sec,
-            window_end_sec=window_end_sec,
-            words=(),
-        )
+        if sample is None:
+            sample = PreparedSample(
+                sample_id=input_file.stem,
+                conversation_wav=normalized_input,
+                voice_prompt_wav=voice_prompt_wav,
+                words=(),
+                text_prompt=text_prompt,
+                metadata={},
+                audio=AudioInfo(sample_rate, audio.shape[0], audio_duration_sec),
+                window_start_sec=window_start_sec,
+                window_end_sec=window_end_sec,
+                user_channel=0,
+            )
+        else:
+            sample = replace(
+                sample,
+                conversation_wav=normalized_input,
+                user_channel=0,
+                window_start_sec=window_start_sec,
+                window_end_sec=window_end_sec,
+                words=(),
+            )
 
     _export_context(sample, output_dir)
     # Base and fine-tuned runs share the same sampling settings and the same seed, so any
@@ -547,7 +570,10 @@ def smoke(
                 "generation": settings.label(),
                 "generation_settings": settings.as_dict(),
                 "seed": seed,
-                "stereo_mapping": "Channel 0 (LEFT) = Agent, Channel 1 (RIGHT) = User",
+                "stereo_mapping": (
+                    "Input channel 0 = User context" if input_file is not None
+                    else "Channel 0 (LEFT) = Agent, Channel 1 (RIGHT) = User"
+                ),
                 "warnings": output_warnings,
             },
             indent=2,
