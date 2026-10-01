@@ -1,0 +1,33 @@
+defaults:
+  - model: server
+  - data: vietnamese
+  - lora: default
+  - train: full
+  - _self_
+
+# Explicit full-parameter PersonaPlex training. Run with:
+# python train.py --config configs/full-finetuning.yaml --smoke
+seed: 42
+duration_sec: 100
+no_eval: false
+free_running_eval_every_steps: 500
+free_running_eval_samples: 3
+validation_max_samples: 32
+
+data:
+  shuffle: false
+
+train:
+  method: full
+  stage: joint
+  per_device_batch_size: 1
+  gradient_checkpointing: true
+  output_dir: ../runs/full-finetuning
+
+generation:
+  use_sampling: true
+  temp: 0.8
+  temp_text: 0.7
+  top_k: 250
+  top_k_text: 25
+  audio_silence_frame_cnt: 6

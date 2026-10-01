@@ -233,7 +233,7 @@ class PersonaPlexTrainingExampleBuilder:
         loss_mask = (
             (prompt_mask + dialogue_text_mask),
             *((prompt_mask + dialogue_validity) for _ in range(8)),
-            *((False,) * len(agent_text) for _ in range(8)),
+            *((prompt_mask + dialogue_validity) for _ in range(8)),
         )
         return TrainingExample(
             input_codes=streams,
@@ -245,24 +245,6 @@ class PersonaPlexTrainingExampleBuilder:
             voice_prompt_frames=voice_frames,
             text_prompt_frames=len(text_prompt),
             word_alignments=word_alignments,
-        )
-
-    def apply_delays(self, example: TrainingExample, delays: Sequence[int]) -> TrainingExample:
-        if len(delays) != 17 or any(delay < 0 for delay in delays):
-            raise ValueError("delays must contain 17 non-negative values")
-        max_delay = max(delays)
-        streams: list[tuple[int, ...]] = []
-        masks: list[tuple[bool, ...]] = []
-        for stream, mask, initial, delay in zip(example.input_codes, example.loss_mask, self.initial_tokens, delays, strict=True):
-            streams.append((initial,) + (initial,) * delay + stream + (self.zero_token,) * (max_delay - delay))
-            masks.append((False,) + (False,) * delay + mask + (False,) * (max_delay - delay))
-        return TrainingExample(
-            input_codes=tuple(streams), labels=tuple(streams), loss_mask=tuple(masks),
-            stream_names=example.stream_names, prompt_frames=example.prompt_frames,
-            dialogue_frames=example.dialogue_frames,
-            voice_prompt_frames=example.voice_prompt_frames,
-            text_prompt_frames=example.text_prompt_frames,
-            word_alignments=example.word_alignments,
         )
 
     def _dialogue_text(self, sample: PreparedSample, frames: int) -> tuple[tuple[int, ...], tuple[WordTokenAlignment, ...]]:

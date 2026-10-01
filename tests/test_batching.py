@@ -21,6 +21,7 @@ from personaplex_finetuning.objective import stream_weights_torch
 from personaplex_finetuning.runtime import MimiCodec
 from personaplex_finetuning.sequence import PersonaPlexTrainingExampleBuilder, TrainingExample
 from personaplex_finetuning.train import loss_components, reduce_distributed_loss
+from tools.inspect_sample import native_debug_delay
 
 
 def example(length, padding_id=3):
@@ -190,8 +191,8 @@ class BatchContractTest(unittest.TestCase):
             [True, True, True, False, False],
         ])
         weights = stream_weights_torch(batch["labels"], batch["loss_mask"], 3)
-        self.assertAlmostEqual(float(weights[0, 0, 1]), 0.3)
-        self.assertAlmostEqual(float(weights[1, 0, 1]), 0.3)
+        self.assertAlmostEqual(float(weights[0, 0, 1]), 0.5)
+        self.assertAlmostEqual(float(weights[1, 0, 1]), 0.5)
         self.assertEqual(float(weights[1, 0, 3]), 0.0)
         self.assertEqual(float(weights[1, 1, 2]), 1.0)
         self.assertEqual(float(weights[1, 1, 3]), 0.0)
@@ -230,10 +231,10 @@ class BatchContractTest(unittest.TestCase):
     def test_audio_codebook_multipliers_remain_effective_in_combined_audio_loss(self):
         labels = torch.zeros((1, 17, 1), dtype=torch.long)
         loss_mask = torch.zeros_like(labels, dtype=torch.bool)
-        loss_mask[:, 1:9] = True
+        loss_mask[:, 1:17] = True
         batch = {"labels": labels, "loss_mask": loss_mask}
         audio_logits = torch.zeros((1, 16, 1, 2))
-        audio_logits[:, 1:8, :, 1] = torch.log(torch.tensor(3.0))
+        audio_logits[:, [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15], :, 1] = torch.log(torch.tensor(3.0))
         output = SimpleNamespace(
             text_logits=torch.zeros((1, 1, 1, 5)),
             logits=audio_logits,
@@ -243,8 +244,8 @@ class BatchContractTest(unittest.TestCase):
 
         total, components = loss_components(output, labels, batch, (3, 0), torch)
         weighted_expected = (
-            torch.log(torch.tensor(2.0)) + 7 * 0.02 * torch.log(torch.tensor(4.0))
-        ) / (1 + 7 * 0.02)
+            2 * torch.log(torch.tensor(2.0)) + 14 * 0.02 * torch.log(torch.tensor(4.0))
+        ) / (2 + 14 * 0.02)
         _, stronger_semantic = loss_components(
             output, labels, batch, (3, 0), torch, first_codebook_weight_multiplier=2.5,
         )
@@ -260,6 +261,23 @@ class BatchContractTest(unittest.TestCase):
         self.assertGreater(float(stronger_semantic["audio_semantic"]), float(components["audio_semantic"]))
         self.assertLess(float(stronger_semantic["audio_nonsemantic"]), float(components["audio_nonsemantic"]))
 
+    @unittest.skipUnless(torch.backends.mps.is_available(), "MPS is required for FP16 backward regression")
+    def test_all_audio_codebooks_backpropagate_on_mps_without_advanced_indexing(self):
+        device = "mps"
+        labels = torch.zeros((1, 17, 2), dtype=torch.long, device=device)
+        mask = torch.ones_like(labels, dtype=torch.bool)
+        logits = torch.randn((1, 16, 2, 4), device=device, dtype=torch.float16, requires_grad=True)
+        output = SimpleNamespace(
+            text_logits=torch.zeros((1, 1, 2, 5), device=device),
+            text_mask=torch.zeros((1, 1, 2), device=device, dtype=torch.bool),
+            logits=logits,
+            mask=torch.ones((1, 16, 2), device=device, dtype=torch.bool),
+        )
+        total, _ = loss_components(output, labels, {"labels": labels, "loss_mask": mask}, (3, 0), torch)
+        total.backward()
+        self.assertTrue(torch.isfinite(logits.grad).all())
+        self.assertTrue((logits.grad[:, (0, 8)] != 0).any())
+
     def test_actual_delay_transform_masks_each_stream_boundary_before_batch_padding(self):
         class Codec:
             codebooks = 8
@@ -270,7 +288,7 @@ class BatchContractTest(unittest.TestCase):
 
         builder = PersonaPlexTrainingExampleBuilder(Codec(), Tokenizer(), [0] * 17, -1)
         delays = tuple(index % 4 for index in range(17))
-        delayed = builder.apply_delays(example(6), delays)
+        delayed = native_debug_delay(example(6), builder.initial_tokens, delays, builder.zero_token)
         batch = post_encode_collate([delayed, example(4)], 3, -1, "cpu")
         for stream in range(17):
             self.assertEqual(batch["loss_mask"][0, stream, :delayed.total_frames].tolist(), list(delayed.loss_mask[stream]))

@@ -237,6 +237,22 @@ class InferenceStreamingTest(unittest.TestCase):
 
         self.assertEqual(paths.model_root, trained_model_root.resolve())
 
+    def test_generate_loads_full_checkpoint_without_lora_injection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "checkpoint_000001"
+            checkpoint.mkdir()
+            (checkpoint / "model.safetensors").write_bytes(b"weights")
+            (checkpoint / "checkpoint.json").write_text(json.dumps({
+                "method": "full", "base_model_root": str(root / "base"), "step": 1,
+            }), encoding="utf-8")
+            with patch.object(inference, "load_full_weights") as load_full, \
+                 self._generate_with_fakes(adapter=checkpoint) as fakes:
+                self.assertEqual(fakes.load_runtime.call_args.args[0].model_root, (root / "base").resolve())
+                fakes.inject_lora.assert_not_called()
+                fakes.load_adapter.assert_not_called()
+                load_full.assert_called_once_with(fakes.model, checkpoint)
+
     def test_generate_injects_all_module_prefixes_found_in_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "checkpoint_000010"
@@ -798,3 +814,108 @@ class InferenceCliGenerationTest(unittest.TestCase):
                 "generation:\n  top_k_text: -3\n"
                 "inference:\n  sample_index: 0\n"
             )
+
+    def test_infer_config_passes_voice_prompt_and_text_prompt_down_to_smoke(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "infer.yaml"
+            voice_file = root / "agent_voice.wav"
+            input_file = root / "user_audio.wav"
+            voice_file.write_bytes(b"wav")
+            input_file.write_bytes(b"wav")
+            config_path.write_text(
+                "adapter:\n  path: adapter.safetensors\n"
+                "inference:\n"
+                f"  input_file: {input_file}\n"
+                f"  voice_prompt: {voice_file}\n"
+                "  text_prompt: 'Bạn là trợ lý ảo thân thiện.'\n",
+                encoding="utf-8",
+            )
+            with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path)]), \
+                 patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
+                     manifest="train.jsonl", window_seconds=30.0,
+                 )), \
+                 patch.object(inference_smoke, "PreparedDataset") as dataset_factory, \
+                 patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+                smoke.return_value = "reference_unavailable"
+                self.assertEqual(inference_smoke.main(), 0)
+
+            dataset_factory.assert_not_called()
+            self.assertIsNone(smoke.call_args.kwargs["sample"])
+            self.assertEqual(smoke.call_args.kwargs["input_file"], input_file.resolve())
+            self.assertEqual(smoke.call_args.kwargs["voice_prompt_wav"], voice_file.resolve())
+            self.assertEqual(smoke.call_args.kwargs["text_prompt"], "Bạn là trợ lý ảo thân thiện.")
+
+    def test_input_file_prioritized_over_sample_id_when_both_exist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "infer.yaml"
+            voice_file = root / "voice.wav"
+            input_file = root / "custom_user.wav"
+            voice_file.write_bytes(b"wav")
+            input_file.write_bytes(b"wav")
+            config_path.write_text(
+                "adapter:\n  path: adapter.safetensors\n"
+                "inference:\n"
+                "  sample_id: conv_0001\n"
+                f"  input_file: {input_file}\n"
+                f"  voice_prompt: {voice_file}\n"
+                "  text_prompt: 'Định hướng hội thoại PersonaPlex.'\n",
+                encoding="utf-8",
+            )
+            with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path)]), \
+                 patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
+                     manifest="train.jsonl", window_seconds=30.0,
+                 )), \
+                 patch.object(inference_smoke, "PreparedDataset") as dataset_factory, \
+                 patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+                smoke.return_value = "reference_unavailable"
+                self.assertEqual(inference_smoke.main(), 0)
+
+            # When both sample_id and input_file exist with prompts, input_file is prioritized:
+            # dataset is NOT loaded, sample is None, and input_file is used.
+            dataset_factory.assert_not_called()
+            self.assertIsNone(smoke.call_args.kwargs["sample"])
+            self.assertEqual(smoke.call_args.kwargs["input_file"], input_file.resolve())
+            self.assertEqual(smoke.call_args.kwargs["voice_prompt_wav"], voice_file.resolve())
+            self.assertEqual(smoke.call_args.kwargs["text_prompt"], "Định hướng hội thoại PersonaPlex.")
+
+    def test_manifest_sample_with_prompt_overrides(self):
+        sample = SimpleNamespace(
+            sample_id="conv_0002",
+            voice_prompt_wav=Path("old_voice.wav"),
+            text_prompt="Old prompt",
+            window_start_sec=0.0,
+            window_end_sec=30.0,
+            audio=SimpleNamespace(duration_sec=30.0),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "infer.yaml"
+            new_voice = root / "new_voice.wav"
+            new_voice.write_bytes(b"wav")
+            config_path.write_text(
+                "adapter:\n  path: adapter.safetensors\n"
+                "inference:\n"
+                "  sample_id: conv_0002\n"
+                f"  voice_prompt: {new_voice}\n"
+                "  text_prompt: 'New custom prompt'\n",
+                encoding="utf-8",
+            )
+            with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path)]), \
+                 patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
+                     manifest="train.jsonl", window_seconds=30.0,
+                 )), \
+                 patch.object(inference_smoke, "PreparedDataset", return_value=SimpleNamespace(
+                     load=lambda: [sample],
+                 )), \
+                 patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+                smoke.return_value = None
+                self.assertEqual(inference_smoke.main(), 0)
+
+            selected_sample = smoke.call_args.kwargs["sample"]
+            self.assertEqual(selected_sample.sample_id, "conv_0002")
+            self.assertEqual(selected_sample.voice_prompt_wav, new_voice.resolve())
+            self.assertEqual(selected_sample.text_prompt, "New custom prompt")
+            self.assertIsNone(smoke.call_args.kwargs["input_file"])
+

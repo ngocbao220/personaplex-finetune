@@ -80,7 +80,7 @@ def post_encode_collate(examples, text_padding_id: int, zero_token: int, device)
         "labels": labels,
         "valid_frame_mask": valid_frame_mask,
         "text_loss_mask": loss_mask[:, 0],
-        "audio_loss_mask": loss_mask[:, 1:9],
+        "audio_loss_mask": loss_mask[:, 1:17],
         "loss_mask": loss_mask & valid_frame_mask[:, None, :],
     }
 

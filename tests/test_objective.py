@@ -30,7 +30,7 @@ class ObjectiveTest(unittest.TestCase):
 
         self.assertTrue(torch.isfinite(loss))
 
-    def test_only_agent_dialogue_streams_receive_weight(self) -> None:
+    def test_both_dialogue_audio_streams_receive_semantic_and_nonsemantic_weights(self) -> None:
         mask = tuple(tuple(True for _ in range(3)) for _ in range(17))
         codes = (
             (3, 5, 3),
@@ -40,10 +40,11 @@ class ObjectiveTest(unittest.TestCase):
 
         weights = stream_weights(codes, mask, text_padding_id=3)
 
-        self.assertEqual(weights[0], (0.3, 1.0, 0.3))
+        self.assertEqual(weights[0], (0.5, 1.0, 0.5))
         self.assertEqual(weights[1], (1.0, 1.0, 1.0))
         self.assertEqual(weights[2], (0.02, 0.02, 0.02))
-        self.assertEqual(weights[9], (0.0, 0.0, 0.0))
+        self.assertEqual(weights[9], (1.0, 1.0, 1.0))
+        self.assertEqual(weights[10], (0.02, 0.02, 0.02))
 
     def test_prompt_mask_disables_even_padding_weight(self) -> None:
         weights = stream_weights(
@@ -61,6 +62,7 @@ class ObjectiveTest(unittest.TestCase):
         )
         self.assertEqual(weights[0], (0.4, 1.0))
         self.assertEqual(weights[1], (2.5, 2.5))
+        self.assertEqual(weights[9], (2.5, 2.5))
 
     def test_torch_weights_match_configured_reference_weights(self) -> None:
         import torch
@@ -72,6 +74,7 @@ class ObjectiveTest(unittest.TestCase):
         weights = stream_weights_torch(codes, mask, 3, 0.02, 0.4, 2.5)
         self.assertTrue(torch.allclose(weights[0, 0], torch.tensor([0.4, 1.0])))
         self.assertTrue(torch.allclose(weights[0, 1], torch.tensor([2.5, 2.5])))
+        self.assertTrue(torch.allclose(weights[0, 9], torch.tensor([2.5, 2.5])))
 
     def test_both_text_padding_tokens_receive_padding_weight(self) -> None:
         import torch

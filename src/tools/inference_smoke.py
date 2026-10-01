@@ -12,7 +12,7 @@ import time
 from personaplex_finetuning.config import load_config
 from personaplex_finetuning.chunk_filter import filter_text_capacity_chunks
 from personaplex_finetuning.data import PreparedDataset
-from personaplex_finetuning.inference import generation_from_config, resolve_adapter_checkpoint, smoke
+from personaplex_finetuning.inference import checkpoint_model_root, generation_from_config, is_full_checkpoint, smoke, update_sample
 from personaplex_finetuning.filter_cache import filter_fingerprint
 from personaplex_finetuning.runtime import (
     PERSONAPLEX_MIMI_FRAME_RATE,
@@ -62,8 +62,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--adapter",
+        "--checkpoint",
+        dest="adapter",
         default=None,
-        help="Path to fine-tuned LoRA adapter (if omitted, read from config).",
+        help="Path to a full checkpoint or LoRA adapter (if omitted, read from config).",
     )
     parser.add_argument("--index", type=int, default=None, help="Sample index in dataset to evaluate.")
     parser.add_argument(
@@ -111,12 +113,12 @@ def main() -> int:
 
     adapter_path = args.adapter
     if adapter_path is None and hasattr(raw_conf, "get"):
-        adapter_sec = raw_conf.get("adapter", {})
+        adapter_sec = raw_conf.get("checkpoint", raw_conf.get("adapter", {}))
         if hasattr(adapter_sec, "get"):
             adapter_path = adapter_sec.get("path")
 
     if not adapter_path:
-        raise ValueError("LoRA adapter path must be provided via --adapter or specified in config under 'adapter.path'")
+        raise ValueError("checkpoint path must be provided via --checkpoint/--adapter or config checkpoint.path/adapter.path")
 
     inf_sec = raw_conf.get("inference", {}) if hasattr(raw_conf, "get") else {}
     # Sampling parameters for LMGen; unknown keys or bad values fail here, before any
@@ -139,11 +141,38 @@ def main() -> int:
     input_file = args.input_file
     if input_file is None and hasattr(inf_sec, "get") and inf_sec.get("input_file"):
         input_file = Path(inf_sec.get("input_file"))
-    if (args.voice_prompt is None) != (args.text_prompt is None):
+
+    voice_prompt_arg = args.voice_prompt
+    if voice_prompt_arg is None and hasattr(inf_sec, "get") and inf_sec.get("voice_prompt"):
+        voice_prompt_arg = Path(inf_sec.get("voice_prompt"))
+
+    text_prompt = args.text_prompt
+    if text_prompt is None and hasattr(inf_sec, "get") and inf_sec.get("text_prompt") is not None:
+        text_prompt = str(inf_sec.get("text_prompt"))
+
+    config_dir = Path(args.config).parent.resolve()
+    if input_file is not None:
+        input_file = Path(input_file).expanduser()
+        if not input_file.is_file() and (config_dir / input_file).is_file():
+            input_file = (config_dir / input_file).resolve()
+        else:
+            input_file = input_file.resolve()
+
+    if voice_prompt_arg is not None:
+        voice_prompt = Path(voice_prompt_arg).expanduser()
+        if not voice_prompt.is_file() and (config_dir / voice_prompt).is_file():
+            voice_prompt = (config_dir / voice_prompt).resolve()
+        else:
+            voice_prompt = voice_prompt.resolve()
+    else:
+        voice_prompt = None
+
+    if (voice_prompt is None) != (text_prompt is None):
         parser.error("--voice-prompt and --text-prompt must be provided together")
-    if args.voice_prompt is not None and input_file is None:
-        parser.error("--voice-prompt and --text-prompt require --input-file")
-    direct_input = args.voice_prompt is not None
+
+    has_explicit_prompts = voice_prompt is not None and text_prompt is not None
+    # If both sample_id and input_file exist, prioritize input_file
+    direct_input = (input_file is not None and has_explicit_prompts)
 
     configured_window = inf_sec.get("window_seconds") if hasattr(inf_sec, "get") else None
     if args.window_seconds is not None:
@@ -169,15 +198,18 @@ def main() -> int:
     started_at = datetime.now().astimezone().isoformat()
     started = time.perf_counter()
     adapter_path = Path(adapter_path).expanduser().resolve()
-    input_file = input_file.expanduser().resolve() if input_file is not None else None
-    voice_prompt = args.voice_prompt.expanduser().resolve() if args.voice_prompt is not None else None
+    effective_initial_sample_id = input_file.stem if input_file is not None else sample_id
     run_record = {
         "status": "running",
         "started_at": started_at,
         "config": str(Path(args.config).expanduser().resolve()),
         "adapter": str(adapter_path),
-        "split": None if direct_input else args.split,
+        "checkpoint_method": "full" if is_full_checkpoint(adapter_path) else "lora",
+        "split": None if (input_file is not None and direct_input) else args.split,
         "input_file": str(input_file) if input_file is not None else None,
+        "sample_id": effective_initial_sample_id,
+        "voice_prompt": str(voice_prompt) if voice_prompt is not None else None,
+        "text_prompt": text_prompt,
         "generation": generation.as_dict(),
         "force_filter": args.force_filter,
         "output_dir": str(output_dir),
@@ -185,8 +217,14 @@ def main() -> int:
     }
     write_json(output_dir / "config.json", run_record)
     logger.info("inference run started; output_dir=%s", output_dir)
-    logger.info("adapter=%s", adapter_path)
+    logger.info("checkpoint=%s", adapter_path)
     logger.info("generation=%s", generation.label())
+    if sample_id is not None and input_file is not None:
+        logger.info(
+            "both sample_id (%s) and input_file (%s) are provided; prioritizing input_file",
+            sample_id,
+            input_file,
+        )
 
     try:
         inference_workers = max(1, int(inf_sec.get("filter_num_workers", getattr(config, "filter_num_workers", 1))))
@@ -226,11 +264,20 @@ def main() -> int:
         chunk_filter_record = {"enabled": input_file is None}
         tokenizer = None
         if input_file is None:
-            _, _, _, adapter_model_root, _ = resolve_adapter_checkpoint(adapter_path)
-            filter_model_root = adapter_model_root or config.model_root
-            resolved = RuntimePaths(filter_model_root, config.personaplex_source).validate(require_model=False)
-            tokenizer = SentencePieceTokenizer(resolved.tokenizer)
-            if start_sec is None:
+            adapter_model_root = None
+            if adapter_path.is_file() or adapter_path.is_dir():
+                try:
+                    adapter_model_root = checkpoint_model_root(adapter_path)
+                except Exception:
+                    adapter_model_root = None
+            filter_model_root = adapter_model_root or getattr(config, "model_root", None)
+            if filter_model_root and getattr(config, "personaplex_source", None):
+                try:
+                    resolved = RuntimePaths(filter_model_root, config.personaplex_source).validate(require_model=False)
+                    tokenizer = SentencePieceTokenizer(resolved.tokenizer)
+                except Exception:
+                    tokenizer = None
+            if tokenizer is not None and start_sec is None:
                 candidates_before_filter = len(samples)
                 filter_result = filter_text_capacity_chunks(
                     samples,
@@ -305,7 +352,13 @@ def main() -> int:
             sample = samples[sample_index]
         if input_file is None:
             sample = select_inference_window(sample, start_sec, window_seconds)
-            if start_sec is not None:
+            if voice_prompt is not None or text_prompt is not None:
+                sample = update_sample(
+                    sample,
+                    voice_prompt_wav=voice_prompt if voice_prompt is not None else sample.voice_prompt_wav,
+                    text_prompt=text_prompt if text_prompt is not None else sample.text_prompt,
+                )
+            if tokenizer is not None and start_sec is not None:
                 exact_window_result = filter_text_capacity_chunks(
                     [sample],
                     tokenizer,
@@ -347,24 +400,38 @@ def main() -> int:
         logger.exception("inference input preparation failed")
         raise
 
+    effective_sample_id = input_file.stem if input_file is not None else sample.sample_id
+    effective_voice_prompt = (
+        str(voice_prompt) if voice_prompt is not None
+        else (str(getattr(sample, "voice_prompt_wav", None)) if sample is not None else None)
+    )
+    effective_text_prompt = (
+        text_prompt if text_prompt is not None
+        else (getattr(sample, "text_prompt", None) if sample is not None else None)
+    )
+
     run_record.update({
-        "sample_id": input_file.stem if direct_input else sample.sample_id,
-        "window_start_sec": None if direct_input else sample.window_start_sec,
-        "window_end_sec": None if direct_input else sample.window_end_sec,
+        "sample_id": effective_sample_id,
+        "voice_prompt": effective_voice_prompt,
+        "text_prompt": effective_text_prompt,
+        "window_start_sec": None if (input_file is not None and direct_input) else getattr(sample, "window_start_sec", None),
+        "window_end_sec": None if (input_file is not None and direct_input) else getattr(sample, "window_end_sec", None),
         "chunk_filter": chunk_filter_record,
     })
     write_json(output_dir / "config.json", run_record)
-    if direct_input:
+    if input_file is not None and direct_input:
         logger.info("input=%s start=%s max_window=%s", input_file, start_sec, window_seconds)
-        logger.info("voice_prompt=%s", voice_prompt)
-        logger.info("text_prompt=%s", args.text_prompt)
+        logger.info("voice_prompt=%s", effective_voice_prompt)
+        logger.info("text_prompt=%s", effective_text_prompt)
     else:
         logger.info(
             "sample=%s split=%s window=%.3f-%.3fs",
             sample.sample_id, args.split, sample.window_start_sec, sample.window_end_sec,
         )
-        logger.info("voice_prompt=%s", getattr(sample, "voice_prompt_wav", "(unknown)"))
-        logger.info("text_prompt=%s", getattr(sample, "text_prompt", "(unknown)"))
+        if input_file is not None:
+            logger.info("input=%s (prioritized over sample audio)", input_file)
+        logger.info("voice_prompt=%s", effective_voice_prompt)
+        logger.info("text_prompt=%s", effective_text_prompt)
 
     try:
         quality_status = smoke(
@@ -376,7 +443,8 @@ def main() -> int:
             input_start_sec=start_sec,
             input_window_seconds=window_seconds,
             generation=generation,
-            **({"voice_prompt_wav": voice_prompt, "text_prompt": args.text_prompt} if direct_input else {}),
+            voice_prompt_wav=voice_prompt,
+            text_prompt=text_prompt,
         )
     except Exception as exc:
         run_record.update({

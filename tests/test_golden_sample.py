@@ -56,6 +56,12 @@ class CapturingMimi:
         self.received = audio.detach().cpu().numpy().copy()
         return self.mimi.encode(audio)
 
+    def parameters(self):
+        return self.mimi.parameters()
+
+    def streaming(self, batch_size):
+        return self.mimi.streaming(batch_size)
+
 
 class GoldenSampleTest(unittest.TestCase):
     @classmethod
@@ -134,7 +140,7 @@ class GoldenSampleTest(unittest.TestCase):
                 codec, tokenizer, initial_tokens=tuple(range(17)), zero_token=-1
             )
             base = builder.build(sample)
-            delayed = builder.apply_delays(base, delays)
+            delayed = inspect_sample.native_debug_delay(base, builder.initial_tokens, delays, builder.zero_token)
 
             self.assertEqual(len(base.input_codes), 17)
             self.assertEqual(sample.agent_channel, 0)
@@ -157,14 +163,14 @@ class GoldenSampleTest(unittest.TestCase):
             )
             self.assertTrue(any(base.input_codes[1][: base.voice_prompt_frames]))
             expected_word_tokens = {
-                "chào": [260, 5617, 8260, 423],
-                "bạn": [260, 720, 229, 190, 165, 320],
+                "chào": [5617, 8260, 423],
+                "bạn": [720, 229, 190, 165, 320],
             }
             for alignment in base.word_alignments:
                 if alignment.speaker != "agent":
                     self.assertEqual(alignment.token_frames, ())
                     continue
-                token_ids = tokenizer.encode(" " + alignment.word)
+                token_ids = tokenizer.encode(alignment.word)
                 self.assertEqual(token_ids, expected_word_tokens[alignment.word])
                 self.assertEqual(len(token_ids), len(alignment.token_frames))
                 for token_id, frame in zip(token_ids, alignment.token_frames, strict=True):
@@ -191,8 +197,8 @@ class GoldenSampleTest(unittest.TestCase):
             text_dialogue_end = text_dialogue_begin + base.dialogue_frames
             dialog_text = labels[0, text_dialogue_begin:text_dialogue_end]
             dialog_text_weights = weights[0, text_dialogue_begin:text_dialogue_end]
-            self.assertTrue(self.torch.any((dialog_text == tokenizer.padding_id) & (dialog_text_weights == 0.3)).item())
-            self.assertTrue(self.torch.any((dialog_text == tokenizer.end_padding_id) & (dialog_text_weights == 0.3)).item())
+            self.assertTrue(self.torch.any((dialog_text == tokenizer.padding_id) & (dialog_text_weights == 0.5)).item())
+            self.assertTrue(self.torch.any((dialog_text == tokenizer.end_padding_id) & (dialog_text_weights == 0.5)).item())
             for stream in range(1, 9):
                 dialogue_begin = 1 + delays[stream] + base.prompt_frames
                 dialogue_end = dialogue_begin + base.dialogue_frames
@@ -203,7 +209,8 @@ class GoldenSampleTest(unittest.TestCase):
                     silent_weights,
                     self.torch.full_like(silent_weights, expected_weight),
                 ))
-            self.assertTrue(self.torch.all(weights[9:17] == 0).item())
+            self.assertTrue(self.torch.all(weights[9, dialogue_start + delays[9] + 1:dialogue_start + delays[9] + 2] == 1).item())
+            self.assertTrue(self.torch.all(weights[10, dialogue_start + delays[10] + 1:dialogue_start + delays[10] + 2] == 0.02).item())
             self.assertEqual(float(weights[1, 1 + delays[1] + base.prompt_frames]), 1.0)
             self.assertAlmostEqual(float(weights[2, 1 + delays[2] + base.prompt_frames]), 0.02, places=7)
 
@@ -227,7 +234,7 @@ class GoldenSampleTest(unittest.TestCase):
                 first_agent_word = next(event for event in decoded["word_events"] if event["word"] == "chào" and event["speaker"] == "agent")
                 first_agent_frame = dialogue_region["start"] + 26
                 self.assertAlmostEqual(decoded["frames"][first_agent_frame]["source_time_sec"], 2.08)
-                self.assertEqual(first_agent_word["token_frames"], list(range(first_agent_frame, first_agent_frame + 4)))
+                self.assertEqual(first_agent_word["token_frames"], list(range(first_agent_frame, first_agent_frame + 3)))
                 text = text_path.read_text(encoding="utf-8")
                 self.assertIn("Text frame visualization", text)
                 self.assertIn("Actual loss masks and weights", text)
@@ -305,6 +312,7 @@ class GoldenSampleTest(unittest.TestCase):
             config = SimpleNamespace(
                 device="cpu", model_root=MODEL_ROOT, personaplex_source=PROJECT_ROOT / "src",
                 manifest=root / "train.jsonl", window_seconds=5.0,
+                normalize_vietnamese_diacritics=False,
             )
             output_dir = root / "debug"
             with patch.object(inspect_sample, "load_config", return_value=config), \

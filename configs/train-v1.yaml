@@ -64,7 +64,7 @@ train:
   mixed_precision: bf16
 
 first_codebook_weight_multiplier: 1.0
-text_padding_weight: 0.3
+text_padding_weight: 0.5
 log_freq: 1
 ckpt_freq: 500
 

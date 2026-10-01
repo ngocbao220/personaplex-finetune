@@ -1,4 +1,4 @@
-"""PersonaPlex LoRA training path supporting Accelerate, DDP, BF16, and single-GPU execution."""
+"""PersonaPlex LoRA and full-parameter training with single-GPU or DDP execution."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import sys
 import time
 import math
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import torch
@@ -33,6 +33,7 @@ from .batching import (
 from .chunk_filter import ChunkFilterResult, expected_mimi_frames, filter_text_capacity_chunks
 from .filter_cache import filter_fingerprint
 from .lora import adapter_state_dict, inject_lora, load_adapter
+from .full_checkpoint import load_full_weights, resolve_full_checkpoint, save_full_weights, write_full_metadata
 from .generation import GenerationSettings
 from .inference import generate_text_with_runtime, resolve_adapter_checkpoint, text_error_metrics
 from .objective import (
@@ -60,6 +61,28 @@ def seed_everything(seed: int, torch_module) -> None:
     torch_module.manual_seed(seed)
     if torch_module.cuda.is_available():
         torch_module.cuda.manual_seed_all(seed)
+
+
+def resolve_training_device(requested: str, local_rank: int, world_size: int) -> torch.device:
+    device = torch.device(requested)
+    if world_size > 1:
+        if device.type != "cuda":
+            raise RuntimeError("multi-process training requires CUDA")
+        return torch.device(f"cuda:{local_rank}")
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"CUDA device requested but unavailable: {requested}")
+    if device.type == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("MPS device requested but unavailable to this process")
+    return device
+
+
+def device_memory_bytes(device: torch.device) -> int:
+    """Report allocated accelerator memory; MPS exposes driver allocation."""
+    if device.type == "cuda":
+        return int(torch.cuda.max_memory_allocated(device))
+    if device.type == "mps":
+        return int(torch.mps.driver_allocated_memory())
+    return 0
 
 
 def create_run_dir(output_root: Path, smoke: bool) -> Path:
@@ -148,19 +171,24 @@ def validate_resume_checkpoint(
     config: Config, resume_from: str, prefixes: tuple[str, ...], train_conversations: list,
     train_chunks: list | None = None,
 ) -> tuple[Path, int]:
-    """Require a complete checkpoint compatible with this exact LoRA run."""
-    adapter, rank, alpha, model_root, adapter_prefixes = resolve_adapter_checkpoint(Path(resume_from))
-    metadata_file = adapter.parent / "adapter.json"
-    metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+    """Require a complete checkpoint compatible with this exact training run."""
+    if config.train_method == "full":
+        adapter, metadata = resolve_full_checkpoint(Path(resume_from))
+        metadata_file = adapter.parent / "checkpoint.json"
+        model_root = Path(metadata["base_model_root"]).expanduser().resolve()
+    else:
+        adapter, rank, alpha, model_root, adapter_prefixes = resolve_adapter_checkpoint(Path(resume_from))
+        metadata_file = adapter.parent / "adapter.json"
+        metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
     step = metadata.get("step")
     if isinstance(step, bool) or not isinstance(step, int) or step < 0:
         raise ValueError(f"resume checkpoint has invalid optimizer step: {metadata_file}")
     if not (adapter.parent / "training_state.pt").is_file():
         raise RuntimeError(
             f"resume requires training_state.pt alongside {adapter}; "
-            "adapter-only weights cannot restore optimizer, scheduler, or data position"
+            "weights alone cannot restore optimizer, scheduler, or data position"
         )
-    if rank != config.lora_rank or alpha != config.lora_alpha or adapter_prefixes != prefixes:
+    if config.train_method == "lora" and (rank != config.lora_rank or alpha != config.lora_alpha or adapter_prefixes != prefixes):
         raise RuntimeError(
             f"resume LoRA configuration differs: checkpoint rank={rank}, alpha={alpha}, "
             f"prefixes={adapter_prefixes}; current rank={config.lora_rank}, "
@@ -225,7 +253,7 @@ def training_contract(config: Config, train_conversations: list, train_chunks: l
     chunk_digest = hashlib.sha256(
         json.dumps(chunk_items, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    return {
+    contract = {
         "manifest": str(manifest), "manifest_sha256": digest.hexdigest(),
         "prepared_sources_sha256": source_digest.hexdigest(),
         "text_capacity_filter_version": 1,
@@ -249,6 +277,9 @@ def training_contract(config: Config, train_conversations: list, train_chunks: l
         "qlora": config.qlora, "quant_type": config.quant_type if config.qlora else None,
         "gradient_checkpointing": config.gradient_checkpointing,
     }
+    if config.train_method == "full":
+        contract["train_method"] = "full"
+    return contract
 
 
 def rank_stride_indices(sample_count: int, rank: int, world_size: int) -> list[int]:
@@ -265,6 +296,45 @@ def lora_prefixes_for_stage(config: Config) -> tuple[str, ...]:
     if stage in {"depth_only", "freeze_tempformer"}:
         return ("depformer",)
     return ("transformer", "depformer")
+
+
+def configure_trainable_parameters(model, config: Config, prefixes: tuple[str, ...]) -> list[str]:
+    if config.train_method == "full":
+        model.requires_grad_(True)
+        if hasattr(model, "dep_q"):
+            # The loss supervises agent codebooks 0..7. User codebooks 8..15
+            # are conditioning only; their output-only parameters must not be
+            # moved by AdamW weight decay. The main audio embeddings remain
+            # trainable because both channels feed the shared transformer.
+            if model.dep_q != 16 or len(model.linears) != 16 or len(model.depformer_emb) != 15:
+                raise ValueError("full fine-tuning requires the 16-codebook PersonaPlex LM")
+            if model.depformer_multi_linear:
+                if len(model.depformer_in) != 16 or model.depformer_weights_per_step_schedule is not None:
+                    raise ValueError("unsupported PersonaPlex depformer input layout for full fine-tuning")
+                for layer in model.depformer_in[8:]:
+                    layer.requires_grad_(False)
+            for layer in model.depformer_emb[7:]:
+                layer.requires_grad_(False)
+            for layer in model.linears[8:]:
+                layer.requires_grad_(False)
+            for layer in model.depformer.layers:
+                if len(layer.gating) != 16 or layer.self_attn.weights_per_step != 16:
+                    raise ValueError("unsupported PersonaPlex depformer layer layout for full fine-tuning")
+                for user_gate in layer.gating[8:]:
+                    user_gate.requires_grad_(False)
+        return []
+    if not config.lora_enabled:
+        raise ValueError("train.method=lora requires lora.enable=true")
+    return inject_lora(model, config.lora_rank, config.lora_alpha, prefixes=prefixes)
+
+
+def full_attention_no_decay_ids(model) -> set[int]:
+    """Packed attention tensors include unsupervised user-step rows."""
+    return {
+        id(parameter)
+        for layer in model.depformer.layers
+        for parameter in (layer.self_attn.in_proj_weight, layer.self_attn.out_proj.weight)
+    }
 
 
 def unwrap_parallel_model(model):
@@ -351,7 +421,7 @@ def codebook_diagnostic_stats(batch, model_output, padding_id: int):
 
     Returns:
         text_correct, text_count, text_loss_sum,
-        audio_correct (shape 8), audio_count (shape 8), audio_loss_sum (shape 8)
+        audio_correct (shape 16), audio_count (shape 16), audio_loss_sum (shape 16)
     """
     with torch.no_grad():
         # 1. Text stream
@@ -373,14 +443,14 @@ def codebook_diagnostic_stats(batch, model_output, padding_id: int):
             t_count = torch.zeros((), dtype=torch.int64, device=text_labels.device)
             t_loss = torch.zeros((), dtype=torch.float32, device=text_labels.device)
 
-        # 2. Audio streams (8 codebooks for Agent: indices 1..8 in labels, 0..7 in logits)
-        audio_labels = batch["labels"][:, 1:9, :]  # [B, 8, T]
-        audio_mask = batch["loss_mask"][:, 1:9, :] & model_output.mask[:, :8, :]  # [B, 8, T]
+        # Native depformer predicts both eight-codebook speaker streams.
+        audio_labels = batch["labels"][:, 1:17, :]
+        audio_mask = batch["loss_mask"][:, 1:17, :] & model_output.mask
 
         cb_correct = []
         cb_count = []
         cb_loss = []
-        for i in range(8):
+        for i in range(16):
             valid_i = audio_mask[:, i, :]
             if valid_i.any():
                 logits_i = model_output.logits[:, i][valid_i].float()  # [N, vocab]
@@ -411,6 +481,8 @@ def step_optimizer_if_ready(sync_state, optimizer, scheduler, trainable, model=N
         grad_norm = torch.nn.utils.clip_grad_norm_(trainable, max_norm)
 
     grad_norm = float(grad_norm)
+    if not math.isfinite(grad_norm):
+        raise RuntimeError(f"non-finite gradient norm before optimizer step: {grad_norm}")
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
@@ -675,7 +747,7 @@ def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_
         writer.add_scalar(name, value, step)
 
 
-def loss_components(model_output, codes, example, text_padding_id, torch_module, first_codebook_weight_multiplier=1.0, text_padding_weight=0.3, *, distributed=False):
+def loss_components(model_output, codes, example, text_padding_id, torch_module, first_codebook_weight_multiplier=1.0, text_padding_weight=0.5, *, distributed=False):
     """Compute per-stream losses using GPU-native vectorized weights."""
     if isinstance(example, dict):
         labels_tensor = example["labels"]
@@ -700,16 +772,19 @@ def loss_components(model_output, codes, example, text_padding_id, torch_module,
     audio_target = labels_tensor[:, 1:17, :]
     audio_weights = weights[:, 1:17, :] * model_output.mask.to(weights.dtype)
 
-    semantic_stats = torch_weighted_cross_entropy_stats(
-        model_output.logits[:, 0].reshape(-1, model_output.logits.shape[-1]),
-        audio_target[:, 0].reshape(-1),
-        audio_weights[:, 0].reshape(-1),
-    )
-    nonsemantic_stats = torch_weighted_cross_entropy_stats(
-        model_output.logits[:, 1:8].reshape(-1, model_output.logits.shape[-1]),
-        audio_target[:, 1:8].reshape(-1),
-        audio_weights[:, 1:8].reshape(-1),
-    )
+    def audio_group_stats(start: int, end: int):
+        return torch_weighted_cross_entropy_stats(
+            model_output.logits[:, start:end].reshape(-1, model_output.logits.shape[-1]),
+            audio_target[:, start:end].reshape(-1),
+            audio_weights[:, start:end].reshape(-1),
+        )
+
+    agent_semantic = audio_group_stats(0, 1)
+    user_semantic = audio_group_stats(8, 9)
+    agent_nonsemantic = audio_group_stats(1, 8)
+    user_nonsemantic = audio_group_stats(9, 16)
+    semantic_stats = tuple(left + right for left, right in zip(agent_semantic, user_semantic))
+    nonsemantic_stats = tuple(left + right for left, right in zip(agent_nonsemantic, user_nonsemantic))
     audio_denominator = semantic_stats[1] + nonsemantic_stats[1]
     audio_denominator = audio_denominator.clamp_min(1e-12)
     if distributed:
@@ -860,6 +935,22 @@ def save_adapter(run_dir: Path, model, config: Config, step: int, optimizer=None
     )
 
 
+def save_full_checkpoint(
+    run_dir: Path, model, config: Config, step: int, optimizer, scheduler,
+    gradient_accumulation_steps: int, num_processes: int, checkpoint_name: str | None = None,
+) -> Path:
+    """Save a complete FP32 LM and resumable optimizer state on the main DDP rank."""
+    name = checkpoint_name or f"checkpoint_{step:06d}"
+    path = run_dir / "checkpoints" / name
+    save_full_weights(model, path)
+    save_training_state(
+        path, optimizer, scheduler, step, gradient_accumulation_steps,
+        num_processes, config.per_device_batch_size,
+    )
+    write_full_metadata(path, base_model_root=config.model_root, step=step)
+    return path
+
+
 def save_adapter_state(run_dir: Path, state_dict, config: Config, step: int, optimizer=None, scheduler=None, gradient_accumulation_steps: int = 1, num_processes: int = 1) -> Path:
     path = run_dir / "checkpoints" / f"checkpoint_{step:06d}"
     path.mkdir(parents=True, exist_ok=True)
@@ -1002,7 +1093,7 @@ def inference_config_snapshot(config: Config, adapter_path: Path, output_dir: Pa
         data["val_manifest"] = str(config.val_manifest)
     if config.test_manifest is not None:
         data["test_manifest"] = str(config.test_manifest)
-    return {
+    snapshot = {
         "model": {
             "root": str(config.model_root),
             "source": str(config.personaplex_source),
@@ -1010,11 +1101,18 @@ def inference_config_snapshot(config: Config, adapter_path: Path, output_dir: Pa
         },
         "data": data,
         "lora": {"qlora": config.qlora, "quant_type": config.quant_type},
-        "adapter": {"path": str(adapter_path)},
         "seed": config.seed,
         "generation": config.generation_settings.as_dict(),
-        "inference": {"output_dir": str(output_dir)},
+        "inference": {
+            "output_dir": str(output_dir),
+            "sample_id": None,
+            "input_file": None,
+            "voice_prompt": None,
+            "text_prompt": None,
+        },
     }
+    snapshot["checkpoint" if config.train_method == "full" else "adapter"] = {"path": str(adapter_path)}
+    return snapshot
 
 
 def evenly_spaced_validation_samples(samples: list, limit: int) -> list:
@@ -1120,11 +1218,36 @@ def verify_reloaded_adapter(config: Config, sample, adapter: Path, runtime) -> f
             reloaded_loss, _, _ = one_step(config, runtime, example)
         reference_loss = float(reference_loss)
         reloaded_loss = float(reloaded_loss)
+        if not math.isfinite(reference_loss) or not math.isfinite(reloaded_loss):
+            raise RuntimeError(f"non-finite adapter reload loss: {reloaded_loss} vs {reference_loss}")
         if abs(reloaded_loss - reference_loss) > 1e-5:
             raise RuntimeError(
                 f"reloaded adapter loss drifted: {reloaded_loss} vs {reference_loss}"
             )
         return reloaded_loss
+    finally:
+        runtime.model = parallel_model
+        parallel_model.train(was_training)
+
+
+def verify_reloaded_full(config: Config, sample, checkpoint: Path, runtime) -> float:
+    """Verify full-weight reload in place without allocating another PersonaPlex LM."""
+    parallel_model = runtime.model
+    model = unwrap_parallel_model(parallel_model)
+    was_training = parallel_model.training
+    runtime.model = model
+    try:
+        model.eval()
+        example = build_example(config, sample, runtime)
+        with torch.no_grad():
+            reference_loss, _, _ = one_step(config, runtime, example)
+            parameter = next(parameter for parameter in model.parameters() if parameter.requires_grad)
+            parameter.view(-1)[0].add_(1.0)
+            load_full_weights(model, checkpoint)
+            reloaded_loss, _, _ = one_step(config, runtime, example)
+        if abs(float(reloaded_loss) - float(reference_loss)) > 1e-5:
+            raise RuntimeError(f"reloaded full checkpoint loss drifted: {reloaded_loss} vs {reference_loss}")
+        return float(reloaded_loss)
     finally:
         runtime.model = parallel_model
         parallel_model.train(was_training)
@@ -1136,8 +1259,13 @@ def run(
     resume_from: str | None = None,
     force_filter: bool = False,
 ) -> Path | None:
-    if config.ft_embed:
+    if config.train_method == "lora" and config.ft_embed:
         raise ValueError("lora.ft_embed=true is not implemented by this LoRA-only trainer")
+    if config.train_method == "full":
+        if config.qlora:
+            raise ValueError("train.method=full cannot use lora.qlora=true")
+        if config.train_stage != "joint":
+            raise ValueError("train.method=full requires train.stage=joint")
     if config.randomize_train:
         raise ValueError("data.randomize_train=true is not implemented; fixed chunks may be shuffled with data.shuffle")
     if config.mixed_precision.lower() != "bf16":
@@ -1160,7 +1288,10 @@ def run(
             raise RuntimeError("torchrun distributed mode requires CUDA")
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
-        torch.distributed.init_process_group(backend="nccl", init_method="env://")
+        torch.distributed.init_process_group(
+            backend="nccl", init_method="env://",
+            timeout=timedelta(hours=2) if config.train_method == "full" else timedelta(minutes=10),
+        )
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
     else:
@@ -1168,7 +1299,7 @@ def run(
     distributed = world_size > 1
     if distributed and not torch.cuda.is_available():
         raise RuntimeError("multi-process DDP training requires CUDA")
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    device = resolve_training_device(config.device, local_rank, world_size)
     global_batch_size = effective_global_batch_size(config.per_device_batch_size, world_size, accum_steps)
     cpu_threads = limit_cpu_threads(torch)
     seed_everything(config.seed, torch)
@@ -1414,6 +1545,7 @@ def run(
             "lora_alpha": config.lora_alpha,
             "lora_scaling": config.lora_scaling,
             "lora_enabled": config.lora_enabled,
+            "train_method": config.train_method,
             "ft_embed": config.ft_embed,
             "weight_decay": config.weight_decay,
             "pct_start": config.pct_start,
@@ -1499,6 +1631,7 @@ def run(
         model_device=str(device),
         load_model_weights=True,
         codec_cache_dir=config.codec_cache_dir,
+        full_precision_model=config.train_method == "full",
     )
     if not math.isclose(runtime.codec.frame_rate, PERSONAPLEX_MIMI_FRAME_RATE, rel_tol=0, abs_tol=1e-6):
         raise RuntimeError(
@@ -1537,10 +1670,7 @@ def run(
         if main_process:
             print("[Stage-Wise Training] Active Stage: JOINT (Both Temporal & Depth active).")
 
-    if not config.lora_enabled:
-        raise ValueError("this training path requires lora.enable=true")
-    lora_alpha = config.lora_alpha
-    targets = inject_lora(runtime.model, config.lora_rank, lora_alpha, prefixes=lora_prefixes)
+    targets = configure_trainable_parameters(runtime.model, config, lora_prefixes)
 
     # Optional gradient checkpointing
     if config.gradient_checkpointing:
@@ -1553,10 +1683,13 @@ def run(
     if resume_adapter_file is not None:
         resume_checkpoint_dir = resume_adapter_file.parent
         if main_process:
-            print(f"Resuming LoRA weights and optimizer state from {resume_adapter_file}")
-        load_adapter(runtime.model, resume_adapter_file)
+            print(f"Resuming {config.train_method} weights and optimizer state from {resume_adapter_file}")
+        if config.train_method == "full":
+            load_full_weights(runtime.model, resume_adapter_file)
+        else:
+            load_adapter(runtime.model, resume_adapter_file)
         if main_process:
-            print(f"Adapter checkpoint is at optimizer step {adapter_resume_step}")
+            print(f"Checkpoint is at optimizer step {adapter_resume_step}")
 
     # Alias LMModel.forward to forward_train for training execution
     from moshi.models.lm import LMModel
@@ -1564,19 +1697,46 @@ def run(
 
     trainable = [p for p in runtime.model.parameters() if p.requires_grad]
     if not trainable:
-        raise RuntimeError("no trainable LoRA parameters were injected")
+        raise RuntimeError("model has no trainable parameters")
     unexpected_trainable = [
         name for name, parameter in runtime.model.named_parameters()
         if parameter.requires_grad and "lora_" not in name
     ]
-    if unexpected_trainable:
+    if config.train_method == "lora" and unexpected_trainable:
         raise RuntimeError(f"unexpected non-LoRA trainable parameters: {unexpected_trainable[:5]}")
+    if config.train_method == "full" and device.type == "cuda":
+        # Parameters already occupy GPU memory. FP32 gradients and both AdamW
+        # moment tensors are allocated later, mostly at the first optimizer step.
+        free_bytes, _ = torch.cuda.mem_get_info(device)
+        future_state_bytes = sum(parameter.numel() for parameter in trainable) * (16 if distributed else 12)
+        activation_reserve_bytes = 16 * 1024**3
+        if free_bytes < future_state_bytes + activation_reserve_bytes:
+            raise RuntimeError(
+                "insufficient free GPU memory for full DDP fine-tuning: "
+                f"free={free_bytes / 1024**3:.1f} GiB, estimated gradients/AdamW/DDP buffers="
+                f"{future_state_bytes / 1024**3:.1f} GiB plus "
+                f"{activation_reserve_bytes / 1024**3:.0f} GiB activation reserve; "
+                "DDP keeps a complete model and optimizer on every GPU"
+            )
     if main_process:
-        print(f"LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
+        print(f"Training method: {config.train_method}; LoRA targets: {len(targets)}; trainable parameters: {sum(p.numel() for p in trainable):,}")
 
     temp_lr = config.learning_rate
     dep_lr = config.depformer_learning_rate
-    if dep_lr is not None and dep_lr != temp_lr:
+    if config.train_method == "full":
+        no_decay = full_attention_no_decay_ids(runtime.model)
+        groups = {}
+        for name, parameter in runtime.model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            lr = dep_lr if dep_lr is not None and "depformer" in name else temp_lr
+            decay = 0.0 if id(parameter) in no_decay else config.weight_decay
+            groups.setdefault((lr, decay), []).append(parameter)
+        optimizer = torch.optim.AdamW(
+            [{"params": params, "lr": lr, "weight_decay": decay} for (lr, decay), params in groups.items()],
+            fused=device.type == "cuda",
+        )
+    elif dep_lr is not None and dep_lr != temp_lr:
         temp_params = [p for n, p in runtime.model.named_parameters() if p.requires_grad and "depformer" not in n]
         dep_params = [p for n, p in runtime.model.named_parameters() if p.requires_grad and "depformer" in n]
         param_groups = []
@@ -1604,7 +1764,7 @@ def run(
             device_ids=[local_rank],
             output_device=local_rank,
             broadcast_buffers=False,
-            find_unused_parameters=False,
+            find_unused_parameters=config.train_method == "full",
         )
         barrier()
 
@@ -1706,10 +1866,10 @@ def run(
         pending_text_target_ce_sum = torch.zeros((), dtype=torch.float32, device=device)
         pending_text_target_ce_count = torch.zeros((), dtype=torch.int64, device=device)
         pending_text_target_correct = torch.zeros((), dtype=torch.int64, device=device)
-        pending_audio_cb_correct = torch.zeros(8, dtype=torch.int64, device=device)
-        pending_audio_cb_count = torch.zeros(8, dtype=torch.int64, device=device)
-        pending_audio_cb_loss_sum = torch.zeros(8, dtype=torch.float32, device=device)
-        pending_profile_times = torch.zeros(3, dtype=torch.float64, device=device)
+        pending_audio_cb_correct = torch.zeros(16, dtype=torch.int64, device=device)
+        pending_audio_cb_count = torch.zeros(16, dtype=torch.int64, device=device)
+        pending_audio_cb_loss_sum = torch.zeros(16, dtype=torch.float32, device=device)
+        pending_profile_times = torch.zeros(3, dtype=torch.float32, device=device)
 
         def profile_sync() -> None:
             if config.profile_steps and device.type == "cuda":
@@ -1784,6 +1944,16 @@ def run(
                     pending_profile_times[2] += time.monotonic() - backward_started
             profile_sync()
             optimizer_started = time.monotonic() if config.profile_steps else 0.0
+            if config.train_method == "full" and optimizer_step == start_step and sync_gradients:
+                missing_gradients = [
+                    name for name, parameter in unwrap_parallel_model(runtime.model).named_parameters()
+                    if parameter.requires_grad and parameter.grad is None
+                ]
+                if missing_gradients:
+                    raise RuntimeError(
+                        "full fine-tuning has LM parameters without gradients: "
+                        f"{missing_gradients[:8]} ({len(missing_gradients)} total)"
+                    )
             sync_state = type("SyncState", (), {"sync_gradients": sync_gradients})()
             grad_norm = step_optimizer_if_ready(sync_state, optimizer, scheduler, trainable, runtime.model)
             profile_sync()
@@ -1801,7 +1971,7 @@ def run(
                 pending_audio_cb_correct.float(),
                 pending_audio_cb_count.float(),
                 pending_audio_cb_loss_sum,
-            ]))  # shape [3, 8]
+            ]))  # shape [3, 16]
             text_target_tokens_seen += int(global_text_stats[0])
             text_padding_positions_seen += int(global_text_stats[1])
             text_nonpadding_loss = float(
@@ -1817,13 +1987,13 @@ def run(
 
             cb_losses = [
                 float(audio_cb_loss_reduced[i] / audio_cb_cnt_reduced[i].clamp_min(1.0))
-                for i in range(8)
+                for i in range(16)
             ]
             cb_accuracies = [
                 float(audio_cb_corr_reduced[i] / audio_cb_cnt_reduced[i].clamp_min(1.0))
-                for i in range(8)
+                for i in range(16)
             ]
-            mean_audio_loss = sum(cb_losses) / 8.0
+            mean_audio_loss = float((components["audio_semantic"] + components["audio_nonsemantic"]).detach())
             mean_audio_acc = (
                 float(audio_cb_corr_reduced.sum() / audio_cb_cnt_reduced.sum().clamp_min(1.0))
                 if audio_cb_cnt_reduced.sum() > 0 else 0.0
@@ -1845,7 +2015,7 @@ def run(
             if config.profile_steps:
                 profile_times = torch.cat((
                     pending_profile_times,
-                    torch.tensor([optimizer_seconds], dtype=torch.float64, device=device),
+                    torch.tensor([optimizer_seconds], dtype=torch.float32, device=device),
                 ))
                 if distributed:
                     torch.distributed.all_reduce(profile_times, op=torch.distributed.ReduceOp.MAX)
@@ -1882,8 +2052,8 @@ def run(
                     "loss/audio_nonsemantic": float(reduced_nonsem.detach()),
                     "accuracy/text": text_token_acc,
                     "accuracy/audio_total": mean_audio_acc,
-                    **{f"loss/audio_cb{i}": cb_losses[i] for i in range(8)},
-                    **{f"accuracy/audio_cb{i}": cb_accuracies[i] for i in range(8)},
+                    **{f"loss/audio_cb{i}": cb_losses[i] for i in range(16)},
+                    **{f"accuracy/audio_cb{i}": cb_accuracies[i] for i in range(16)},
                     "lr": optimizer.param_groups[0]["lr"],
                     "grad_norm": grad_norm,
                     "samples_per_second": (
@@ -1891,7 +2061,7 @@ def run(
                         / max(pending_train_seconds, 1e-9)
                     ),
                     "timing/train_update_sec_mean": pending_train_seconds / pending_train_updates,
-                    "gpu_peak_bytes": torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0,
+                    "gpu_peak_bytes": device_memory_bytes(device),
                 }
                 if profile_times is not None:
                     record.update({
@@ -1921,6 +2091,19 @@ def run(
                 if max_steps == 1:
                     tqdm.write(json.dumps({"event": "training_step", **record}))
 
+            # Reuse a full checkpoint when several save reasons coincide at
+            # this optimizer step. Best references point to immutable step dirs.
+            step_full_saved = None
+
+            def save_full_step_once():
+                nonlocal step_full_saved
+                if step_full_saved is None:
+                    step_full_saved = save_full_checkpoint(
+                        run_dir, unwrap_parallel_model(runtime.model), config, optimizer_step,
+                        optimizer, scheduler, accum_steps, world_size,
+                    )
+                return step_full_saved
+
             # Validation evaluation
             teacher_eval_due = (
                 config.eval_every_steps > 0
@@ -1934,7 +2117,10 @@ def run(
                 barrier()
                 val_metrics = evaluate_validation(config, runtime, val_samples, rank, world_size, device)
                 barrier()
-                best_state = adapter_state_dict(unwrap_parallel_model(runtime.model))
+                best_state = (
+                    adapter_state_dict(unwrap_parallel_model(runtime.model))
+                    if config.train_method == "lora" else None
+                )
                 generation_metrics = None
                 if generation_eval_due:
                     barrier()
@@ -1966,12 +2152,15 @@ def run(
                         if generation_score < best_generation_cer:
                             best_generation_cer = generation_score
                             best_generation_sample = generation_metrics["samples"][0]
-                            best_inference_saved = save_best_adapter_state(
-                                run_dir, best_state, config, optimizer_step,
-                                val_metrics.get("val/loss_selection", float("inf")), optimizer, scheduler,
-                                gradient_accumulation_steps=accum_steps, num_processes=world_size,
-                                checkpoint_name="best_inference",
-                            )
+                            if config.train_method == "full":
+                                best_inference_saved = save_full_step_once()
+                            else:
+                                best_inference_saved = save_best_adapter_state(
+                                    run_dir, best_state, config, optimizer_step,
+                                    val_metrics.get("val/loss_selection", float("inf")), optimizer, scheduler,
+                                    gradient_accumulation_steps=accum_steps, num_processes=world_size,
+                                    checkpoint_name="best_inference",
+                                )
                             tqdm.write(json.dumps({
                                 "event": "new_best_free_running_checkpoint", "step": optimizer_step,
                                 "cer": best_generation_cer,
@@ -1986,11 +2175,14 @@ def run(
                     val_loss = validation_selection_loss(val_metrics)
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
-                        best_saved = save_best_adapter_state(
-                            run_dir, best_state, config, optimizer_step, val_loss, optimizer, scheduler,
-                            gradient_accumulation_steps=accum_steps, num_processes=world_size,
-                            checkpoint_name="best_loss",
-                        )
+                        if config.train_method == "full":
+                            best_saved = save_full_step_once()
+                        else:
+                            best_saved = save_best_adapter_state(
+                                run_dir, best_state, config, optimizer_step, val_loss, optimizer, scheduler,
+                                gradient_accumulation_steps=accum_steps, num_processes=world_size,
+                                checkpoint_name="best_loss",
+                            )
                         tqdm.write(json.dumps({
                             "event": "new_best_val_checkpoint", "step": optimizer_step,
                             "selection_loss": val_loss,
@@ -2003,15 +2195,20 @@ def run(
             save_interval = 1 if smoke else config.ckpt_freq
             if optimizer_step % save_interval == 0 or optimizer_step == max_steps:
                 barrier()
-                checkpoint_state = adapter_state_dict(unwrap_parallel_model(runtime.model))
                 if main_process:
-                    saved = save_adapter_state(
-                        run_dir, checkpoint_state, config, optimizer_step, optimizer, scheduler,
-                        accum_steps, world_size,
-                    )
+                    if config.train_method == "full":
+                        saved = save_full_step_once()
+                    else:
+                        checkpoint_state = adapter_state_dict(unwrap_parallel_model(runtime.model))
+                        saved = save_adapter_state(
+                            run_dir, checkpoint_state, config, optimizer_step, optimizer, scheduler,
+                            accum_steps, world_size,
+                        )
                     if smoke:
-                        reload_loss = verify_reloaded_adapter(
-                            config, batch_samples[0], saved, runtime,
+                        reload_loss = (
+                            verify_reloaded_full(config, batch_samples[0], saved, runtime)
+                            if config.train_method == "full"
+                            else verify_reloaded_adapter(config, batch_samples[0], saved, runtime)
                         )
                         reload_checks.append({"step": optimizer_step, "loss": reload_loss})
                 barrier()
@@ -2029,12 +2226,12 @@ def run(
             writer.close()
 
     if run_dir is not None:
-        rank_peak = torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0
+        rank_peak = device_memory_bytes(device)
         write_rank_info(run_dir, rank, world_size, device, len(train_samples), rank_peak)
     barrier()
 
     if main_process and run_dir is not None:
-        peak = torch.cuda.max_memory_allocated(device) if torch.cuda.is_available() else 0
+        peak = device_memory_bytes(device)
         run_info = {
             "seconds": time.monotonic() - started,
             "peak_gpu_bytes": peak,
@@ -2067,7 +2264,7 @@ def run(
         (run_dir / "run.json").write_text(json.dumps(run_info, indent=2))
         inference_args = [
             sys.executable, "-m", "tools.inference_smoke", "--config", str(inference_config_path),
-            "--adapter", str(inference_adapter),
+            "--checkpoint" if config.train_method == "full" else "--adapter", str(inference_adapter),
             "--output-dir", str(inference_output_dir),
         ]
         if best_generation_sample is not None:
@@ -2091,10 +2288,11 @@ def run(
             ])
         report.write_text(
             "# PersonaPlex Training Report\n\n"
-            f"Status: {'GENERATION-VALIDATED' if best_inference_saved is not None else 'NO GENERATION-VALID ADAPTER'} — "
+            f"Status: {'GENERATION-VALIDATED' if best_inference_saved is not None else 'NO GENERATION-VALID CHECKPOINT'} — "
             "training loss alone does not establish usable inference.\n\n"
             f"- Command: `{shlex.join([sys.executable, *sys.argv])}`\n"
-            f"- Dataset: {config.manifest}\n- Model: {config.model_root}\n- LoRA: rank={config.lora_rank}, alpha={config.lora_alpha}\n"
+            f"- Dataset: {config.manifest}\n- Model: {config.model_root}\n- Method: {config.train_method}\n"
+            f"- LoRA: {f'rank={config.lora_rank}, alpha={config.lora_alpha}' if config.train_method == 'lora' else 'disabled'}\n"
             f"- Processes (GPUs): {world_size}\n"
             f"- Steps: {max_steps}\n- Final loss: {last_record['loss/total'] if last_record else 'n/a'}\n"
             f"- Text targets/padding positions: "
@@ -2114,7 +2312,7 @@ def run(
         if training_duration_inference_args is not None:
             with report.open("a", encoding="utf-8") as report_file:
                 report_file.write(
-                    f"- Same adapter/sample with training-duration input ({config.duration_sec:g}s): "
+                    f"- Same checkpoint/sample with training-duration input ({config.duration_sec:g}s): "
                     f"`{shlex.join(training_duration_inference_args)}`\n"
                 )
 

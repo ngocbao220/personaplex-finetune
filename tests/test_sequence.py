@@ -8,6 +8,7 @@ from personaplex_finetuning.sequence import (
     align_dialogue_text_targets,
     pad_training_example,
 )
+from tools.inspect_sample import native_debug_delay
 
 
 class FakeCodec:
@@ -191,7 +192,7 @@ class SequenceBuilderTest(unittest.TestCase):
         self.assertEqual(example.prompt_frames, 16)  # voice=2, two 6-frame pauses, prompt text=2
         self.assertTrue(all(not enabled for stream in example.loss_mask for enabled in stream[:16]))
         self.assertTrue(all(example.loss_mask[stream][16] for stream in range(1, 9)))
-        self.assertTrue(all(not example.loss_mask[stream][16] for stream in range(9, 17)))
+        self.assertTrue(all(example.loss_mask[stream][16] for stream in range(9, 17)))
         self.assertEqual(example.loss_mask[0][16], True)
 
     def test_hybrid_prompt_uses_the_configured_native_inference_pause_length(self) -> None:
@@ -210,7 +211,7 @@ class SequenceBuilderTest(unittest.TestCase):
         )
         example = builder.build(sample())
 
-        delayed = builder.apply_delays(example, [0, 0] + [1] * 7 + [0] + [1] * 7)
+        delayed = native_debug_delay(example, builder.initial_tokens, [0, 0] + [1] * 7 + [0] + [1] * 7, builder.zero_token)
 
         # One initial frame plus the largest stream delay are prepended/appended.
         self.assertEqual(delayed.total_frames, example.total_frames + 2)

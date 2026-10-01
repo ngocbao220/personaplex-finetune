@@ -29,7 +29,7 @@ def stream_weights(
     loss_mask: Sequence[Sequence[bool]],
     text_padding_id: int | Sequence[int],
     nonsemantic_audio_weight: float = 0.02,
-    text_padding_weight: float = 0.3,
+    text_padding_weight: float = 0.5,
     first_codebook_weight_multiplier: float = 1.0,
 ) -> tuple[tuple[float, ...], ...]:
     """Return explicit per-token weights for [text, agent audio x8, user audio x8].
@@ -51,11 +51,6 @@ def stream_weights(
 
         mask_arr = np.asarray(mask, dtype=np.bool_)
 
-        # User audio streams (indices 9-16) are always zero-weighted
-        if stream_index >= 9:
-            weighted.append(tuple([0.0] * len(stream)))
-            continue
-
         if stream_index == 0:
             # Text stream: 1.0 for real tokens, text_padding_weight for padding
             tokens_arr = np.asarray(stream, dtype=np.int64)
@@ -65,11 +60,11 @@ def stream_weights(
                 np.float64(text_padding_weight),
                 np.float64(1.0),
             ).astype(np.float64)
-        elif stream_index == 1:
-            # First (semantic) audio codebook: full weight
+        elif stream_index in (1, 9):
+            # First (semantic) codebook of each audio stream: full weight.
             values = np.full(len(stream), first_codebook_weight_multiplier, dtype=np.float64)
         else:
-            # Non-semantic audio codebooks (2-8): downweighted
+            # Non-semantic audio codebooks of both streams: downweighted.
             values = np.full(len(stream), nonsemantic_audio_weight, dtype=np.float64)
 
         # Zero out prompt/padding positions where loss_mask is False
@@ -84,7 +79,7 @@ def stream_weights_torch(
     loss_mask: "torch.Tensor",
     text_padding_id: int | Sequence[int],
     nonsemantic_audio_weight: float = 0.02,
-    text_padding_weight: float = 0.3,
+    text_padding_weight: float = 0.5,
     first_codebook_weight_multiplier: float = 1.0,
 ) -> "torch.Tensor":
     """GPU-native weight computation for use inside the training loop.
@@ -120,14 +115,10 @@ def stream_weights_torch(
         torch.tensor(0.0, device=codes.device),
     )
 
-    # Agent semantic audio (index 1): full weight where unmasked
-    weights[:, 1] = loss_mask[:, 1].float() * first_codebook_weight_multiplier
-
-    # Agent non-semantic audio (indices 2-8): downweighted
+    # First codebook of each speaker stream is semantic.
+    weights[:, (1, 9)] = loss_mask[:, (1, 9)].float() * first_codebook_weight_multiplier
     weights[:, 2:9] = loss_mask[:, 2:9].float() * nonsemantic_audio_weight
-
-    # User audio streams (indices 9-16): zero (no loss on user stream)
-    # weights[9:17] already 0
+    weights[:, 10:17] = loss_mask[:, 10:17].float() * nonsemantic_audio_weight
 
     return weights[0] if squeeze else weights
 

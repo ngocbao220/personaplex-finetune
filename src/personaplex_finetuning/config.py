@@ -28,6 +28,7 @@ class Config:
     learning_rate: float = 2e-5
     depformer_learning_rate: float | None = None
     train_stage: str = "joint"
+    train_method: str = "lora"
     lora_rank: int = 16
     lora_alpha: int = 32
     qlora: bool = False
@@ -67,7 +68,7 @@ class Config:
     weight_decay: float = 0.1
     pct_start: float = 0.05
     first_codebook_weight_multiplier: float = 1.0
-    text_padding_weight: float = 0.3
+    text_padding_weight: float = 0.5
     log_freq: int = 1
     no_eval: bool = False
     ckpt_freq: int = 50
@@ -157,11 +158,11 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
                     destination = "max_steps" if "max_steps" in conf else "train.max_steps"
                     hydra_overrides.append(f"{destination}={o.split('=', 1)[1]}")
                 elif o.startswith("sample_index="):
-                    hydra_overrides.append(f"+sample_index={o.split('=', 1)[1]}")
+                    hydra_overrides.append(f"++sample_index={o.split('=', 1)[1]}")
                 elif o.startswith("sample_number="):
-                    hydra_overrides.append(f"+sample_number={o.split('=', 1)[1]}")
+                    hydra_overrides.append(f"++sample_number={o.split('=', 1)[1]}")
                 elif o.startswith("batch_size="):
-                    hydra_overrides.append(f"+batch_size={o.split('=', 1)[1]}")
+                    hydra_overrides.append(f"++batch_size={o.split('=', 1)[1]}")
                 elif o.startswith("output_dir="):
                     hydra_overrides.append(f"train.{o}")
                 elif o.startswith("rank=") or o.startswith("alpha=") or o.startswith("qlora="):
@@ -195,6 +196,9 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         raise ValueError("model and data config sections must be mappings")
     if not isinstance(train, dict) or not isinstance(lora, dict) or not isinstance(optim, dict):
         raise ValueError("train, lora, and optim config sections must be mappings")
+    train_method = str(train.get("method", "lora")).lower()
+    if train_method not in {"lora", "full"}:
+        raise ValueError("train.method must be lora or full")
     root = path.parent
 
     def resolve(section: dict[str, Any], key: str, default: str | None = None) -> Path:
@@ -237,7 +241,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     if free_running_eval_window_seconds <= 0:
         raise ValueError("free_running_eval_window_seconds must be positive")
     first_codebook_weight_multiplier = float(raw.get("first_codebook_weight_multiplier", 1.0))
-    text_padding_weight = float(raw.get("text_padding_weight", 0.3))
+    text_padding_weight = float(raw.get("text_padding_weight", 0.5))
     if first_codebook_weight_multiplier < 0:
         raise ValueError("first_codebook_weight_multiplier must be non-negative")
     if not 0 <= text_padding_weight <= 1:
@@ -286,6 +290,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         learning_rate=float(optim.get("lr", train.get("learning_rate", 2e-5))),
         depformer_learning_rate=float(train["depformer_learning_rate"]) if (isinstance(train, dict) and train.get("depformer_learning_rate") is not None) else None,
         train_stage=str(train.get("stage") or train.get("train_stage") or "joint").lower() if isinstance(train, dict) else "joint",
+        train_method=train_method,
         lora_rank=lora_rank,
         lora_alpha=lora_alpha,
         qlora=qlora,

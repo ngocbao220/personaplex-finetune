@@ -17,6 +17,8 @@ from personaplex_finetuning.train import (
     inference_config_snapshot,
     load_training_state,
     model_forward_train,
+    resolve_training_device,
+    device_memory_bytes,
     lora_prefixes_for_stage,
     inspect_training_sample,
     iter_training_batches,
@@ -43,6 +45,17 @@ from personaplex_finetuning.train import (
 
 
 class TrainTest(unittest.TestCase):
+    def test_training_device_honors_explicit_mps_in_single_process(self) -> None:
+        with patch("torch.backends.mps.is_available", return_value=True):
+            self.assertEqual(resolve_training_device("mps", 0, 1), torch.device("mps"))
+        with patch("torch.backends.mps.is_available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "MPS"):
+                resolve_training_device("mps", 0, 1)
+
+    def test_mps_memory_report_reads_driver_allocation(self) -> None:
+        with patch("torch.mps.driver_allocated_memory", return_value=123456):
+            self.assertEqual(device_memory_bytes(torch.device("mps")), 123456)
+
     def test_startup_summaries_distinguish_out_of_bounds_from_text_overflow(self) -> None:
         from personaplex_finetuning.chunk_filter import ChunkFilterResult, RejectedChunk
         from personaplex_finetuning.data import DatasetLoadReport, Word
@@ -450,6 +463,14 @@ class TrainTest(unittest.TestCase):
         self.assertAlmostEqual(step_optimizer_if_ready(synced, optimizer, scheduler, trainable), 0.75)
         self.assertEqual((optimizer.steps, optimizer.zeroes, scheduler.steps), (1, 1, 1))
 
+    def test_nonfinite_gradient_aborts_before_optimizer_update(self) -> None:
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        parameter.grad = torch.tensor(float("nan"))
+        with self.assertRaisesRegex(RuntimeError, "non-finite gradient norm"):
+            step_optimizer_if_ready(SimpleNamespace(sync_gradients=True), optimizer, None, [parameter])
+        self.assertEqual(float(parameter.detach()), 1.0)
+
     def test_training_state_restores_optimizer_scheduler_and_step(self) -> None:
         parameter = torch.nn.Parameter(torch.tensor(1.0))
         optimizer = torch.optim.AdamW([parameter], lr=0.1)
@@ -722,7 +743,9 @@ class TrainTest(unittest.TestCase):
         )
 
         self.assertEqual({name for name, _, _ in writer.scalars}, {
-            "loss/total", "loss/text", "loss/text_nonpadding", "loss/audio_semantic", "loss/audio_nonsemantic",
+            "loss/total", "loss/text", "loss/text_nonpadding", "loss/audio_total",
+            "loss/audio_semantic", "loss/audio_nonsemantic", "accuracy/text", "accuracy/audio_total",
+            "train/valid_token_pct",
             "train/learning_rate", "train/gradient_norm", "system/gpu_peak_bytes",
             "system/trainable_parameters", "system/cpu_threads", "timing/data_sec",
             "timing/forward_loss_sec", "timing/backward_sec", "timing/optimizer_sec",

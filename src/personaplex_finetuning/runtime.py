@@ -286,7 +286,17 @@ class MimiCodec:
         audio = self._helpers.normalize_audio(audio, self.sample_rate, -24.0)
         if audio.ndim == 1:
             audio = audio[None, :]
-        codes = self._encode(audio[:1], torch)
+        frame_size = int(self.sample_rate / self.frame_rate)
+        with torch.no_grad(), self.mimi.streaming(1):
+            native_frames = list(self._helpers.encode_from_sphn(
+                self.mimi,
+                self._helpers._iterate_audio(audio[:1], frame_size, pad=True),
+                max_batch=1,
+            ))
+        if not native_frames:
+            raise ValueError(f"voice prompt has no Mimi frames: {path}")
+        encoded = torch.cat(native_frames, dim=2)[0]
+        codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in encoded)
         self._voice_cache[key] = codes
         return codes
 
@@ -332,6 +342,7 @@ def load_runtime(
     model_device: str | None = None,
     load_model_weights: bool = True,
     codec_cache_dir: Path | None = None,
+    full_precision_model: bool = False,
 ) -> PersonaPlexRuntime:
     """Load from explicit local assets only. No Hugging Face function is imported."""
     resolved = paths.validate()
@@ -361,7 +372,7 @@ def load_runtime(
         sort_keys=True,
         separators=(",", ":"),
     )
-    lm_dtype = torch.bfloat16
+    lm_dtype = torch.float32 if full_precision_model else torch.bfloat16
     dev_type = getattr(device, "type", str(device))
     if dev_type == "mps":
         try:

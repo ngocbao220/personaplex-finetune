@@ -8,13 +8,25 @@ import os
 import copy
 import unicodedata
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import is_dataclass, replace
 from pathlib import Path
+
+
+def update_sample(sample, **kwargs):
+    """Safely update a sample whether it is a dataclass instance or a namespace."""
+    if is_dataclass(sample):
+        return replace(sample, **kwargs)
+    sample = copy.copy(sample)
+    for k, v in kwargs.items():
+        setattr(sample, k, v)
+    return sample
+
 
 import numpy as np
 
 from .config import Config
 from .data import AudioInfo, PreparedSample
+from .full_checkpoint import load_full_weights, resolve_full_checkpoint
 from .generation import GenerationSettings, generation_from_config
 from .lora import inject_lora, load_adapter
 from .runtime import RuntimePaths, load_runtime
@@ -205,6 +217,19 @@ def resolve_adapter_checkpoint(adapter: Path) -> tuple[Path, int, int, Path | No
     return adapter_file, rank, alpha, model_root, prefixes
 
 
+def is_full_checkpoint(checkpoint: Path) -> bool:
+    checkpoint = Path(checkpoint)
+    directory = checkpoint if checkpoint.is_dir() else checkpoint.parent
+    return (directory / "checkpoint.json").is_file() or checkpoint.name == "model.safetensors"
+
+
+def checkpoint_model_root(checkpoint: Path) -> Path | None:
+    if is_full_checkpoint(checkpoint):
+        _, metadata = resolve_full_checkpoint(checkpoint)
+        return Path(metadata["base_model_root"]).expanduser().resolve()
+    return resolve_adapter_checkpoint(checkpoint)[3]
+
+
 def generate(
     config: Config,
     sample: PreparedSample,
@@ -231,8 +256,15 @@ def generate(
     adapter_alpha = None
     adapter_model_root = None
     adapter_prefixes = None
+    full_checkpoint = None
     if adapter is not None:
-        adapter_file, adapter_rank, adapter_alpha, adapter_model_root, adapter_prefixes = resolve_adapter_checkpoint(adapter)
+        if is_full_checkpoint(adapter):
+            if config.qlora:
+                raise ValueError("full checkpoint inference requires lora.qlora=false")
+            full_checkpoint = Path(adapter)
+            adapter_model_root = checkpoint_model_root(full_checkpoint)
+        else:
+            adapter_file, adapter_rank, adapter_alpha, adapter_model_root, adapter_prefixes = resolve_adapter_checkpoint(adapter)
     if settings.use_sampling and seed is not None:
         # Sampling is only reproducible with a pinned RNG (AGENTS.md: seed all randomness).
         torch.manual_seed(int(seed))
@@ -241,6 +273,8 @@ def generate(
     if adapter_model_root is not None and adapter_model_root != Path(config.model_root).expanduser().resolve():
         logger.info("using training base model from adapter metadata: %s", model_root)
     runtime = load_runtime(RuntimePaths(model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
+    if full_checkpoint is not None:
+        load_full_weights(runtime.model, full_checkpoint)
     if adapter_file is not None:
         assert adapter_rank is not None and adapter_alpha is not None
         inject_lora(runtime.model, adapter_rank, adapter_alpha, prefixes=adapter_prefixes)
@@ -406,7 +440,7 @@ def smoke(
     adapter_path = Path(adapter).expanduser()
     adapter_model_root = None
     if adapter_path.is_file() or adapter_path.is_dir():
-        adapter_model_root = resolve_adapter_checkpoint(adapter_path)[3]
+        adapter_model_root = checkpoint_model_root(adapter_path)
     if adapter_model_root is not None:
         # Compare the adapter against the exact base checkpoint it was trained on.
         if hasattr(config, "replace"):
@@ -449,13 +483,23 @@ def smoke(
                 user_channel=0,
             )
         else:
-            sample = replace(
+            sample = update_sample(
                 sample,
+                sample_id=input_file.stem,
                 conversation_wav=normalized_input,
+                voice_prompt_wav=voice_prompt_wav if voice_prompt_wav is not None else sample.voice_prompt_wav,
+                text_prompt=text_prompt if text_prompt is not None else sample.text_prompt,
                 user_channel=0,
                 window_start_sec=window_start_sec,
                 window_end_sec=window_end_sec,
                 words=(),
+            )
+    else:
+        if voice_prompt_wav is not None or text_prompt is not None:
+            sample = update_sample(
+                sample,
+                voice_prompt_wav=voice_prompt_wav if voice_prompt_wav is not None else sample.voice_prompt_wav,
+                text_prompt=text_prompt if text_prompt is not None else sample.text_prompt,
             )
 
     _export_context(sample, output_dir)
@@ -555,6 +599,7 @@ def smoke(
                 "window_start_sec": sample.window_start_sec,
                 "window_end_sec": sample.window_end_sec,
                 "adapter": str(adapter),
+                "checkpoint_method": "full" if is_full_checkpoint(adapter) else "lora",
                 "base_model": str(Path(config.model_root).expanduser().resolve()),
                 "text_prompt": sample.text_prompt,
                 "voice_prompt": str(sample.voice_prompt_wav),

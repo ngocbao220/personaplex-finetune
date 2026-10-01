@@ -11,6 +11,34 @@ from personaplex_finetuning.runtime import RuntimePaths, load_runtime
 from personaplex_finetuning.sequence import PersonaPlexTrainingExampleBuilder, TrainingExample
 
 
+def native_debug_delay(example: TrainingExample, initial_tokens, delays, zero_token: int) -> TrainingExample:
+    """Render native delay positions for inspection only; training uses canonical codes."""
+    import torch
+    from moshi.models.lm import _delay_sequence
+
+    if len(initial_tokens) != 17 or len(delays) != 17:
+        raise ValueError("debug export requires 17 initial tokens and delays")
+    maximum = max(delays)
+    canonical = torch.tensor(example.input_codes, dtype=torch.long)[None]
+    mask = torch.tensor(example.loss_mask, dtype=torch.bool)[None]
+    initial = torch.tensor(initial_tokens, dtype=torch.long)[None, :, None]
+    tail = torch.full((1, 17, maximum), zero_token, dtype=torch.long)
+    delayed = _delay_sequence(delays, torch.cat([canonical, tail], dim=2), initial)
+    delayed = torch.cat([initial, delayed], dim=2)[0]
+    delayed_mask = _delay_sequence(
+        delays, torch.nn.functional.pad(mask, (0, maximum), value=False),
+        torch.zeros((1, 17, 1), dtype=torch.bool),
+    )
+    delayed_mask = torch.nn.functional.pad(delayed_mask, (1, 0), value=False)[0]
+    streams = tuple(tuple(int(token) for token in row) for row in delayed.tolist())
+    masks = tuple(tuple(bool(value) for value in row) for row in delayed_mask.tolist())
+    return TrainingExample(
+        streams, streams, masks, example.stream_names, example.prompt_frames,
+        example.dialogue_frames, example.voice_prompt_frames, example.text_prompt_frames,
+        example.word_alignments,
+    )
+
+
 def _token_piece(tokenizer, token_id: int) -> str:
     if token_id == tokenizer.padding_id:
         return "PAD"
@@ -229,7 +257,7 @@ def main() -> int:
         runtime.codec, runtime.tokenizer, runtime.initial_tokens, runtime.zero_token,
         normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
     )
-    example = builder.apply_delays(builder.build(sample), runtime.delays)
+    example = native_debug_delay(builder.build(sample), runtime.initial_tokens, runtime.delays, runtime.zero_token)
     payload = build_debug_payload(sample, example, runtime.tokenizer, runtime.codec.frame_rate, runtime.delays)
     output_dir = args.output_dir or Path("outputs/inspect") / sample.sample_id
     json_path, text_path = write_debug_artifacts(output_dir, payload)

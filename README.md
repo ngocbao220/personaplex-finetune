@@ -79,7 +79,7 @@ python -m tools.inference_smoke --config configs/infer.yaml \
   --output-dir outputs/inference
 ```
 
-Với WAV/MP3 bên ngoài manifest, truyền trực tiếp cả hai prompt. Chế độ này không nạp manifest và không kiểm tra train/validation/test split:
+Với WAV/MP3 bên ngoài manifest, có thể truyền trực tiếp cả hai prompt qua CLI hoặc cấu hình sẵn trong `configs/infer.yaml` (`inference.voice_prompt`, `inference.text_prompt`, `inference.input_file`). Chế độ này không nạp manifest và không kiểm tra train/validation/test split. Nếu cả `sample_id` và `input_file` đều tồn tại trong cấu hình, hệ thống sẽ tự động ưu tiên dùng `input_file`:
 
 ```bash
 python -m tools.inference_smoke --config configs/infer.yaml \
@@ -95,6 +95,22 @@ Thêm `--force-filter` để xác thực manifest và lọc chunk lại thay vì
 - `--adapter`: checkpoint LoRA cần nạp.
 - `--window-seconds`, `--start`: độ dài và thời điểm bắt đầu đoạn audio.
 - `--output-dir`: thư mục gốc; mỗi lần chạy tạo `infer_<YYYYMMDD_HHMMSS_microseconds>/` riêng, gồm WAV, transcript, `config.json`, `run.json` và `inference.log`. Config `inference.output_dir` cũng được hiểu là thư mục gốc.
+
+## Full fine-tuning
+
+`configs/full-finetuning.yaml` chọn `train.method=full`, batch 1 mỗi GPU và gradient checkpointing. Trước khi chạy dài trên nhiều B200, chạy một bước với mẫu cố định:
+
+```bash
+python train.py --config configs/full-finetuning.yaml --smoke
+```
+
+Sau đó chạy DDP bằng `torchrun` với số GPU thực tế:
+
+```bash
+torchrun --nproc-per-node 4 train.py --config configs/full-finetuning.yaml
+```
+
+Đổi `4` thành số GPU được cấp. `train.method=full` cập nhật LM PersonaPlex, gồm embedding của cả hai kênh; các head chỉ xuất user audio được đóng băng vì loss chỉ giám sát agent text/audio. Full checkpoint nằm trong `runs/full-finetuning/<run>/checkpoints/checkpoint_N/`, gồm `model.safetensors`, `training_state.pt` và `checkpoint.json`. Mỗi GPU DDP giữ một bản đầy đủ của model và AdamW; cần kiểm tra bộ nhớ GPU và dung lượng đĩa trước khi train dài. Dùng `--resume-from <checkpoint_dir>` để tiếp tục và `--checkpoint <checkpoint_dir>` với `tools.inference_smoke` để infer. `configs/config.yaml` và các lệnh LoRA cũ giữ nguyên mặc định.
 
 ## Log huấn luyện
 
