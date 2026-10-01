@@ -72,8 +72,17 @@ class SentencePieceTokenizer:
     end_padding_id = 0
 
     def __init__(self, path: Path) -> None:
+        self._path = Path(path)
         sentencepiece = importlib.import_module("sentencepiece")
-        self._processor = sentencepiece.SentencePieceProcessor(str(path))
+        self._processor = sentencepiece.SentencePieceProcessor(str(self._path))
+
+    def __getstate__(self) -> dict[str, str]:
+        # Spawned CPU workers should reopen the small local model instead of
+        # trying to pickle SentencePiece's native processor object.
+        return {"path": str(self._path)}
+
+    def __setstate__(self, state: dict[str, str]) -> None:
+        self.__init__(Path(state["path"]))
 
     def encode(self, text: str) -> list[int]:
         return list(self._processor.encode(text))

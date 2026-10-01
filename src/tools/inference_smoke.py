@@ -17,8 +17,14 @@ from pathlib import Path
 import time
 
 from personaplex_finetuning.config import load_config
+from personaplex_finetuning.chunk_filter import filter_text_capacity_chunks
 from personaplex_finetuning.data import PreparedDataset
-from personaplex_finetuning.inference import generation_from_config, smoke
+from personaplex_finetuning.inference import generation_from_config, resolve_adapter_checkpoint, smoke
+from personaplex_finetuning.runtime import (
+    PERSONAPLEX_MIMI_FRAME_RATE,
+    RuntimePaths,
+    SentencePieceTokenizer,
+)
 
 import torch
 torch.backends.cudnn.enabled = False
@@ -191,6 +197,62 @@ def main() -> int:
         else:
             raise ValueError("test split requested, but data.test_manifest is not configured")
 
+        inference_workers = max(1, int(inf_sec.get("filter_num_workers", config.filter_num_workers)))
+        chunk_filter_record = {"enabled": input_file is None}
+        tokenizer = None
+        if input_file is None:
+            _, _, _, adapter_model_root, _ = resolve_adapter_checkpoint(adapter_path)
+            filter_model_root = adapter_model_root or config.model_root
+            resolved = RuntimePaths(filter_model_root, config.personaplex_source).validate(require_model=False)
+            tokenizer = SentencePieceTokenizer(resolved.tokenizer)
+            if start_sec is None:
+                candidates_before_filter = len(samples)
+                filter_result = filter_text_capacity_chunks(
+                    samples,
+                    tokenizer,
+                    PERSONAPLEX_MIMI_FRAME_RATE,
+                    normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
+                    num_workers=inference_workers,
+                )
+                samples = list(filter_result.kept)
+                chunk_filter_record.update({
+                    "mode": "filter_manifest_windows",
+                    "candidate_windows": candidates_before_filter,
+                    "kept_windows": len(samples),
+                    "skipped_out_of_bounds": filter_result.skipped_out_of_bounds,
+                    "skipped_text_overflow": filter_result.skipped_text_overflow,
+                    "filter_num_workers": inference_workers,
+                })
+                logger.info(
+                    "[Chunk filter] split=inference candidates=%d kept=%d skipped_out_of_bounds=%d "
+                    "skipped_text_overflow=%d workers=%d",
+                    candidates_before_filter, len(samples), filter_result.skipped_out_of_bounds,
+                    filter_result.skipped_text_overflow, inference_workers,
+                )
+                for rejected in filter_result.rejected:
+                    logger.info(
+                        "[Skipped inference window] sample=%s chunk=%.3f-%.3fs reason=%s roles=%s word=%r@%.3fs",
+                        rejected.sample_id, rejected.window_start_sec, rejected.window_end_sec,
+                        rejected.reason, ",".join(rejected.roles), rejected.word.word, rejected.word.start,
+                    )
+                if not samples:
+                    raise ValueError("no inference windows remain after chunk filtering")
+            else:
+                chunk_filter_record.update({
+                    "mode": "filter_selected_exact_window",
+                    "available_manifest_samples": len(samples),
+                    "candidate_windows": 1,
+                    "filter_num_workers": inference_workers,
+                })
+        else:
+            chunk_filter_record.update({
+                "reason": "external_input_has_no_aligned_transcript",
+                "filter_num_workers": inference_workers,
+            })
+
+        run_record["chunk_filter"] = chunk_filter_record
+        write_json(output_dir / "config.json", run_record)
+
         if sample_id is not None:
             matching = [sample for sample in samples if sample.sample_id == sample_id]
             if not matching:
@@ -202,6 +264,25 @@ def main() -> int:
             sample = samples[sample_index]
         if input_file is None:
             sample = select_inference_window(sample, start_sec, window_seconds)
+            if start_sec is not None:
+                exact_window_result = filter_text_capacity_chunks(
+                    [sample],
+                    tokenizer,
+                    PERSONAPLEX_MIMI_FRAME_RATE,
+                    normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
+                    num_workers=inference_workers,
+                )
+                if not exact_window_result.kept:
+                    rejection = exact_window_result.rejected[0]
+                    raise ValueError(
+                        f"requested inference window is invalid: reason={rejection.reason}, "
+                        f"word={rejection.word.word!r}@{rejection.word.start:.3f}s"
+                    )
+                chunk_filter_record.update({
+                    "selected_window_kept": True,
+                    "skipped_out_of_bounds": exact_window_result.skipped_out_of_bounds,
+                    "skipped_text_overflow": exact_window_result.skipped_text_overflow,
+                })
     except Exception as exc:
         run_record.update({
             "status": "failed",
@@ -216,6 +297,7 @@ def main() -> int:
         "sample_id": sample.sample_id,
         "window_start_sec": sample.window_start_sec,
         "window_end_sec": sample.window_end_sec,
+        "chunk_filter": chunk_filter_record,
     })
     write_json(output_dir / "config.json", run_record)
     logger.info(

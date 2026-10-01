@@ -10,6 +10,7 @@ import random
 import shlex
 import sys
 import time
+import math
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -1245,11 +1246,39 @@ def run(
     filter_payloads = {}
 
     def filter_split(label: str, chunks: list, check_role_swap: bool = False) -> list:
-        result = filter_text_capacity_chunks(
-            chunks, filter_tokenizer, PERSONAPLEX_MIMI_FRAME_RATE,
-            normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
-            swap_roles=check_role_swap,
-        )
+        result = None
+        filter_error = None
+        filter_state = [None]
+        if main_process:
+            try:
+                result = filter_text_capacity_chunks(
+                    chunks, filter_tokenizer, PERSONAPLEX_MIMI_FRAME_RATE,
+                    normalize_vietnamese_diacritics=config.normalize_vietnamese_diacritics,
+                    swap_roles=check_role_swap,
+                    num_workers=config.filter_num_workers,
+                )
+                kept_objects = {id(sample) for sample in result.kept}
+                kept_indices = [index for index, sample in enumerate(chunks) if id(sample) in kept_objects]
+                filter_state[0] = (kept_indices, result.rejected, None)
+            except Exception as exc:
+                filter_error = exc
+                filter_state[0] = (None, None, f"{type(exc).__name__}: {exc}")
+
+        # All ranks construct the same chunks locally. Rank 0 owns filtering so
+        # distributed runs do not repeat CPU work or spawn workers per GPU.
+        if distributed:
+            torch.distributed.broadcast_object_list(filter_state, src=0, device=device)
+        kept_indices, rejected, remote_error = filter_state[0]
+        if remote_error is not None:
+            if filter_error is not None:
+                raise filter_error
+            raise RuntimeError(f"chunk filtering failed on rank 0: {remote_error}")
+        if not main_process:
+            result = ChunkFilterResult(
+                kept=tuple(chunks[index] for index in kept_indices),
+                rejected=tuple(rejected),
+            )
+        assert result is not None
         payload = chunk_filter_payload(label, len(chunks), result)
         filter_payloads[label] = payload
         if main_process:
@@ -1355,6 +1384,7 @@ def run(
             "gradient_accumulation_steps": accum_steps,
             "per_device_batch_size": config.per_device_batch_size,
             "num_workers": 0 if smoke else config.num_workers,
+            "filter_num_workers": config.filter_num_workers,
             "prefetch_factor": config.prefetch_factor,
             "pin_memory": config.pin_memory,
             "persistent_workers": config.persistent_workers and not smoke and config.num_workers > 0,

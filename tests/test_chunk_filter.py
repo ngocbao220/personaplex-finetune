@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+import unittest
 
 from personaplex_finetuning.chunk_filter import expected_mimi_frames, filter_text_capacity_chunks
 from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
@@ -76,6 +77,27 @@ def test_chunk_fits_when_agent_words_fit_on_or_after_their_timestamps():
     assert result.kept == (chunk,)
     assert result.skipped_out_of_bounds == 0
     assert result.skipped_text_overflow == 0
+
+
+class ParallelChunkFilterTest(unittest.TestCase):
+    def test_multiple_cpu_workers_match_single_worker_filter_results(self):
+        chunks = []
+        for index in range(64):
+            if index % 3 == 0:
+                chunks.append(_chunk([Word("agent", "late", 0.9, 0.95)]))
+            elif index % 3 == 1:
+                chunks.append(_chunk([Word("agent", "late", 0.9, 0.99)], duration=0.95))
+            else:
+                chunks.append(_chunk([Word("agent", "early", 0.1, 0.3)]))
+
+        sequential = filter_text_capacity_chunks(
+            chunks, FakeTokenizer(), frame_rate=10.0, swap_roles=True,
+        )
+        parallel = filter_text_capacity_chunks(
+            chunks, FakeTokenizer(), frame_rate=10.0, swap_roles=True, num_workers=2,
+        )
+
+        self.assertEqual(parallel, sequential)
 
 
 def test_expected_fixed_duration_mimi_grid_uses_ceil_for_partial_frames():

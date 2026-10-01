@@ -41,6 +41,7 @@ train:
   eval_every_steps: 0
   mixed_precision: bf16
   num_workers: 4
+  filter_num_workers: 64
   prefetch_factor: 2
   pin_memory: true
   persistent_workers: true
