@@ -1213,11 +1213,14 @@ def evaluate_free_running(runtime, samples: list, config: Config) -> dict:
             generation=getattr(config, "generation_settings", GenerationSettings()),
             seed=config.seed + len(evaluated),
         )
+        text_mode = getattr(config, "vietnamese_text_mode", "diacritics")
         metrics = text_error_metrics(
-            reference, hypothesis, vietnamese_text_mode=config.vietnamese_text_mode,
+            reference, hypothesis, vietnamese_text_mode=text_mode,
         )
         if metrics is not None:
-            evaluated.append((metrics, sample.sample_id, reference, hypothesis, window.window_start_sec, window.window_end_sec))
+            metrics_reference = normalize_vietnamese_text(reference, text_mode)
+            evaluated.append((metrics, sample.sample_id, metrics_reference, hypothesis,
+                              window.window_start_sec, window.window_end_sec))
         if len(evaluated) >= config.free_running_eval_samples:
             break
     if not evaluated:

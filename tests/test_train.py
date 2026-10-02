@@ -394,6 +394,28 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(metrics["samples"][0]["window_start_sec"], 1.0)
         self.assertEqual(metrics["samples"][0]["source_duration_sec"], 60.0)
 
+    def test_free_running_metrics_log_reference_in_configured_text_mode(self) -> None:
+        from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
+
+        sample = PreparedSample(
+            sample_id="telex-1", conversation_wav=Path("conversation.wav"),
+            voice_prompt_wav=Path("voice.wav"), words=(Word("agent", "tương", 1.0, 1.5),),
+            text_prompt="Trò chuyện bằng tiếng Việt.", metadata={},
+            audio=AudioInfo(24_000, 2, 60.0), window_start_sec=0.0, window_end_sec=60.0,
+        )
+        config = SimpleNamespace(
+            seed=42, free_running_eval_samples=1, free_running_eval_window_seconds=30.0,
+            vietnamese_text_mode="telex",
+        )
+
+        with patch("personaplex_finetuning.train.generate_text_with_runtime", return_value="tuowng"):
+            metrics = evaluate_free_running(object(), [sample], config)
+
+        self.assertEqual(metrics["samples"][0]["reference"], "tuowng")
+        self.assertEqual(metrics["samples"][0]["hypothesis"], "tuowng")
+        self.assertEqual(metrics["samples"][0]["cer"], 0.0)
+        self.assertEqual(metrics["samples"][0]["wer"], 0.0)
+
     def test_free_running_validation_counts_empty_hypotheses(self) -> None:
         from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
 
