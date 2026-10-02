@@ -81,7 +81,7 @@ python -m tools.inference_smoke --config configs/infer.yaml \
   --output-dir outputs/inference
 ```
 
-Với WAV/MP3 bên ngoài manifest, có thể truyền trực tiếp cả hai prompt qua CLI hoặc cấu hình sẵn trong `configs/infer.yaml` (`inference.voice_prompt`, `inference.text_prompt`, `inference.input_file`). Chế độ này không nạp manifest và không kiểm tra train/validation/test split. Nếu cả `sample_id` và `input_file` đều tồn tại trong cấu hình, hệ thống sẽ tự động ưu tiên dùng `input_file`:
+`--sample-id` tìm trực tiếp trên các manifest train/validation/test đã cấu hình và không phụ thuộc `--split`; `--split` chỉ dùng khi chọn bằng `--index`. Với WAV/MP3 bên ngoài manifest, có thể truyền trực tiếp cả hai prompt qua CLI hoặc cấu hình sẵn trong `configs/infer.yaml` (`inference.voice_prompt`, `inference.text_prompt`, `inference.input_file`). Khi có đủ voice/text prompt riêng, chế độ standalone không nạp manifest. Khi chỉ có `input_file` và `sample_id`, file ngoài cung cấp user audio còn sample cung cấp voice/text conditioning:
 
 ```bash
 python -m tools.inference_smoke --config configs/infer.yaml \

@@ -51,6 +51,36 @@ def select_inference_window(sample, start: float | None, window_seconds: float):
     return sample.with_window(start, end)
 
 
+def load_sample_by_id(config, sample_id: str, window_seconds: float, **dataset_options):
+    """Resolve a prepared sample independently of train/validation/test selection."""
+    manifests = []
+    seen = set()
+    for manifest in (
+        config.manifest,
+        getattr(config, "val_manifest", None),
+        getattr(config, "test_manifest", None),
+    ):
+        if manifest is None:
+            continue
+        key = str(Path(manifest).expanduser().resolve())
+        if key not in seen:
+            seen.add(key)
+            manifests.append(manifest)
+
+    for manifest in manifests:
+        samples = PreparedDataset(
+            manifest, window_seconds, **dataset_options,
+        ).load()
+        matching = [sample for sample in samples if sample.sample_id == sample_id]
+        if matching:
+            return matching[0], manifest
+
+    searched = ", ".join(str(manifest) for manifest in manifests)
+    raise ValueError(
+        f"sample_id {sample_id!r} is not present in the configured manifests: {searched}"
+    )
+
+
 def main() -> int:
     default_config = "configs/infer.yaml" if Path("configs/infer.yaml").is_file() else None
     parser = argparse.ArgumentParser(description="PersonaPlex inference smoke test.")
@@ -70,9 +100,12 @@ def main() -> int:
     parser.add_argument("--index", type=int, default=None, help="Sample index in dataset to evaluate.")
     parser.add_argument(
         "--split", choices=("train", "validation", "test"), default="train",
-        help="Conversation split to sample from; validation reproduces the seeded training split when no val.jsonl exists.",
+        help="Conversation split used with --index; ignored when --sample-id is set.",
     )
-    parser.add_argument("--sample-id", default=None, help="Select a sample by its manifest sample_id.")
+    parser.add_argument(
+        "--sample-id", default=None,
+        help="Select by sample_id across configured train/validation/test manifests, independently of --split.",
+    )
     parser.add_argument(
         "--start", type=float, default=None,
         help="Start time in seconds for one exact data.window_seconds inference window.",
@@ -171,7 +204,8 @@ def main() -> int:
         parser.error("--voice-prompt and --text-prompt must be provided together")
 
     has_explicit_prompts = voice_prompt is not None and text_prompt is not None
-    # If both sample_id and input_file exist, prioritize input_file
+    # Explicit prompts make external input standalone. Otherwise sample_id still
+    # selects the prepared voice/text conditioning for the external user audio.
     direct_input = (input_file is not None and has_explicit_prompts)
 
     configured_window = inf_sec.get("window_seconds") if hasattr(inf_sec, "get") else None
@@ -198,14 +232,14 @@ def main() -> int:
     started_at = datetime.now().astimezone().isoformat()
     started = time.perf_counter()
     adapter_path = Path(adapter_path).expanduser().resolve()
-    effective_initial_sample_id = input_file.stem if input_file is not None else sample_id
+    effective_initial_sample_id = input_file.stem if direct_input else sample_id
     run_record = {
         "status": "running",
         "started_at": started_at,
         "config": str(Path(args.config).expanduser().resolve()),
         "adapter": str(adapter_path),
         "checkpoint_method": "full" if is_full_checkpoint(adapter_path) else "lora",
-        "split": None if (input_file is not None and direct_input) else args.split,
+        "split": None if direct_input or sample_id is not None else args.split,
         "input_file": str(input_file) if input_file is not None else None,
         "sample_id": effective_initial_sample_id,
         "voice_prompt": str(voice_prompt) if voice_prompt is not None else None,
@@ -220,11 +254,17 @@ def main() -> int:
     logger.info("inference run started; output_dir=%s", output_dir)
     logger.info("checkpoint=%s", adapter_path)
     logger.info("generation=%s", generation.label())
-    if sample_id is not None and input_file is not None:
+    if sample_id is not None and input_file is not None and direct_input:
         logger.info(
-            "both sample_id (%s) and input_file (%s) are provided; prioritizing input_file",
-            sample_id,
+            "standalone input %s has explicit prompts; ignoring sample_id %s",
             input_file,
+            sample_id,
+        )
+    elif sample_id is not None and input_file is not None:
+        logger.info(
+            "external input %s replaces conversation audio; sample_id %s selects conditioning",
+            input_file,
+            sample_id,
         )
 
     try:
@@ -237,18 +277,28 @@ def main() -> int:
             }
         if direct_input:
             samples = []
+            selected_manifest = None
             logger.info("using standalone input and explicit voice/text prompts")
+        elif sample_id is not None:
+            sample, selected_manifest = load_sample_by_id(
+                config, sample_id, window_seconds, **dataset_filter_options,
+            )
+            samples = [sample]
+            logger.info("selected sample_id=%s from manifest=%s", sample_id, selected_manifest)
         elif args.split == "train":
+            selected_manifest = config.manifest
             logger.info("loading split=%s window_seconds=%s", args.split, window_seconds)
             samples = PreparedDataset(
                 config.manifest, window_seconds, **dataset_filter_options,
             ).load()
         elif args.split == "validation":
             if config.val_manifest is not None:
+                selected_manifest = config.val_manifest
                 samples = PreparedDataset(
                     config.val_manifest, window_seconds, **dataset_filter_options,
                 ).load()
             else:
+                selected_manifest = config.manifest
                 dataset = PreparedDataset(
                     config.manifest, window_seconds, **dataset_filter_options,
                 )
@@ -256,12 +306,14 @@ def main() -> int:
                     val_ratio=config.val_ratio, seed=config.seed,
                 )
         elif config.test_manifest is not None:
+            selected_manifest = config.test_manifest
             samples = PreparedDataset(
                 config.test_manifest, window_seconds, **dataset_filter_options,
             ).load()
         else:
             raise ValueError("test split requested, but data.test_manifest is not configured")
 
+        selection_key = "sample-id" if sample_id is not None else args.split
         chunk_filter_record = {"enabled": input_file is None}
         tokenizer = None
         if input_file is None:
@@ -286,12 +338,11 @@ def main() -> int:
                     PERSONAPLEX_MIMI_FRAME_RATE,
                     vietnamese_text_mode=config.vietnamese_text_mode,
                     num_workers=inference_workers,
-                    cache_path=config.prepared_dir / ".filter-cache" / f"inference-{args.split}.jsonl",
+                    cache_path=config.prepared_dir / ".filter-cache" / f"inference-{selection_key}.jsonl",
                     cache_fingerprint=filter_fingerprint(
-                        [config.val_manifest if args.split == "validation" and config.val_manifest else
-                         config.test_manifest if args.split == "test" else config.manifest],
+                        [selected_manifest],
                         {
-                            "kind": "inference-windows", "split": args.split,
+                            "kind": "inference-windows", "selection": selection_key,
                             "window_seconds": window_seconds, "start": start_sec,
                             "sample_id": sample_id, "sample_index": sample_index,
                             "val_ratio": config.val_ratio, "seed": config.seed,
@@ -323,6 +374,13 @@ def main() -> int:
                         rejected.reason, ",".join(rejected.roles), rejected.word.word, rejected.word.start,
                     )
                 if not samples:
+                    if sample_id is not None and filter_result.rejected:
+                        rejection = filter_result.rejected[0]
+                        raise ValueError(
+                            f"selected sample_id {sample_id!r} has an invalid inference window: "
+                            f"reason={rejection.reason}, "
+                            f"word={rejection.word.word!r}@{rejection.word.start:.3f}s"
+                        )
                     raise ValueError("no inference windows remain after chunk filtering")
             else:
                 chunk_filter_record.update({
@@ -343,10 +401,7 @@ def main() -> int:
         if direct_input:
             sample = None
         elif sample_id is not None:
-            matching = [sample for sample in samples if sample.sample_id == sample_id]
-            if not matching:
-                raise ValueError(f"sample_id {sample_id!r} is not present in the {args.split} split")
-            sample = matching[0]
+            sample = samples[0]
         else:
             if not 0 <= sample_index < len(samples):
                 raise IndexError(f"sample index {sample_index} is outside the {args.split} split (size={len(samples)})")
@@ -366,12 +421,11 @@ def main() -> int:
                     PERSONAPLEX_MIMI_FRAME_RATE,
                     vietnamese_text_mode=config.vietnamese_text_mode,
                     num_workers=inference_workers,
-                    cache_path=config.prepared_dir / ".filter-cache" / f"inference-{args.split}-exact.jsonl",
+                    cache_path=config.prepared_dir / ".filter-cache" / f"inference-{selection_key}-exact.jsonl",
                     cache_fingerprint=filter_fingerprint(
-                        [config.val_manifest if args.split == "validation" and config.val_manifest else
-                         config.test_manifest if args.split == "test" else config.manifest],
+                        [selected_manifest],
                         {
-                            "kind": "inference-exact-window", "split": args.split,
+                            "kind": "inference-exact-window", "selection": selection_key,
                             "window_seconds": window_seconds, "start": sample.window_start_sec,
                             "sample_id": sample.sample_id,
                             "vietnamese_text_mode": config.vietnamese_text_mode,
@@ -401,7 +455,7 @@ def main() -> int:
         logger.exception("inference input preparation failed")
         raise
 
-    effective_sample_id = input_file.stem if input_file is not None else sample.sample_id
+    effective_sample_id = input_file.stem if direct_input else sample.sample_id
     effective_voice_prompt = (
         str(voice_prompt) if voice_prompt is not None
         else (str(getattr(sample, "voice_prompt_wav", None)) if sample is not None else None)
@@ -425,10 +479,16 @@ def main() -> int:
         logger.info("voice_prompt=%s", effective_voice_prompt)
         logger.info("text_prompt=%s", effective_text_prompt)
     else:
-        logger.info(
-            "sample=%s split=%s window=%.3f-%.3fs",
-            sample.sample_id, args.split, sample.window_start_sec, sample.window_end_sec,
-        )
+        if sample_id is not None:
+            logger.info(
+                "sample=%s manifest=%s window=%.3f-%.3fs",
+                sample.sample_id, selected_manifest, sample.window_start_sec, sample.window_end_sec,
+            )
+        else:
+            logger.info(
+                "sample=%s split=%s window=%.3f-%.3fs",
+                sample.sample_id, args.split, sample.window_start_sec, sample.window_end_sec,
+            )
         if input_file is not None:
             logger.info("input=%s (prioritized over sample audio)", input_file)
         logger.info("voice_prompt=%s", effective_voice_prompt)

@@ -24,8 +24,8 @@ generation:
 # Inference input and evaluation settings
 inference:
   filter_num_workers: 64   # CPU workers for prepared-sample validation and chunk overflow filtering.
-  sample_id: null          # Manifest sample_id (nếu dùng mẫu từ dataset manifest)
-  input_file: null         # Optional external WAV/MP3 user audio file (ưu tiên hơn sample_id nếu cả hai cùng tồn tại)
+  sample_id: null          # Tìm sample_id trên mọi manifest đã cấu hình; không phụ thuộc train/validation/test split.
+  input_file: null         # WAV/MP3 user audio ngoài; vẫn dùng conditioning từ sample_id nếu không truyền đủ hai prompt riêng.
   voice_prompt: null       # Đường dẫn file audio WAV voice prompt của agent (mẫu giọng); nếu để null sẽ lấy theo sample_id
   text_prompt: null        # Nội dung system text prompt định hướng persona của agent; nếu để null sẽ lấy theo sample_id
   start: null               # Start time in seconds within the selected audio

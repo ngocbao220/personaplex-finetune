@@ -484,7 +484,7 @@ class InferenceCliTest(unittest.TestCase):
             "--adapter", "adapter.safetensors",
             "--input-path", "external.wav",
         ]), patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
-            manifest="manifest.jsonl", window_seconds=30.0,
+            manifest="manifest.jsonl", window_seconds=30.0, vietnamese_text_mode="diacritics",
         )), patch.object(inference_smoke, "PreparedDataset", return_value=SimpleNamespace(
             load=lambda: [sample],
         )), patch.object(inference_smoke, "smoke", autospec=True) as smoke:
@@ -692,7 +692,7 @@ class InferenceCliGenerationTest(unittest.TestCase):
                 "--voice-prompt", "voice.wav", "--text-prompt", "Trò chuyện tự nhiên",
                 "--sample-id", "absent-from-train", "--output-dir", str(root / "outputs"),
             ]), patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
-                manifest="train.jsonl", window_seconds=30.0,
+                manifest="train.jsonl", window_seconds=30.0, vietnamese_text_mode="diacritics",
             )), patch.object(inference_smoke, "PreparedDataset") as dataset_factory, \
                  patch.object(inference_smoke, "smoke", autospec=True) as smoke:
                 smoke.return_value = "reference_unavailable"
@@ -719,6 +719,7 @@ class InferenceCliGenerationTest(unittest.TestCase):
             with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path), *arguments]), \
                  patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
                      manifest="manifest.jsonl", window_seconds=30.0,
+                     vietnamese_text_mode="diacritics",
                  )), \
                  patch.object(inference_smoke, "PreparedDataset", return_value=SimpleNamespace(
                      load=lambda: [sample],
@@ -767,7 +768,7 @@ class InferenceCliGenerationTest(unittest.TestCase):
             with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path)]), \
                  patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
                      manifest="manifest.jsonl", window_seconds=None,
-                     free_running_eval_window_seconds=30.0,
+                     free_running_eval_window_seconds=30.0, vietnamese_text_mode="diacritics",
                  )), \
                  patch.object(inference_smoke, "PreparedDataset", return_value=SimpleNamespace(
                      load=lambda: samples,
@@ -789,14 +790,17 @@ class InferenceCliGenerationTest(unittest.TestCase):
                 status, _, _ = self._run_cli(config, smoke_result=status_name)
                 self.assertEqual(status, 2)
 
-    def test_validation_sample_id_reproduces_the_seeded_heldout_split_and_window(self):
+    def test_sample_id_bypasses_split_and_selects_from_configured_manifests(self):
         class Dataset:
             def __init__(self):
                 self.split_called = False
 
+            def load(self):
+                return [sample]
+
             def split(self, val_ratio, seed):
                 self.split_called = (val_ratio, seed)
-                return [], [sample]
+                raise AssertionError("sample_id selection must not use the requested split")
 
         sample = SimpleNamespace(
             sample_id="heldout-7", window_start_sec=0.0, window_end_sec=30.0,
@@ -815,15 +819,93 @@ class InferenceCliGenerationTest(unittest.TestCase):
                 "--sample-id", "heldout-7", "--start", "5", "--window-seconds", "20",
             ]), patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
                 manifest="train.jsonl", val_manifest=None, val_ratio=0.1, seed=9,
-                window_seconds=30.0, test_manifest=None,
+                window_seconds=30.0, test_manifest=None, vietnamese_text_mode="diacritics",
             )), patch.object(inference_smoke, "PreparedDataset", return_value=dataset), \
                  patch.object(inference_smoke, "smoke", autospec=True) as smoke:
                 smoke.return_value = None
                 self.assertEqual(inference_smoke.main(), 0)
 
-        self.assertEqual(dataset.split_called, (0.1, 9))
+        self.assertFalse(dataset.split_called)
         selected = smoke.call_args.kwargs["sample"]
         self.assertEqual((selected.window_start_sec, selected.window_end_sec), (5.0, 25.0))
+
+    def test_sample_id_searches_validation_and_test_manifests_independent_of_split(self):
+        chosen = SimpleNamespace(
+            sample_id="test-only", window_start_sec=0.0, window_end_sec=20.0,
+            audio=SimpleNamespace(duration_sec=20.0),
+        )
+        loaded_manifests = []
+
+        def dataset_for(manifest, _window_seconds, **_kwargs):
+            loaded_manifests.append(manifest)
+            samples = {
+                "train.jsonl": [SimpleNamespace(sample_id="train-only")],
+                "val.jsonl": [SimpleNamespace(sample_id="val-only")],
+                "test.jsonl": [chosen],
+            }[manifest]
+            return SimpleNamespace(load=lambda: samples)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "infer.yaml"
+            config_path.write_text("adapter:\n  path: adapter.safetensors\n", encoding="utf-8")
+            with patch.object(sys, "argv", [
+                "inference_smoke.py", "--config", str(config_path), "--split", "train",
+                "--sample-id", "test-only", "--output-dir", str(root / "outputs"),
+            ]), patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
+                manifest="train.jsonl", val_manifest="val.jsonl", test_manifest="test.jsonl",
+                window_seconds=20.0, vietnamese_text_mode="diacritics",
+            )), patch.object(inference_smoke, "PreparedDataset", side_effect=dataset_for), \
+                 patch.object(inference_smoke, "smoke", autospec=True) as smoke:
+                smoke.return_value = None
+                self.assertEqual(inference_smoke.main(), 0)
+
+            run_config = json.loads(next((root / "outputs").glob("infer_*/config.json")).read_text())
+
+        self.assertEqual(loaded_manifests, ["train.jsonl", "val.jsonl", "test.jsonl"])
+        self.assertIs(smoke.call_args.kwargs["sample"], chosen)
+        self.assertIsNone(run_config["split"])
+
+    def test_sample_id_reports_its_actual_chunk_rejection(self):
+        sample = SimpleNamespace(
+            sample_id="overflowing", window_start_sec=0.0, window_end_sec=20.0,
+            audio=SimpleNamespace(duration_sec=20.0),
+        )
+        rejection = SimpleNamespace(
+            sample_id="overflowing", window_start_sec=0.0, window_end_sec=20.0,
+            reason="text_overflow", roles=("left-agent",),
+            word=SimpleNamespace(word="late", start=19.9),
+        )
+        filter_result = SimpleNamespace(
+            kept=(), rejected=(rejection,), skipped_out_of_bounds=0, skipped_text_overflow=1,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "infer.yaml"
+            config_path.write_text("adapter:\n  path: adapter.safetensors\n", encoding="utf-8")
+            config = SimpleNamespace(
+                manifest="train.jsonl", val_manifest=None, test_manifest=None,
+                window_seconds=20.0, vietnamese_text_mode="diacritics",
+                model_root="model", personaplex_source="personaplex", prepared_dir=root,
+                val_ratio=0.05, seed=42,
+            )
+            with patch.object(sys, "argv", [
+                "inference_smoke.py", "--config", str(config_path),
+                "--sample-id", "overflowing", "--output-dir", str(root / "outputs"),
+            ]), patch.object(inference_smoke, "load_config", return_value=config), \
+                 patch.object(inference_smoke, "PreparedDataset", return_value=SimpleNamespace(
+                     load=lambda: [sample],
+                 )), patch.object(inference_smoke.RuntimePaths, "validate", return_value=SimpleNamespace(
+                     tokenizer=Path("tokenizer.model"),
+                 )), patch.object(inference_smoke, "SentencePieceTokenizer", return_value=object()), \
+                 patch.object(inference_smoke, "filter_text_capacity_chunks", return_value=filter_result), \
+                 patch.object(inference_smoke, "smoke", autospec=True):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "selected sample_id 'overflowing'.*reason=text_overflow.*late.*19.900s",
+                ):
+                    inference_smoke.main()
 
     def test_invalid_generation_block_fails_before_any_model_is_loaded(self):
         with self.assertRaisesRegex(ValueError, "top_k_text"):
@@ -852,6 +934,7 @@ class InferenceCliGenerationTest(unittest.TestCase):
             with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path)]), \
                  patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
                      manifest="train.jsonl", window_seconds=30.0,
+                     vietnamese_text_mode="diacritics",
                  )), \
                  patch.object(inference_smoke, "PreparedDataset") as dataset_factory, \
                  patch.object(inference_smoke, "smoke", autospec=True) as smoke:
@@ -884,6 +967,7 @@ class InferenceCliGenerationTest(unittest.TestCase):
             with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path)]), \
                  patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
                      manifest="train.jsonl", window_seconds=30.0,
+                     vietnamese_text_mode="diacritics",
                  )), \
                  patch.object(inference_smoke, "PreparedDataset") as dataset_factory, \
                  patch.object(inference_smoke, "smoke", autospec=True) as smoke:
@@ -923,6 +1007,7 @@ class InferenceCliGenerationTest(unittest.TestCase):
             with patch.object(sys, "argv", ["inference_smoke.py", "--config", str(config_path)]), \
                  patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
                      manifest="train.jsonl", window_seconds=30.0,
+                     vietnamese_text_mode="diacritics",
                  )), \
                  patch.object(inference_smoke, "PreparedDataset", return_value=SimpleNamespace(
                      load=lambda: [sample],
