@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+import os
 import wave
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from personaplex_finetuning.train import (
     unwrap_parallel_model,
     rank_stride_indices,
     reduce_distributed_loss,
+    run,
     sample_index_for_rank,
     step_optimizer_if_ready,
     validation_selection_loss,
@@ -46,6 +48,17 @@ from personaplex_finetuning.train import (
 
 
 class TrainTest(unittest.TestCase):
+    def test_training_disables_moshi_cuda_graphs_before_runtime_setup(self) -> None:
+        config = SimpleNamespace(
+            train_method="lora", ft_embed=False, qlora=False, train_stage="joint",
+            randomize_train=False, mixed_precision="bf16", shuffle=True,
+        )
+        with patch.dict("os.environ"):
+            os.environ.pop("NO_CUDA_GRAPH", None)
+            with self.assertRaisesRegex(ValueError, "smoke configuration"):
+                run(config, smoke=True)
+            self.assertEqual(os.environ.get("NO_CUDA_GRAPH"), "1")
+
     def test_text_training_stats_pack_prediction_diagnostics_as_three_scalars(self) -> None:
         packed = pack_text_training_stats(
             torch.tensor(11), torch.tensor(2), torch.tensor(4.5), torch.tensor(9),

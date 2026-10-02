@@ -1316,6 +1316,9 @@ def run(
     # Moshi's lazy compile wrappers can trigger graph/compile shape issues on
     # the fixed, padded sequences used by distributed training.
     os.environ.setdefault("NO_TORCH_COMPILE", "1")
+    # Mimi's streaming encoder uses CUDA Graph capture for voice prompts; this
+    # capture can be invalidated on the training CUDA stack before the LM step.
+    os.environ.setdefault("NO_CUDA_GRAPH", "1")
     for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[variable] = "1"
     try:
