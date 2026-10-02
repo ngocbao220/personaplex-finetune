@@ -24,6 +24,7 @@ from personaplex_finetuning.train import (
     iter_training_batches,
     text_supervision_counts,
     text_target_token_loss_stats,
+    pack_text_training_stats,
     unwrap_parallel_model,
     rank_stride_indices,
     reduce_distributed_loss,
@@ -45,6 +46,15 @@ from personaplex_finetuning.train import (
 
 
 class TrainTest(unittest.TestCase):
+    def test_text_training_stats_pack_prediction_diagnostics_as_three_scalars(self) -> None:
+        packed = pack_text_training_stats(
+            torch.tensor(11), torch.tensor(2), torch.tensor(4.5), torch.tensor(9),
+            torch.tensor(7), torch.tensor([3, 5, 1]),
+        )
+
+        self.assertEqual(packed.shape, (8,))
+        self.assertEqual(packed.tolist(), [11.0, 2.0, 4.5, 9.0, 7.0, 3.0, 5.0, 1.0])
+
     def test_training_device_honors_explicit_mps_in_single_process(self) -> None:
         with patch("torch.backends.mps.is_available", return_value=True):
             self.assertEqual(resolve_training_device("mps", 0, 1), torch.device("mps"))

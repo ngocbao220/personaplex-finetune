@@ -404,6 +404,30 @@ def text_prediction_diagnostic_counts(batch, model_output, padding_id: int):
     ))
 
 
+def pack_text_training_stats(
+    target_tokens,
+    padding_positions,
+    target_ce_sum,
+    target_ce_count,
+    target_correct,
+    prediction_counts,
+):
+    """Pack the eight scalar text metrics in the order consumed by the logger."""
+    if prediction_counts.shape != (3,):
+        raise ValueError(
+            "text prediction diagnostics must contain three counts; "
+            f"got shape {tuple(prediction_counts.shape)}"
+        )
+    return torch.stack((
+        target_tokens.float(),
+        padding_positions.float(),
+        target_ce_sum,
+        target_ce_count.float(),
+        target_correct.float(),
+        *(count.float() for count in prediction_counts.unbind()),
+    ))
+
+
 def tokenizer_text_padding_ids(tokenizer) -> tuple[int, ...]:
     ids = [int(tokenizer.padding_id)]
     end_padding_id = getattr(tokenizer, "end_padding_id", None)
@@ -1985,12 +2009,14 @@ def run(
             if not sync_gradients:
                 continue
 
-            global_text_stats = all_reduce_sum(torch.stack([
-                pending_text_target_tokens.float(), pending_text_padding_positions.float(),
-                pending_text_target_ce_sum, pending_text_target_ce_count.float(),
-                pending_text_target_correct.float(),
-                pending_text_prediction_counts.float(),
-            ]))
+            global_text_stats = all_reduce_sum(pack_text_training_stats(
+                pending_text_target_tokens,
+                pending_text_padding_positions,
+                pending_text_target_ce_sum,
+                pending_text_target_ce_count,
+                pending_text_target_correct,
+                pending_text_prediction_counts,
+            ))
             global_audio_cb_stats = all_reduce_sum(torch.stack([
                 pending_audio_cb_correct.float(),
                 pending_audio_cb_count.float(),
