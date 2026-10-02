@@ -60,7 +60,7 @@ class Config:
     generation_settings: GenerationSettings = GenerationSettings()
     free_running_eval_every_steps: int = 0
     free_running_eval_samples: int = 1
-    free_running_eval_window_seconds: float = 30.0
+    free_running_eval_window_seconds: float = 100.0
     validation_max_samples: int = 32
     lora_enabled: bool = True
     lora_scaling: float = 2.0
@@ -243,7 +243,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     duration_sec = float(raw.get("duration_sec", data.get("duration_sec", 100.0)))
     if duration_sec <= 0:
         raise ValueError("duration_sec must be positive")
-    free_running_eval_window_seconds = float(raw.get("free_running_eval_window_seconds", 30.0))
+    free_running_eval_window_seconds = float(raw.get("free_running_eval_window_seconds", duration_sec))
     if free_running_eval_window_seconds <= 0:
         raise ValueError("free_running_eval_window_seconds must be positive")
     first_codebook_weight_multiplier = float(raw.get("first_codebook_weight_multiplier", 1.0))
