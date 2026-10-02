@@ -1,0 +1,33 @@
+{
+  "model": {
+    "root": "/home/voice/data/voice/personaplex-7b-v1",
+    "source": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v9/src",
+    "device": "cuda"
+  },
+  "data": {
+    "prepared_dir": "/home/voice/data/voice/vdt/data_ready/sommelier_500h",
+    "window_seconds": null,
+    "vietnamese_text_mode": "telex"
+  },
+  "lora": {
+    "qlora": false
+  },
+  "seed": 42,
+  "generation": {
+    "use_sampling": false,
+    "temp": 0.0,
+    "temp_text": 0.0,
+    "top_k": 250,
+    "top_k_text": 25,
+    "audio_silence_frame_cnt": 6
+  },
+  "adapter": {
+    "path": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v9/runs/train-v2/train_20261002_032341_293825/checkpoints/checkpoint_001000/lora.safetensors"
+  },
+  "inference": {
+    "sample_id": "youtube_1002_stereo_10",
+    "start": 0.0,
+    "window_seconds": 11.52,
+    "output_dir": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v9/runs/train-v2/compare_v0_sample"
+  }
+}

@@ -1131,6 +1131,7 @@ def inference_config_snapshot(config: Config, adapter_path: Path, output_dir: Pa
         "prepared_dir": str(config.prepared_dir),
         "window_seconds": config.window_seconds,
         "val_ratio": config.val_ratio,
+        "vietnamese_text_mode": config.vietnamese_text_mode,
     }
     if config.val_manifest is not None:
         data["val_manifest"] = str(config.val_manifest)
