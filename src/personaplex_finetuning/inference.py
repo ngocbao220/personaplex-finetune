@@ -359,13 +359,16 @@ def generate(
 
 def generate_text_with_runtime(
     runtime, sample: PreparedSample, generation: GenerationSettings | None = None, seed: int = 42,
-    output_wav: Path | None = None,
+    output_wav: Path | None = None, output_stereo: bool = False,
 ) -> str:
     """Run free-running generation with an already-loaded model.
 
     This is used for validation between training checkpoints so validation measures the
     autoregressive path without loading a second 7B model. When ``output_wav`` is set,
     generated agent Mimi tokens are decoded and saved alongside the text metrics.
+    With ``output_stereo``, the left channel is the generated agent and the right
+    is the selected source user channel, preserving the source window's timeline
+    and exact sample count.
     """
     import importlib
     import numpy as np
@@ -408,6 +411,9 @@ def generate_text_with_runtime(
             for frame in range(user.shape[-1]):
                 tokens = generator.step(input_tokens=user[:, :, frame : frame + 1])
                 if tokens is None:
+                    if output_wav is not None and output_stereo:
+                        frame_samples = round(runtime.codec.sample_rate / runtime.codec.frame_rate)
+                        pcm_frames.append(np.zeros(frame_samples, dtype=np.float32))
                     continue
                 if output_wav is not None:
                     decoded = (
@@ -424,9 +430,24 @@ def generate_text_with_runtime(
                 raise RuntimeError("native PersonaPlex free-running validation produced no audio frames")
             import sphn
 
+            audio = np.concatenate(pcm_frames)
+            if output_stereo:
+                source = read_stereo_window(
+                    sample.conversation_wav,
+                    sample.window_start_sec,
+                    min(sample.window_end_sec, sample.audio.duration_sec),
+                    runtime.codec.sample_rate,
+                    sample.sample_id,
+                )[sample.user_channel]
+                # Codec frames round the window length; only the agent is padded
+                # or trimmed, never the source user channel.
+                agent = np.zeros(source.shape[-1], dtype=np.float32)
+                copied_samples = min(agent.shape[-1], audio.shape[-1])
+                agent[:copied_samples] = audio[:copied_samples]
+                audio = np.ascontiguousarray(np.stack([agent, source]))
             output_wav.parent.mkdir(parents=True, exist_ok=True)
             sphn.write_wav(
-                str(output_wav), np.concatenate(pcm_frames), runtime.codec.sample_rate,
+                str(output_wav), audio, runtime.codec.sample_rate,
             )
         processor = runtime.tokenizer._processor
         if hasattr(processor, "decode_ids"):
@@ -447,6 +468,8 @@ def export_original_audio_window(sample: PreparedSample, output_wav: Path) -> Pa
         24_000,
         sample.sample_id,
     )
+    user_channel = getattr(sample, "user_channel", 1)
+    audio = audio[[1 - user_channel, user_channel]]
     output_wav.parent.mkdir(parents=True, exist_ok=True)
     sphn.write_wav(str(output_wav), np.ascontiguousarray(audio), 24_000)
     return output_wav

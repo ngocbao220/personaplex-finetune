@@ -128,9 +128,37 @@ tensorboard --logdir runs/moshi-code-style --port 6006
 
 `runs/moshi-code-style` là thư mục log/checkpoint; thay bằng `train.output_dir` trong config nếu dùng đường dẫn khác.
 
-Mỗi lần free-running validation sẽ lưu audio agent do model sinh tại
-`<run_dir>/free_running_audio/baseline/sample_000.wav` và
-`<run_dir>/free_running_audio/step_XXXXXX/sample_000.wav`. Hội thoại stereo gốc của
-đúng cửa sổ đó nằm cạnh file sinh với tên `sample_000_original.wav`, giữ nguyên
-LEFT=agent và RIGHT=user. Các trường `audio_path` và `original_audio_path` trong
-`free_running_metrics.jsonl` liên kết mỗi transcript/CER/WER với hai WAV tương ứng.
+Mỗi lần free-running validation lưu kết quả theo cấu trúc:
+
+```text
+<run_dir>/
+├── checkpoints/
+├── ranks/
+├── free_running_metrics.jsonl
+└── free-running/
+    ├── free-running-report.json
+    └── step_XXXXXX/
+        └── <sample_id>/
+            ├── dialogue_original.wav
+            ├── dialogue_base.wav
+            ├── dialogue_step.wav
+            └── manifest.json
+```
+
+Ba WAV đều stereo 24 kHz: LEFT=agent, RIGHT=user. File `dialogue_original.wav`
+là cửa sổ hội thoại gốc; hai file còn lại ghép agent do model sinh với user gốc.
+Giữ nguyên độ dài và timeline user; phần agent được thêm silence/cắt để khớp
+độ dài nguồn, kể cả các frame đầu chưa có output từ generator.
+
+`step_000000` chạy base trước khi inject LoRA hoặc nạp checkpoint resume.
+Các step sau tái sử dụng `dialogue_base.wav` từ step 0, không nạp thêm model 7B.
+Tại step 0, `dialogue_step.wav` bằng kết quả base. Cửa sổ, seed, text mode và
+generation settings phải khớp baseline để so sánh hợp lệ.
+
+`manifest.json` chứa transcript thô của model (`transcript`/`hypothesis`),
+`reference` chuẩn hóa theo `vietnamese_text_mode`, `raw_reference`, CER/WER,
+cửa sổ, seed, generation settings và tên các WAV. Transcript là text tokens
+do model sinh, không phải kết quả ASR của WAV. `free-running-report.json`
+tổng hợp các lần eval hoàn tất, baseline CER và best step cải thiện baseline
+(không chấp nhận transcript rỗng). `free_running_metrics.jsonl` ở gốc run
+vẫn được duy trì cho công cụ tổng hợp cũ; các trường đường dẫn trỏ tới layout mới.

@@ -158,7 +158,7 @@ class InferenceStreamingTest(unittest.TestCase):
             write_wav=lambda path, _audio, _sample_rate: Path(path).write_bytes(b"wav"),
         )
         fake_lm = SimpleNamespace(LMGen=_Generator)
-        config = SimpleNamespace(model_root="model", personaplex_source="source", device="cpu", qlora=False, quant_type="nf4")
+        config = SimpleNamespace(model_root="model", personaplex_source="source", device="cpu", qlora=False, quant_type="nf4", vietnamese_text_mode="diacritics")
         sample = SimpleNamespace(
             voice_prompt_wav=Path("voice.wav"), text_prompt="Helpful", conversation_wav=Path("conversation.wav"),
             user_channel=1, window_start_sec=0.0, window_end_sec=0.16,
@@ -269,13 +269,88 @@ class InferenceStreamingTest(unittest.TestCase):
             self.assertEqual(output_wav.read_bytes(), b"wav")
             self.assertEqual(mimi.decode_calls, 2)
 
+    def test_free_running_stereo_preserves_user_timeline_and_restores_mode(self):
+        for user_channel in (0, 1):
+            for source_length in (3000, 5000):
+                for training in (False, True):
+                    with self.subTest(channel=user_channel, length=source_length, training=training):
+                        model = torch.nn.Linear(1, 1).train(training)
+                        mimi = _Mimi()
+                        runtime = SimpleNamespace(
+                            model=model,
+                            codec=SimpleNamespace(
+                                mimi=mimi, device="cpu", sample_rate=24000, frame_rate=12.5,
+                                encode_conversation=lambda *_args: ((1, 2),) * 8,
+                            ),
+                            tokenizer=SimpleNamespace(
+                                padding_id=3, encode=lambda _text: [1],
+                                _processor=SimpleNamespace(decode_ids=lambda ids: str(ids)),
+                            ),
+                        )
+                        sample = SimpleNamespace(
+                            sample_id="stereo", voice_prompt_wav=Path("voice.wav"), text_prompt="Helpful",
+                            conversation_wav=Path("conversation.wav"), user_channel=user_channel,
+                            window_start_sec=1.0, window_end_sec=4.0,
+                            audio=SimpleNamespace(duration_sec=3.0),
+                        )
+                        source = np.stack([
+                            np.linspace(0.1, 0.2, source_length, dtype=np.float32),
+                            np.linspace(0.3, 0.4, source_length, dtype=np.float32),
+                        ])
+                        with tempfile.TemporaryDirectory() as directory, \
+                             patch.dict(sys.modules, {"sphn": SimpleNamespace(write_wav=lambda *_args: None)}), \
+                             patch.object(sys.modules["sphn"], "write_wav") as write_wav, \
+                             patch.object(importlib, "import_module", return_value=SimpleNamespace(LMGen=_Generator)), \
+                             patch.object(_Generator, "step", side_effect=[None, _GeneratedTokens()]), \
+                             patch.object(mimi, "decode", return_value=torch.full((1, 1, 1920), 0.75)), \
+                             patch.object(inference, "read_stereo_window", return_value=source) as read_window:
+                            text = inference.generate_text_with_runtime(
+                                runtime, sample, output_wav=Path(directory) / "stereo.wav", output_stereo=True,
+                            )
+                        self.assertEqual(text, "[7]")
+                        self.assertEqual(model.training, training)
+                        read_window.assert_called_once_with(Path("conversation.wav"), 1.0, 3.0, 24000, "stereo")
+                        _, audio, rate = write_wav.call_args.args
+                        self.assertEqual(rate, 24000)
+                        self.assertEqual(audio.shape, (2, source_length))
+                        np.testing.assert_array_equal(audio[1], source[user_channel])
+                        expected = np.zeros(source_length, dtype=np.float32)
+                        expected[1920:min(3840, source_length)] = 0.75
+                        np.testing.assert_array_equal(audio[0], expected)
+
+    def test_free_running_stereo_restores_training_after_write_failure(self):
+        model = torch.nn.Linear(1, 1).train()
+        runtime = SimpleNamespace(
+            model=model,
+            codec=SimpleNamespace(
+                mimi=_Mimi(), device="cpu", sample_rate=24000, frame_rate=12.5,
+                encode_conversation=lambda *_args: ((1, 2),) * 8,
+            ),
+            tokenizer=SimpleNamespace(padding_id=3, encode=lambda _text: [1]),
+        )
+        sample = SimpleNamespace(
+            sample_id="stereo", voice_prompt_wav=Path("voice.wav"), text_prompt="Helpful",
+            conversation_wav=Path("conversation.wav"), user_channel=1,
+            window_start_sec=0.0, window_end_sec=1.0, audio=SimpleNamespace(duration_sec=1.0),
+        )
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(sys.modules, {"sphn": SimpleNamespace(write_wav=lambda *_args: None)}), \
+             patch.object(sys.modules["sphn"], "write_wav", side_effect=OSError("write failed")), \
+             patch.object(importlib, "import_module", return_value=SimpleNamespace(LMGen=_Generator)), \
+             patch.object(inference, "read_stereo_window", return_value=np.zeros((2, 5000))):
+            with self.assertRaisesRegex(OSError, "write failed"):
+                inference.generate_text_with_runtime(
+                    runtime, sample, output_wav=Path(directory) / "stereo.wav", output_stereo=True,
+                )
+        self.assertTrue(model.training)
+
     def test_free_running_original_export_preserves_stereo_source_window(self):
         sample = SimpleNamespace(
             sample_id="original-1", conversation_wav=Path("conversation.wav"),
             window_start_sec=1.25, window_end_sec=3.5,
             audio=SimpleNamespace(duration_sec=3.0),
         )
-        stereo = np.zeros((2, 42), dtype=np.float32)
+        stereo = np.stack([np.full(42, 0.25, dtype=np.float32), np.full(42, 0.5, dtype=np.float32)])
         written = {}
         fake_sphn = types.SimpleNamespace(
             write_wav=lambda path, audio, rate: written.update(
@@ -288,9 +363,15 @@ class InferenceStreamingTest(unittest.TestCase):
              patch.object(inference, "read_stereo_window", return_value=stereo) as read_window:
             output_wav = Path(directory) / "sample_000_original.wav"
             result = inference.export_original_audio_window(sample, output_wav)
+            sample.user_channel = 0
+            inference.export_original_audio_window(sample, output_wav)
+            np.testing.assert_array_equal(written["audio"], stereo[[1, 0]])
+            sample.user_channel = 1
+            inference.export_original_audio_window(sample, output_wav)
 
         self.assertEqual(result, output_wav)
-        read_window.assert_called_once_with(Path("conversation.wav"), 1.25, 3.0, 24_000, "original-1")
+        self.assertEqual(read_window.call_count, 3)
+        read_window.assert_called_with(Path("conversation.wav"), 1.25, 3.0, 24_000, "original-1")
         self.assertEqual(written["path"], output_wav)
         self.assertEqual(written["rate"], 24_000)
         np.testing.assert_array_equal(written["audio"], stereo)
@@ -474,7 +555,7 @@ class InferenceOutputWarningTest(unittest.TestCase):
                  patch.object(inference, "_export_context"), \
                  patch.object(inference, "generate") as generate:
                 inference.smoke(
-                    SimpleNamespace(model_root=Path("model")), None, Path("adapter"), root / "output",
+                    SimpleNamespace(model_root=Path("model"), vietnamese_text_mode="diacritics"), None, Path("adapter"), root / "output",
                     input_file=input_file, voice_prompt_wav=voice_prompt, text_prompt="Trò chuyện tự nhiên",
                 )
 
@@ -496,7 +577,7 @@ class InferenceOutputWarningTest(unittest.TestCase):
             window_end_sec=0.16,
             words=(),
         )
-        config = SimpleNamespace(model_root=Path("model"))
+        config = SimpleNamespace(model_root=Path("model"), vietnamese_text_mode="diacritics")
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
             with patch.object(inference, "_export_context"), \
@@ -704,7 +785,7 @@ class SmokeGenerationReportTest(unittest.TestCase):
             window_end_sec=0.1,
             words=(),
         )
-        config = SimpleNamespace(model_root=Path("model"), seed=1234)
+        config = SimpleNamespace(model_root=Path("model"), seed=1234, vietnamese_text_mode="diacritics")
         settings = inference.GenerationSettings(use_sampling=False, audio_silence_frame_cnt=2)
         fake_sphn = types.SimpleNamespace(
             read=lambda _path: (_ for _ in ()).throw(AssertionError("generate is patched, nothing should be read"))
@@ -755,7 +836,7 @@ class SmokeGenerationReportTest(unittest.TestCase):
         fake_sphn = types.SimpleNamespace(
             read=lambda _path: (_ for _ in ()).throw(AssertionError("missing audio outputs should not be read"))
         )
-        config = SimpleNamespace(model_root=Path("model"), seed=42)
+        config = SimpleNamespace(model_root=Path("model"), seed=42, vietnamese_text_mode="diacritics")
 
         def export_context(_sample, output_dir):
             (output_dir / "agent_reference.txt").write_text("Xin chào", encoding="utf-8")

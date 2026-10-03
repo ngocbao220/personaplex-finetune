@@ -413,6 +413,7 @@ class TrainTest(unittest.TestCase):
         )
 
         def generate(_runtime, _window, *, output_wav, **_kwargs):
+            self.assertTrue(_kwargs["output_stereo"])
             output_wav.parent.mkdir(parents=True, exist_ok=True)
             output_wav.write_bytes(b"wav")
             return "Xin chào."
@@ -426,15 +427,46 @@ class TrainTest(unittest.TestCase):
              patch("personaplex_finetuning.train.generate_text_with_runtime", side_effect=generate), \
              patch("personaplex_finetuning.train.export_original_audio_window", side_effect=export_original):
             metrics = evaluate_free_running(
-                object(), [sample], config, audio_output_dir=Path(directory) / "step_000100",
+                object(), [sample], config, audio_output_dir=Path(directory) / "step_000000",
             )
 
             audio_path = Path(metrics["samples"][0]["audio_path"])
             original_audio_path = Path(metrics["samples"][0]["original_audio_path"])
-            self.assertEqual(audio_path.name, "sample_000.wav")
+            self.assertEqual(audio_path.name, "dialogue_step.wav")
+            self.assertEqual(audio_path.parent.name, sample.sample_id)
             self.assertEqual(audio_path.read_bytes(), b"wav")
-            self.assertEqual(original_audio_path.name, "sample_000_original.wav")
+            self.assertEqual(original_audio_path.name, "dialogue_original.wav")
             self.assertEqual(original_audio_path.read_bytes(), b"original")
+            self.assertEqual((audio_path.parent / "dialogue_base.wav").read_bytes(), b"wav")
+            manifest = json.loads((audio_path.parent / "manifest.json").read_text())
+            self.assertEqual(manifest["transcript"], "Xin chào.")
+            self.assertEqual(manifest["reference"], "Xin chào.")
+            baseline_dir = audio_path.parent.parent
+            for mode in ("diacritics", "no_diacritics", "telex"):
+                from personaplex_finetuning.text_normalization import normalize_vietnamese_text
+                config.vietnamese_text_mode = mode
+                # Create a compatible baseline for each representation.
+                evaluate_free_running(object(), [sample], config, audio_output_dir=baseline_dir)
+                current = evaluate_free_running(
+                    object(), [sample], config, audio_output_dir=Path(directory) / "step_000100",
+                    step=100, baseline_dir=baseline_dir,
+                )
+                manifest_path = Path(current["samples"][0]["manifest_path"])
+                manifest = json.loads(manifest_path.read_text())
+                self.assertEqual(manifest["reference"], normalize_vietnamese_text("Xin chào.", mode))
+                self.assertEqual(manifest["raw_reference"], "Xin chào.")
+                self.assertEqual(manifest["vietnamese_text_mode"], mode)
+                self.assertEqual(manifest["step"], 100)
+                self.assertEqual((manifest_path.parent / "dialogue_base.wav").read_bytes(), b"wav")
+            report = json.loads((Path(directory) / "free-running-report.json").read_text())
+            self.assertEqual([row["step"] for row in report["evaluations"]], [0, 100])
+            self.assertIsNone(report["best_step"])
+            config.seed += 1
+            with self.assertRaisesRegex(ValueError, "comparison mismatch.*seed"):
+                evaluate_free_running(
+                    object(), [sample], config, audio_output_dir=Path(directory) / "step_000200",
+                    step=200, baseline_dir=baseline_dir,
+                )
 
     def test_free_running_metrics_log_reference_in_configured_text_mode(self) -> None:
         from personaplex_finetuning.data import AudioInfo, PreparedSample, Word

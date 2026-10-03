@@ -1240,9 +1240,13 @@ def evenly_spaced_validation_samples(samples: list, limit: int) -> list:
 
 def evaluate_free_running(
     runtime, samples: list, config: Config, audio_output_dir: Path | None = None,
+    *, step: int = 0, baseline_dir: Path | None = None,
 ) -> dict:
-    """Score autoregressive text and optionally export generated agent audio."""
+    """Score autoregressive text and export per-sample stereo comparisons."""
+    import shutil
+
     evaluated = []
+    manifests = {}
     unique_conversations = []
     seen_groups = set()
     for sample in samples:
@@ -1278,13 +1282,15 @@ def evaluate_free_running(
         )
         if not reference.strip():
             continue
-        audio_path = (
-            audio_output_dir / f"sample_{len(evaluated):03d}.wav"
-            if audio_output_dir is not None else None
-        )
+        if audio_output_dir is not None and (
+            sample.sample_id in {"", ".", ".."}
+            or "/" in sample.sample_id or "\\" in sample.sample_id
+        ):
+            raise ValueError(f"unsafe free-running sample_id: {sample.sample_id!r}")
+        sample_dir = audio_output_dir / sample.sample_id if audio_output_dir is not None else None
+        audio_path = sample_dir / "dialogue_step.wav" if sample_dir is not None else None
         original_audio_path = (
-            audio_output_dir / f"sample_{len(evaluated):03d}_original.wav"
-            if audio_output_dir is not None else None
+            sample_dir / "dialogue_original.wav" if sample_dir is not None else None
         )
         generation_kwargs = {
             "generation": getattr(config, "generation_settings", GenerationSettings()),
@@ -1292,6 +1298,7 @@ def evaluate_free_running(
         }
         if audio_path is not None:
             generation_kwargs["output_wav"] = audio_path
+            generation_kwargs["output_stereo"] = True
         hypothesis = generate_text_with_runtime(runtime, window, **generation_kwargs)
         if audio_path is not None and not audio_path.is_file():
             raise RuntimeError(f"free-running validation did not write generated audio: {audio_path}")
@@ -1307,6 +1314,48 @@ def evaluate_free_running(
         )
         if metrics is not None:
             metrics_reference = normalize_vietnamese_text(reference, text_mode)
+            if sample_dir is not None:
+                base_path = sample_dir / "dialogue_base.wav"
+                if baseline_dir is None:
+                    if step != 0:
+                        raise ValueError("nonzero free-running step requires a base-model baseline")
+                    shutil.copyfile(audio_path, base_path)
+                else:
+                    base_sample_dir = baseline_dir / sample.sample_id
+                    base_manifest = json.loads((base_sample_dir / "manifest.json").read_text(encoding="utf-8"))
+                    for key, value in {
+                        "window_start_sec": window.window_start_sec,
+                        "window_end_sec": window.window_end_sec,
+                        "vietnamese_text_mode": text_mode,
+                        "seed": generation_kwargs["seed"],
+                        "generation": generation_kwargs["generation"].as_dict(),
+                    }.items():
+                        if base_manifest[key] != value:
+                            raise ValueError(f"base-model comparison mismatch for {sample.sample_id}: {key}")
+                    shutil.copyfile(base_sample_dir / "dialogue_base.wav", base_path)
+                manifest = {
+                    "sample_id": sample.sample_id, "step": step,
+                    "vietnamese_text_mode": text_mode,
+                    "hypothesis": hypothesis, "transcript": hypothesis,
+                    "reference": metrics_reference, "raw_reference": reference,
+                    "cer": metrics["cer"], "wer": metrics["wer"],
+                    "window_start_sec": window.window_start_sec,
+                    "window_end_sec": window.window_end_sec,
+                    "source_duration_sec": sample.audio.duration_sec,
+                    "sample_rate": 24000, "channels": {"left": "agent", "right": "user"},
+                    "seed": generation_kwargs["seed"],
+                    "generation": generation_kwargs["generation"].as_dict(),
+                    "audio_files": {"original": "dialogue_original.wav",
+                                    "base": "dialogue_base.wav", "current_step": "dialogue_step.wav"},
+                }
+                (sample_dir / "manifest.json").write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+                )
+                manifests[sample.sample_id] = {
+                    "base_audio_path": str(base_path.resolve()),
+                    "manifest_path": str((sample_dir / "manifest.json").resolve()),
+                    "vietnamese_text_mode": text_mode, "raw_reference": reference,
+                }
             evaluated.append((metrics, sample.sample_id, metrics_reference, hypothesis,
                               window.window_start_sec, window.window_end_sec,
                               audio_path, original_audio_path))
@@ -1315,13 +1364,14 @@ def evaluate_free_running(
     if not evaluated:
         raise RuntimeError("free-running validation found no samples with agent text references")
     empty_hypotheses = sum(not hypothesis.strip() for _, _, _, hypothesis, _, _, _, _ in evaluated)
-    return {
+    result = {
         "val/generation_cer": sum(float(item[0]["cer"]) for item in evaluated) / len(evaluated),
         "val/generation_wer": sum(float(item[0]["wer"]) for item in evaluated) / len(evaluated),
         "val/generation_samples": len(evaluated),
         "val/generation_empty_samples": empty_hypotheses,
         "samples": [
             {"sample_id": sample_id, "reference": reference, "hypothesis": hypothesis,
+             **manifests.get(sample_id, {}),
              "cer": metrics["cer"], "wer": metrics["wer"],
              "audio_path": str(audio_path.resolve()) if audio_path is not None else None,
              "original_audio_path": (
@@ -1338,6 +1388,28 @@ def evaluate_free_running(
             ) in evaluated
         ],
     }
+    if audio_output_dir is not None:
+        update_free_running_report(audio_output_dir.parent, step, result, text_mode)
+    return result
+
+
+def update_free_running_report(output_dir: Path, step: int, metrics: dict, text_mode: str) -> None:
+    """Atomically publish completed evaluations; retain the JSONL log separately."""
+    report_path = output_dir / "free-running-report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {"evaluations": []}
+    rows = [row for row in report["evaluations"] if row["step"] != step]
+    rows.append({"step": step, "val/generation_baseline": step == 0, **metrics})
+    rows.sort(key=lambda row: row["step"])
+    baseline = next((row["val/generation_cer"] for row in rows if row["step"] == 0), None)
+    eligible = [row for row in rows if row["step"] > 0 and baseline is not None
+                and generation_checkpoint_score(row, baseline_cer=baseline) < float("inf")]
+    best = min(eligible, key=lambda row: row["val/generation_cer"], default=None)
+    report.update(vietnamese_text_mode=text_mode, evaluations=rows, baseline_cer=baseline,
+                  best_step=best["step"] if best else None,
+                  best_cer=best["val/generation_cer"] if best else None)
+    temporary = report_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(report_path)
 
 
 def verify_reloaded_adapter(config: Config, sample, adapter: Path, runtime) -> float:
@@ -1816,6 +1888,25 @@ def run(
         if main_process:
             print("[Stage-Wise Training] Active Stage: JOINT (Both Temporal & Depth active).")
 
+    # Capture the true base before LoRA injection or resumed full weights.
+    if val_samples and not config.no_eval and config.free_running_eval_every_steps > 0:
+        barrier()
+        baseline_result = [None]
+        if main_process:
+            try:
+                baseline_result[0] = evaluate_free_running(
+                    runtime, val_samples, config,
+                    audio_output_dir=run_dir / "free-running" / "step_000000",
+                )
+            except Exception as exc:
+                traceback.print_exc()
+                baseline_result[0] = {"error": f"{type(exc).__name__}: {exc}"}
+        if distributed:
+            torch.distributed.broadcast_object_list(baseline_result, src=0, device=device)
+        if isinstance(baseline_result[0], dict) and "error" in baseline_result[0]:
+            raise RuntimeError(f"base-model free-running validation failed: {baseline_result[0]['error']}")
+        barrier()
+
     targets = configure_trainable_parameters(runtime.model, config, lora_prefixes)
 
     # Optional gradient checkpointing
@@ -1961,20 +2052,6 @@ def run(
         # Establish the pre-training generation baseline with the same samples,
         # seed, and LMGen settings used for later checkpoint selection.
         barrier()
-        baseline_result = [None]
-        if main_process:
-            try:
-                baseline_result[0] = evaluate_free_running(
-                    runtime, val_samples, config,
-                    audio_output_dir=run_dir / "free_running_audio" / "baseline",
-                )
-            except Exception as exc:
-                traceback.print_exc()
-                baseline_result[0] = {"error": f"{type(exc).__name__}: {exc}"}
-        if distributed:
-            torch.distributed.broadcast_object_list(baseline_result, src=0, device=device)
-        if isinstance(baseline_result[0], dict) and "error" in baseline_result[0]:
-            raise RuntimeError(f"base-model free-running validation failed: {baseline_result[0]['error']}")
         baseline_generation_cer = float(baseline_result[0]["val/generation_cer"])
         if main_process and run_dir is not None:
             baseline_row = {
@@ -2322,8 +2399,10 @@ def run(
                             generation_result[0] = evaluate_free_running(
                                 runtime, val_samples, config,
                                 audio_output_dir=(
-                                    run_dir / "free_running_audio" / f"step_{optimizer_step:06d}"
+                                    run_dir / "free-running" / f"step_{optimizer_step:06d}"
                                 ),
+                                step=optimizer_step,
+                                baseline_dir=run_dir / "free-running" / "step_000000",
                             )
                         except Exception as exc:
                             traceback.print_exc()
