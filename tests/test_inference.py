@@ -100,7 +100,7 @@ class _Generator:
 
 
 class InferenceStreamingTest(unittest.TestCase):
-    def test_cuda_mimi_decode_disables_lm_autocast_and_cudnn(self):
+    def test_cuda_mimi_decode_preserves_autocast_and_disables_cudnn(self):
         events = []
 
         @contextlib.contextmanager
@@ -117,13 +117,13 @@ class InferenceStreamingTest(unittest.TestCase):
             events.append(("decode", tokens))
             return "pcm"
 
-        with patch.object(torch, "autocast", side_effect=precision_context), \
+        with patch.object(torch, "autocast", side_effect=precision_context) as autocast, \
              patch.object(torch.backends.cudnn, "flags", side_effect=convolution_context):
             result = inference.decode_generated_audio(SimpleNamespace(decode=decode), "tokens", "cuda:0")
 
         self.assertEqual(result, "pcm")
+        autocast.assert_not_called()
         self.assertEqual(events, [
-            ("autocast", {"device_type": "cuda", "enabled": False}),
             ("cudnn", {"enabled": False}),
             ("decode", "tokens"),
         ])

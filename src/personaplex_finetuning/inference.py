@@ -49,14 +49,16 @@ def inference_autocast_context(device):
 
 
 def decode_generated_audio(mimi, tokens, device):
-    """Decode FP32 Mimi audio outside LM BF16 autocast and cuDNN engines."""
+    """Decode with the streaming cache's precision, bypassing cuDNN engines."""
     import torch
 
     if torch.device(device).type == "cuda":
         # Streaming ConvTranspose1d can have no supported cuDNN engine for
         # short frames. Use native CUDA convolution from the first frame;
         # retrying a failed decode could advance Mimi's streaming state twice.
-        with torch.autocast(device_type="cuda", enabled=False), torch.backends.cudnn.flags(enabled=False):
+        # Preserve the outer autocast: Mimi's KV cache was allocated in that
+        # dtype when streaming started. Changing precision here breaks index_copy_.
+        with torch.backends.cudnn.flags(enabled=False):
             return mimi.decode(tokens)
     return mimi.decode(tokens)
 
