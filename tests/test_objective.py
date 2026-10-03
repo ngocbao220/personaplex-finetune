@@ -30,7 +30,7 @@ class ObjectiveTest(unittest.TestCase):
 
         self.assertTrue(torch.isfinite(loss))
 
-    def test_both_dialogue_audio_streams_receive_semantic_and_nonsemantic_weights(self) -> None:
+    def test_default_weights_disable_user_audio_streams(self) -> None:
         mask = tuple(tuple(True for _ in range(3)) for _ in range(17))
         codes = (
             (3, 5, 3),
@@ -39,6 +39,22 @@ class ObjectiveTest(unittest.TestCase):
         )
 
         weights = stream_weights(codes, mask, text_padding_id=3)
+
+        self.assertEqual(weights[0], (0.3, 1.0, 0.3))
+        self.assertEqual(weights[1], (1.0, 1.0, 1.0))
+        self.assertEqual(weights[2], (0.02, 0.02, 0.02))
+        self.assertEqual(weights[9], (0.0, 0.0, 0.0))
+        self.assertEqual(weights[10], (0.0, 0.0, 0.0))
+
+    def test_enabling_user_loss_supervises_both_dialogue_audio_streams(self) -> None:
+        mask = tuple(tuple(True for _ in range(3)) for _ in range(17))
+        codes = (
+            (3, 5, 3),
+            *((10, 10, 10) for _ in range(8)),
+            *((20, 20, 20) for _ in range(8)),
+        )
+
+        weights = stream_weights(codes, mask, text_padding_id=3, user_loss=True)
 
         self.assertEqual(weights[0], (0.3, 1.0, 0.3))
         self.assertEqual(weights[1], (1.0, 1.0, 1.0))
@@ -70,6 +86,7 @@ class ObjectiveTest(unittest.TestCase):
             ((3, 4),) + tuple((8, 8) for _ in range(8)) + tuple((9, 9) for _ in range(8)),
             tuple((True, True) for _ in range(17)),
             text_padding_id=3, first_codebook_weight_multiplier=2.5, text_padding_weight=0.4,
+            user_loss=True,
         )
         self.assertEqual(weights[0], (0.4, 1.0))
         self.assertEqual(weights[1], (2.5, 2.5))
@@ -82,7 +99,7 @@ class ObjectiveTest(unittest.TestCase):
         codes = torch.full((1, 17, 2), 4, dtype=torch.long)
         codes[:, 0, 0] = 3
         mask = torch.ones_like(codes, dtype=torch.bool)
-        weights = stream_weights_torch(codes, mask, 3, 0.02, 0.4, 2.5)
+        weights = stream_weights_torch(codes, mask, 3, 0.02, 0.4, 2.5, user_loss=True)
         self.assertTrue(torch.allclose(weights[0, 0], torch.tensor([0.4, 1.0])))
         self.assertTrue(torch.allclose(weights[0, 1], torch.tensor([2.5, 2.5])))
         self.assertTrue(torch.allclose(weights[0, 9], torch.tensor([2.5, 2.5])))

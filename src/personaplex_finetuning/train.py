@@ -819,7 +819,7 @@ def _add_loss_compatibility_aliases(components):
 def loss_components(
     model_output, codes, example, text_padding_id, torch_module,
     first_codebook_weight_multiplier=1.0, text_padding_weight=0.3,
-    *, user_loss=True, distributed=False,
+    *, user_loss=False, distributed=False,
 ):
     """Compute per-stream losses using GPU-native vectorized weights."""
     if isinstance(example, dict):
@@ -2609,6 +2609,8 @@ def main() -> int:
     parser.add_argument("--smoke", action="store_true", help="Run 1-step smoke test with verification")
     parser.add_argument("--qlora", action="store_true", default=None, help="Enable 4-bit QLoRA")
     parser.add_argument("--no-qlora", dest="qlora", action="store_false", help="Disable QLoRA")
+    parser.add_argument("--user-loss", action="store_true", default=None, help="Supervise user audio stream codebooks (ablation)")
+    parser.add_argument("--no-user-loss", dest="user_loss", action="store_false", help="Disable user audio supervision")
     parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint directory to resume from")
     parser.add_argument("--force-filter", action="store_true", help="Revalidate prepared samples and rebuild chunk-filter caches")
 
@@ -2627,6 +2629,8 @@ def main() -> int:
     config = load_config(config_path, overrides=overrides)
     if args.qlora is not None:
         config = config.replace(qlora=args.qlora)
+    if args.user_loss is not None:
+        config = config.replace(user_loss=args.user_loss)
 
     run(
         config,

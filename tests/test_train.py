@@ -156,11 +156,11 @@ class TrainTest(unittest.TestCase):
                 AudioInfo(24000, 2, 1.0), 0.0, 1.0,
             )
             original = training_contract(config, [sample])
-            without_user_loss = training_contract(config.replace(user_loss=False), [sample])
+            with_user_loss = training_contract(config.replace(user_loss=True), [sample])
             changed = training_contract(config, [sample.with_window(0.0, 1.0, "Speak English.")])
             self.assertNotEqual(original["prepared_sources_sha256"], changed["prepared_sources_sha256"])
-            self.assertTrue(original["user_loss"])
-            self.assertFalse(without_user_loss["user_loss"])
+            self.assertFalse(original["user_loss"])
+            self.assertTrue(with_user_loss["user_loss"])
 
             kept = training_contract(config, [sample], [sample.with_window(0.0, 1.0)])
             rejected = training_contract(config, [sample], [])

@@ -181,7 +181,7 @@ class GoldenSampleTest(unittest.TestCase):
             mask = self.torch.tensor(delayed.loss_mask, dtype=self.torch.bool)
             labels = self.torch.nn.functional.pad(labels, (0, 2), value=-1)
             mask = self.torch.nn.functional.pad(mask, (0, 2), value=False)
-            weights = stream_weights_torch(labels, mask, (tokenizer.padding_id, tokenizer.end_padding_id))
+            weights = stream_weights_torch(labels, mask, (tokenizer.padding_id, tokenizer.end_padding_id), user_loss=True)
             self.assertTrue(self.torch.all(weights[:, 0] == 0).item())
             self.assertTrue(self.torch.all(weights[:, -2:] == 0).item())
             for stream, delay in enumerate(delays):
@@ -214,7 +214,7 @@ class GoldenSampleTest(unittest.TestCase):
             self.assertEqual(float(weights[1, 1 + delays[1] + base.prompt_frames]), 1.0)
             self.assertAlmostEqual(float(weights[2, 1 + delays[2] + base.prompt_frames]), 0.02, places=7)
 
-            payload = build_debug_payload(sample, delayed, tokenizer, mimi.frame_rate, delays)
+            payload = build_debug_payload(sample, delayed, tokenizer, mimi.frame_rate, delays, user_loss=True)
             for stream_index, stream_dump in enumerate(payload["streams"]):
                 np.testing.assert_array_equal(
                     stream_dump["mask"], delayed.loss_mask[stream_index]
@@ -228,6 +228,11 @@ class GoldenSampleTest(unittest.TestCase):
             )
             self.assertEqual(agent_only_payload["channel_map"]["right"], "user conditioning")
             for stream_dump in agent_only_payload["streams"][9:17]:
+                self.assertTrue(all(weight == 0.0 for weight in stream_dump["weights"]))
+            # Also test default build_debug_payload uses user_loss=False
+            default_payload = build_debug_payload(sample, delayed, tokenizer, mimi.frame_rate, delays)
+            self.assertEqual(default_payload["channel_map"]["right"], "user conditioning")
+            for stream_dump in default_payload["streams"][9:17]:
                 self.assertTrue(all(weight == 0.0 for weight in stream_dump["weights"]))
             with self.subTest(debug_files=True):
                 json_path, text_path = write_debug_artifacts(root / "debug", payload)

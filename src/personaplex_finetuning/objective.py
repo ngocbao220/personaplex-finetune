@@ -31,7 +31,7 @@ def stream_weights(
     nonsemantic_audio_weight: float = 0.02,
     text_padding_weight: float = 0.3,
     first_codebook_weight_multiplier: float = 1.0,
-    user_loss: bool = True,
+    user_loss: bool = False,
 ) -> tuple[tuple[float, ...], ...]:
     """Return explicit per-token weights for [text, agent audio x8, user audio x8].
 
@@ -85,7 +85,7 @@ def stream_weights_torch(
     nonsemantic_audio_weight: float = 0.02,
     text_padding_weight: float = 0.3,
     first_codebook_weight_multiplier: float = 1.0,
-    user_loss: bool = True,
+    user_loss: bool = False,
 ) -> "torch.Tensor":
     """GPU-native weight computation for use inside the training loop.
 

@@ -69,7 +69,7 @@ class Config:
     pct_start: float = 0.05
     first_codebook_weight_multiplier: float = 1.0
     text_padding_weight: float = 0.3
-    user_loss: bool = True
+    user_loss: bool = False
     log_freq: int = 1
     no_eval: bool = False
     ckpt_freq: int = 50
@@ -166,6 +166,8 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
                     hydra_overrides.append(f"++batch_size={o.split('=', 1)[1]}")
                 elif o.startswith("output_dir="):
                     hydra_overrides.append(f"train.{o}")
+                elif o.startswith("user_loss="):
+                    hydra_overrides.append(f"++{o}")
                 elif o.startswith("rank=") or o.startswith("alpha=") or o.startswith("qlora="):
                     hydra_overrides.append(f"lora.{o}")
                 else:
@@ -249,7 +251,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         raise ValueError("free_running_eval_window_seconds must be positive")
     first_codebook_weight_multiplier = float(raw.get("first_codebook_weight_multiplier", 1.0))
     text_padding_weight = float(raw.get("text_padding_weight", 0.3))
-    user_loss = raw.get("user_loss", True)
+    user_loss = raw.get("user_loss", False)
     if not isinstance(user_loss, bool):
         raise ValueError("user_loss must be a boolean")
     if first_codebook_weight_multiplier < 0:

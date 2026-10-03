@@ -59,7 +59,7 @@ def build_debug_payload(
     sample, example: TrainingExample, tokenizer, frame_rate: float, delays,
     *, first_codebook_weight_multiplier: float = 1.0,
     text_padding_weight: float = 0.3,
-    user_loss: bool = True,
+    user_loss: bool = False,
 ):
     if len(delays) != 17:
         raise ValueError("debug export requires 17 stream delays")
@@ -276,7 +276,7 @@ def main() -> int:
         sample, example, runtime.tokenizer, runtime.codec.frame_rate, runtime.delays,
         first_codebook_weight_multiplier=getattr(config, "first_codebook_weight_multiplier", 1.0),
         text_padding_weight=getattr(config, "text_padding_weight", 0.3),
-        user_loss=getattr(config, "user_loss", True),
+        user_loss=getattr(config, "user_loss", False),
     )
     output_dir = args.output_dir or Path("outputs/inspect") / sample.sample_id
     json_path, text_path = write_debug_artifacts(output_dir, payload)

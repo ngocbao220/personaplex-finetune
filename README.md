@@ -118,7 +118,7 @@ torchrun --nproc-per-node 4 train.py --config configs/full-finetuning.yaml
 
 ### Trọng số loss
 
-`user_loss: true` giám sát cả 8 codebook audio của user; đặt `user_loss: false` để user audio chỉ làm input/context. Layout forward luôn giữ nguyên 17 streams. Text token thật có weight `1.0`, PAD/END_PAD là `0.3`; semantic codebook của mỗi bên là `1.0`, bảy acoustic codebook là `0.02`. Log tách riêng `loss/text_real`, `loss/agent_semantic`, `loss/agent_acoustic`, `loss/user_semantic` và `loss/user_acoustic`.
+Mặc định huấn luyện là `user_loss: false`: user audio chỉ đóng vai trò làm input context/conditioning và không bị tính loss/gradient. Khi cần chạy thử nghiệm ablation study để so sánh, bật lại bằng cờ `--user-loss` (CLI) hoặc override `user_loss=true` (Hydra). Layout forward luôn giữ nguyên 17 streams. Text token thật có weight `1.0`, PAD/END_PAD là `0.3`; semantic codebook của agent là `1.0`, bảy acoustic codebook là `0.02` (khi bật `user_loss: true`, user codebook cũng nhận trọng số tương ứng). Log tách riêng `loss/text_real`, `loss/agent_semantic`, `loss/agent_acoustic`, `loss/user_semantic` và `loss/user_acoustic`.
 
 ## Log huấn luyện
 
