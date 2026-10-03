@@ -191,8 +191,8 @@ class BatchContractTest(unittest.TestCase):
             [True, True, True, False, False],
         ])
         weights = stream_weights_torch(batch["labels"], batch["loss_mask"], 3)
-        self.assertAlmostEqual(float(weights[0, 0, 1]), 0.5)
-        self.assertAlmostEqual(float(weights[1, 0, 1]), 0.5)
+        self.assertAlmostEqual(float(weights[0, 0, 1]), 0.3)
+        self.assertAlmostEqual(float(weights[1, 0, 1]), 0.3)
         self.assertEqual(float(weights[1, 0, 3]), 0.0)
         self.assertEqual(float(weights[1, 1, 2]), 1.0)
         self.assertEqual(float(weights[1, 1, 3]), 0.0)
@@ -256,10 +256,57 @@ class BatchContractTest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(total, weighted_expected))
         self.assertTrue(torch.allclose(components["audio_semantic"] + components["audio_nonsemantic"], weighted_expected))
+        self.assertTrue(torch.allclose(
+            components["agent_semantic"] + components["agent_acoustic"]
+            + components["user_semantic"] + components["user_acoustic"],
+            weighted_expected,
+        ))
         self.assertTrue(torch.allclose(distributed_total, total))
+        self.assertTrue(torch.allclose(distributed_components["agent_semantic"], components["agent_semantic"]))
         self.assertTrue(torch.allclose(distributed_components["audio_nonsemantic"], components["audio_nonsemantic"]))
         self.assertGreater(float(stronger_semantic["audio_semantic"]), float(components["audio_semantic"]))
         self.assertLess(float(stronger_semantic["audio_nonsemantic"]), float(components["audio_nonsemantic"]))
+
+    def test_user_loss_false_removes_user_audio_loss_and_gradients(self):
+        labels = torch.ones((1, 17, 1), dtype=torch.long)
+        mask = torch.ones_like(labels, dtype=torch.bool)
+        audio_logits = torch.zeros((1, 16, 1, 4), requires_grad=True)
+        output = SimpleNamespace(
+            text_logits=torch.zeros((1, 1, 1, 4), requires_grad=True),
+            logits=audio_logits,
+            text_mask=torch.ones((1, 1, 1), dtype=torch.bool),
+            mask=torch.ones((1, 16, 1), dtype=torch.bool),
+        )
+
+        total, components = loss_components(
+            output, labels, {"labels": labels, "loss_mask": mask}, 3, torch,
+            user_loss=False,
+        )
+        total.backward()
+
+        self.assertEqual(float(components["user_semantic"]), 0.0)
+        self.assertEqual(float(components["user_acoustic"]), 0.0)
+        self.assertTrue(torch.equal(audio_logits.grad[:, 8:16], torch.zeros_like(audio_logits.grad[:, 8:16])))
+        self.assertTrue((audio_logits.grad[:, :8] != 0).any())
+
+    def test_text_real_is_diagnostic_and_not_added_to_total(self):
+        labels = torch.ones((1, 17, 1), dtype=torch.long)
+        mask = torch.ones_like(labels, dtype=torch.bool)
+        output = SimpleNamespace(
+            text_logits=torch.zeros((1, 1, 1, 4)),
+            logits=torch.zeros((1, 16, 1, 4)),
+            text_mask=torch.ones((1, 1, 1), dtype=torch.bool),
+            mask=torch.ones((1, 16, 1), dtype=torch.bool),
+        )
+
+        total, components = loss_components(output, labels, {"labels": labels, "loss_mask": mask}, 3, torch)
+
+        optimized = (
+            components["text"] + components["agent_semantic"] + components["agent_acoustic"]
+            + components["user_semantic"] + components["user_acoustic"]
+        )
+        self.assertTrue(torch.allclose(total, optimized))
+        self.assertTrue(torch.allclose(components["text_real"], components["text"]))
 
     @unittest.skipUnless(torch.backends.mps.is_available(), "MPS is required for FP16 backward regression")
     def test_all_audio_codebooks_backpropagate_on_mps_without_advanced_indexing(self):

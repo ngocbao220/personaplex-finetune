@@ -273,6 +273,7 @@ def training_contract(config: Config, train_conversations: list, train_chunks: l
         "pct_start": config.pct_start,
         "first_codebook_weight_multiplier": config.first_codebook_weight_multiplier,
         "text_padding_weight": config.text_padding_weight,
+        "user_loss": config.user_loss,
         "train_stage": config.train_stage,
         "qlora": config.qlora, "quant_type": config.quant_type if config.qlora else None,
         "gradient_checkpointing": config.gradient_checkpointing,
@@ -765,8 +766,13 @@ def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_
     for name, value in (
         ("loss/total", record["loss/total"]),
         ("loss/text", record["loss/text"]),
+        ("loss/text_real", record.get("loss/text_real", record["loss/text_nonpadding"])),
         ("loss/text_nonpadding", record["loss/text_nonpadding"]),
         ("loss/audio_total", record.get("loss/audio_total", 0.0)),
+        ("loss/agent_semantic", record.get("loss/agent_semantic", record["loss/audio_semantic"])),
+        ("loss/agent_acoustic", record.get("loss/agent_acoustic", record["loss/audio_nonsemantic"])),
+        ("loss/user_semantic", record.get("loss/user_semantic", 0.0)),
+        ("loss/user_acoustic", record.get("loss/user_acoustic", 0.0)),
         ("loss/audio_semantic", record["loss/audio_semantic"]),
         ("loss/audio_nonsemantic", record["loss/audio_nonsemantic"]),
         ("accuracy/text", record.get("accuracy/text", 0.0)),
@@ -790,7 +796,25 @@ def write_tensorboard_scalars(writer, record: dict[str, float | int], trainable_
         writer.add_scalar(name, value, step)
 
 
-def loss_components(model_output, codes, example, text_padding_id, torch_module, first_codebook_weight_multiplier=1.0, text_padding_weight=0.5, *, distributed=False):
+OPTIMIZED_LOSS_COMPONENTS = (
+    "text", "agent_semantic", "agent_acoustic", "user_semantic", "user_acoustic",
+)
+
+
+def _add_loss_compatibility_aliases(components):
+    if not all(name in components for name in OPTIMIZED_LOSS_COMPONENTS[1:]):
+        return components
+    components["audio_semantic"] = components["agent_semantic"] + components["user_semantic"]
+    components["audio_nonsemantic"] = components["agent_acoustic"] + components["user_acoustic"]
+    components["audio_total"] = components["audio_semantic"] + components["audio_nonsemantic"]
+    return components
+
+
+def loss_components(
+    model_output, codes, example, text_padding_id, torch_module,
+    first_codebook_weight_multiplier=1.0, text_padding_weight=0.3,
+    *, user_loss=True, distributed=False,
+):
     """Compute per-stream losses using GPU-native vectorized weights."""
     if isinstance(example, dict):
         labels_tensor = example["labels"]
@@ -802,6 +826,7 @@ def loss_components(model_output, codes, example, text_padding_id, torch_module,
         labels_tensor, mask_tensor, text_padding_id,
         first_codebook_weight_multiplier=first_codebook_weight_multiplier,
         text_padding_weight=text_padding_weight,
+        user_loss=user_loss,
     )
 
     text_target = labels_tensor[:, 0, :]
@@ -810,6 +835,16 @@ def loss_components(model_output, codes, example, text_padding_id, torch_module,
         model_output.text_logits.reshape(-1, model_output.text_logits.shape[-1]),
         text_target.reshape(-1),
         text_weight.reshape(-1),
+    )
+    text_real_weight = (
+        mask_tensor[:, 0].to(weights.dtype)
+        * model_output.text_mask[:, 0].to(weights.dtype)
+        * (~text_padding_mask_torch(text_target, text_padding_id)).to(weights.dtype)
+    )
+    text_real_stats = torch_weighted_cross_entropy_stats(
+        model_output.text_logits.reshape(-1, model_output.text_logits.shape[-1]),
+        text_target.reshape(-1),
+        text_real_weight.reshape(-1),
     )
 
     audio_target = labels_tensor[:, 1:17, :]
@@ -826,25 +861,35 @@ def loss_components(model_output, codes, example, text_padding_id, torch_module,
     user_semantic = audio_group_stats(8, 9)
     agent_nonsemantic = audio_group_stats(1, 8)
     user_nonsemantic = audio_group_stats(9, 16)
-    semantic_stats = tuple(left + right for left, right in zip(agent_semantic, user_semantic))
-    nonsemantic_stats = tuple(left + right for left, right in zip(agent_nonsemantic, user_nonsemantic))
-    audio_denominator = semantic_stats[1] + nonsemantic_stats[1]
+    audio_denominator = sum(
+        stats[1]
+        for stats in (agent_semantic, agent_nonsemantic, user_semantic, user_nonsemantic)
+    )
     audio_denominator = audio_denominator.clamp_min(1e-12)
+    audio_stats = {
+        "agent_semantic": (agent_semantic[0], audio_denominator),
+        "agent_acoustic": (agent_nonsemantic[0], audio_denominator),
+        "user_semantic": (user_semantic[0], audio_denominator),
+        "user_acoustic": (user_nonsemantic[0], audio_denominator),
+    }
     if distributed:
         # Each logged component is a contribution to the same weighted audio
         # mean. Sharing its denominator keeps 0.02 and first-codebook weights
         # effective after the cross-rank reduction.
         stats = {
             "text": text_stats,
-            "audio_semantic": (semantic_stats[0], audio_denominator),
-            "audio_nonsemantic": (nonsemantic_stats[0], audio_denominator),
+            "text_real": text_real_stats,
+            **audio_stats,
         }
         return None, stats
     text_loss = text_stats[0] / text_stats[1].clamp_min(1e-12)
-    semantic = semantic_stats[0] / audio_denominator
-    nonsemantic = nonsemantic_stats[0] / audio_denominator
-    components = {"text": text_loss, "audio_semantic": semantic, "audio_nonsemantic": nonsemantic}
-    return sum(components.values()), components
+    components = {
+        "text": text_loss,
+        "text_real": text_real_stats[0] / text_real_stats[1].clamp_min(1e-12),
+        **{name: numerator / denominator for name, (numerator, denominator) in audio_stats.items()},
+    }
+    total = sum(components[name] for name in OPTIMIZED_LOSS_COMPONENTS)
+    return total, _add_loss_compatibility_aliases(components)
 
 
 def reduce_distributed_loss(stats, all_reduce_sum, *, preserve_grad: bool = False, world_size: int = 1):
@@ -858,6 +903,7 @@ def reduce_distributed_loss(stats, all_reduce_sum, *, preserve_grad: bool = Fals
     global_values = all_reduce_sum(packed)
     components = {}
     total = None
+    split_objective = all(name in stats for name in OPTIMIZED_LOSS_COMPONENTS)
     for index, name in enumerate(names):
         numerator, denominator = stats[name]
         global_numerator = global_values[index * 2]
@@ -871,14 +917,19 @@ def reduce_distributed_loss(stats, all_reduce_sum, *, preserve_grad: bool = Fals
         else:
             loss = global_mean
         components[name] = loss
-        total = loss if total is None else total + loss
-    return components, total
+        if name in OPTIMIZED_LOSS_COMPONENTS or not split_objective:
+            total = loss if total is None else total + loss
+    return _add_loss_compatibility_aliases(components), total
 
 
 def one_step(config: Config, runtime, example, optimizer=None):
     codes = torch.tensor(example.input_codes, dtype=torch.long, device=config.device).unsqueeze(0)
     output = model_forward_train(runtime.model, codes)
-    total, components = loss_components(output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer), torch)
+    total, components = loss_components(
+        output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer), torch,
+        config.first_codebook_weight_multiplier, config.text_padding_weight,
+        user_loss=config.user_loss,
+    )
     if optimizer is not None:
         optimizer.zero_grad(set_to_none=True)
         total.backward()
@@ -1051,7 +1102,10 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
         return {}
     unwrapped = runtime.model
     unwrapped.eval()
-    totals = {"total": 0.0, "text": 0.0, "semantic": 0.0, "nonsemantic": 0.0}
+    loss_names = (
+        "total", "text", "agent_semantic", "agent_acoustic", "user_semantic", "user_acoustic",
+    )
+    totals = {name: 0.0 for name in loss_names}
     nonpadding_text_loss_sum = 0.0
     nonpadding_text_token_count = 0
     count = 0
@@ -1065,11 +1119,12 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
             total, comps = loss_components(
                 output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer), torch,
                 config.first_codebook_weight_multiplier, config.text_padding_weight,
+                user_loss=config.user_loss,
             )
             totals["total"] += float(total.detach())
             totals["text"] += float(comps["text"].detach())
-            totals["semantic"] += float(comps["audio_semantic"].detach())
-            totals["nonsemantic"] += float(comps["audio_nonsemantic"].detach())
+            for name in loss_names[2:]:
+                totals[name] += float(comps[name].detach())
             labels = torch.tensor(example.labels, dtype=torch.long, device=device).unsqueeze(0)
             loss_mask = torch.tensor(example.loss_mask, dtype=torch.bool, device=device).unsqueeze(0)
             text_loss_sum, text_token_count = text_target_token_loss_stats(
@@ -1079,36 +1134,42 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
             nonpadding_text_token_count += int(text_token_count)
             count += 1
     unwrapped.train()
-    reduced = torch.tensor([
-        totals["total"], totals["text"], totals["semantic"], totals["nonsemantic"], count,
-        nonpadding_text_loss_sum, nonpadding_text_token_count,
-    ], device=device)
+    reduced = torch.tensor(
+        [*(totals[name] for name in loss_names), count, nonpadding_text_loss_sum, nonpadding_text_token_count],
+        device=device,
+    )
     if world_size > 1:
         torch.distributed.all_reduce(reduced, op=torch.distributed.ReduceOp.SUM)
-    total_count = float(reduced[4].item())
+    count_index = len(loss_names)
+    total_count = float(reduced[count_index].item())
     if total_count == 0:
         raise RuntimeError("validation has no samples after rank partitioning")
-    text_token_count = float(reduced[6].item())
-    text_nonpadding_loss = float(reduced[5].item()) / text_token_count if text_token_count else float("inf")
-    audio_semantic_loss = float(reduced[2].item()) / total_count
-    audio_nonsemantic_loss = float(reduced[3].item()) / total_count
-    return {
-        "val/loss_total": float(reduced[0].item()) / total_count,
-        "val/loss_text": float(reduced[1].item()) / total_count,
-        "val/loss_text_nonpadding": text_nonpadding_loss,
+    text_token_count = float(reduced[count_index + 2].item())
+    text_real_loss = float(reduced[count_index + 1].item()) / text_token_count if text_token_count else float("inf")
+    averaged = {name: float(reduced[index].item()) / total_count for index, name in enumerate(loss_names)}
+    metrics = {
+        "val/loss_total": averaged["total"],
+        "val/loss_text": averaged["text"],
+        "val/loss_text_real": text_real_loss,
+        "val/loss_text_nonpadding": text_real_loss,
         "val/text_nonpadding_tokens": text_token_count,
-        "val/loss_audio_semantic": audio_semantic_loss,
-        "val/loss_audio_nonsemantic": audio_nonsemantic_loss,
-        "val/loss_selection": text_nonpadding_loss + audio_semantic_loss + audio_nonsemantic_loss,
+        **{f"val/loss_{name}": averaged[name] for name in loss_names[2:]},
     }
+    metrics["val/loss_audio_semantic"] = averaged["agent_semantic"] + averaged["user_semantic"]
+    metrics["val/loss_audio_nonsemantic"] = averaged["agent_acoustic"] + averaged["user_acoustic"]
+    metrics["val/loss_audio_total"] = metrics["val/loss_audio_semantic"] + metrics["val/loss_audio_nonsemantic"]
+    metrics["val/loss_selection"] = validation_selection_loss(metrics)
+    return metrics
 
 
 def validation_selection_loss(metrics: dict[str, float]) -> float:
-    """Choose checkpoints using valid text targets plus the two agent-audio losses."""
+    """Choose checkpoints using real text plus every enabled audio contribution."""
     keys = (
-        "val/loss_text_nonpadding",
-        "val/loss_audio_semantic",
-        "val/loss_audio_nonsemantic",
+        "val/loss_text_real",
+        "val/loss_agent_semantic",
+        "val/loss_agent_acoustic",
+        "val/loss_user_semantic",
+        "val/loss_user_acoustic",
     )
     if any(key not in metrics for key in keys):
         return float("inf")
@@ -1601,6 +1662,7 @@ def run(
             "pct_start": config.pct_start,
             "first_codebook_weight_multiplier": config.first_codebook_weight_multiplier,
             "text_padding_weight": config.text_padding_weight,
+            "user_loss": config.user_loss,
             "log_freq": config.log_freq,
             "no_eval": config.no_eval,
             "eval_on_train_samples": config.eval_on_train_samples,
@@ -1978,6 +2040,7 @@ def run(
                 loss_result = loss_components(
                     output, codes, batch, tokenizer_text_padding_ids(runtime.tokenizer), torch,
                     config.first_codebook_weight_multiplier, config.text_padding_weight,
+                    user_loss=config.user_loss,
                     distributed=distributed,
                 )
                 if distributed:
@@ -2101,8 +2164,13 @@ def run(
 
             reduced_total = total.detach()
             reduced_text = components["text"].detach()
+            reduced_agent_semantic = components["agent_semantic"].detach()
+            reduced_agent_acoustic = components["agent_acoustic"].detach()
+            reduced_user_semantic = components["user_semantic"].detach()
+            reduced_user_acoustic = components["user_acoustic"].detach()
             reduced_sem = components["audio_semantic"].detach()
             reduced_nonsem = components["audio_nonsemantic"].detach()
+            reduced_audio_total = components["audio_total"].detach()
 
             if main_process and (optimizer_step % config.log_freq == 0 or optimizer_step == max_steps):
                 total_target_positions = text_target_tokens_seen + text_padding_positions_seen
@@ -2121,8 +2189,13 @@ def run(
                     "global_batch_size": global_batch_size,
                     "loss/total": float(reduced_total.detach()),
                     "loss/text": float(reduced_text.detach()),
+                    "loss/text_real": text_nonpadding_loss,
                     "loss/text_nonpadding": text_nonpadding_loss,
-                    "loss/audio_total": mean_audio_loss,
+                    "loss/audio_total": float(reduced_audio_total),
+                    "loss/agent_semantic": float(reduced_agent_semantic),
+                    "loss/agent_acoustic": float(reduced_agent_acoustic),
+                    "loss/user_semantic": float(reduced_user_semantic),
+                    "loss/user_acoustic": float(reduced_user_acoustic),
                     "loss/audio_semantic": float(reduced_sem.detach()),
                     "loss/audio_nonsemantic": float(reduced_nonsem.detach()),
                     "accuracy/text": text_token_acc,
@@ -2267,7 +2340,11 @@ def run(
                         tqdm.write(json.dumps({
                             "event": "new_best_val_checkpoint", "step": optimizer_step,
                             "selection_loss": val_loss,
-                            "text_nonpadding_loss": val_metrics.get("val/loss_text_nonpadding"),
+                            "text_real_loss": val_metrics.get("val/loss_text_real"),
+                            "agent_semantic_loss": val_metrics.get("val/loss_agent_semantic"),
+                            "agent_acoustic_loss": val_metrics.get("val/loss_agent_acoustic"),
+                            "user_semantic_loss": val_metrics.get("val/loss_user_semantic"),
+                            "user_acoustic_loss": val_metrics.get("val/loss_user_acoustic"),
                             "audio_semantic_loss": val_metrics.get("val/loss_audio_semantic"),
                             "audio_nonsemantic_loss": val_metrics.get("val/loss_audio_nonsemantic"),
                         }))

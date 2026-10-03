@@ -68,7 +68,8 @@ class Config:
     weight_decay: float = 0.1
     pct_start: float = 0.05
     first_codebook_weight_multiplier: float = 1.0
-    text_padding_weight: float = 0.5
+    text_padding_weight: float = 0.3
+    user_loss: bool = True
     log_freq: int = 1
     no_eval: bool = False
     ckpt_freq: int = 50
@@ -247,7 +248,10 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     if free_running_eval_window_seconds <= 0:
         raise ValueError("free_running_eval_window_seconds must be positive")
     first_codebook_weight_multiplier = float(raw.get("first_codebook_weight_multiplier", 1.0))
-    text_padding_weight = float(raw.get("text_padding_weight", 0.5))
+    text_padding_weight = float(raw.get("text_padding_weight", 0.3))
+    user_loss = raw.get("user_loss", True)
+    if not isinstance(user_loss, bool):
+        raise ValueError("user_loss must be a boolean")
     if first_codebook_weight_multiplier < 0:
         raise ValueError("first_codebook_weight_multiplier must be non-negative")
     if not 0 <= text_padding_weight <= 1:
@@ -337,6 +341,7 @@ gradient_checkpointing=bool(raw.get("gradient_checkpointing", train.get("gradien
         pct_start=pct_start,
         first_codebook_weight_multiplier=first_codebook_weight_multiplier,
         text_padding_weight=text_padding_weight,
+        user_loss=user_loss,
         log_freq=max(1, int(raw.get("log_freq", 1))),
         no_eval=bool(raw.get("no_eval", True)),
         ckpt_freq=max(1, int(raw.get("ckpt_freq", train.get("save_every_steps", 50)))),

@@ -6,6 +6,45 @@ from personaplex_finetuning.config import load_config
 
 
 class ConfigTest(unittest.TestCase):
+    def test_user_loss_defaults_true_and_padding_weight_defaults_point_three(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.yaml"
+            config.write_text(
+                "model: {root: /models/base, source: /source}\n"
+                "data: {prepared_dir: /data}\n",
+                encoding="utf-8",
+            )
+
+            loaded = load_config(config)
+
+            self.assertTrue(loaded.user_loss)
+            self.assertEqual(loaded.text_padding_weight, 0.3)
+
+    def test_user_loss_can_disable_user_audio_supervision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.yaml"
+            config.write_text(
+                "model: {root: /models/base, source: /source}\n"
+                "data: {prepared_dir: /data}\n"
+                "user_loss: false\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(load_config(config).user_loss)
+
+    def test_user_loss_rejects_non_boolean_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.yaml"
+            config.write_text(
+                "model: {root: /models/base, source: /source}\n"
+                "data: {prepared_dir: /data}\n"
+                "user_loss: yes-please\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "user_loss must be a boolean"):
+                load_config(config)
+
     def test_reads_moshi_duration_sample_limit_and_optimizer_settings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "train.json"

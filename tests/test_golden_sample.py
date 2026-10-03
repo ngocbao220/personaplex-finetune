@@ -197,8 +197,8 @@ class GoldenSampleTest(unittest.TestCase):
             text_dialogue_end = text_dialogue_begin + base.dialogue_frames
             dialog_text = labels[0, text_dialogue_begin:text_dialogue_end]
             dialog_text_weights = weights[0, text_dialogue_begin:text_dialogue_end]
-            self.assertTrue(self.torch.any((dialog_text == tokenizer.padding_id) & (dialog_text_weights == 0.5)).item())
-            self.assertTrue(self.torch.any((dialog_text == tokenizer.end_padding_id) & (dialog_text_weights == 0.5)).item())
+            self.assertTrue(self.torch.any((dialog_text == tokenizer.padding_id) & (dialog_text_weights == 0.3)).item())
+            self.assertTrue(self.torch.any((dialog_text == tokenizer.end_padding_id) & (dialog_text_weights == 0.3)).item())
             for stream in range(1, 9):
                 dialogue_begin = 1 + delays[stream] + base.prompt_frames
                 dialogue_end = dialogue_begin + base.dialogue_frames
@@ -223,6 +223,12 @@ class GoldenSampleTest(unittest.TestCase):
                     stream_dump["weights"],
                     weights[stream_index, : delayed.total_frames].cpu().tolist(),
                 )
+            agent_only_payload = build_debug_payload(
+                sample, delayed, tokenizer, mimi.frame_rate, delays, user_loss=False,
+            )
+            self.assertEqual(agent_only_payload["channel_map"]["right"], "user conditioning")
+            for stream_dump in agent_only_payload["streams"][9:17]:
+                self.assertTrue(all(weight == 0.0 for weight in stream_dump["weights"]))
             with self.subTest(debug_files=True):
                 json_path, text_path = write_debug_artifacts(root / "debug", payload)
                 decoded = json.loads(json_path.read_text(encoding="utf-8"))

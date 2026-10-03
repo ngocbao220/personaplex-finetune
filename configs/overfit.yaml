@@ -38,7 +38,8 @@ train:
   mixed_precision: bf16
 
 first_codebook_weight_multiplier: 1.0
-text_padding_weight: 0.5
+text_padding_weight: 0.3
+user_loss: true
 log_freq: 1
 no_eval: false
 free_running_eval_every_steps: 100

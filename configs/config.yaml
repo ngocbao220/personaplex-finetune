@@ -14,6 +14,7 @@ no_eval: false
 free_running_eval_every_steps: 500
 free_running_eval_samples: 3
 validation_max_samples: 32
+user_loss: true
 
 generation:
   use_sampling: true

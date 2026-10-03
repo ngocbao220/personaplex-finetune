@@ -47,7 +47,8 @@ train:
   persistent_workers: true
 
 first_codebook_weight_multiplier: 1.0
-text_padding_weight: 0.5
+text_padding_weight: 0.3
+user_loss: true
 log_freq: 1
 no_eval: true
 ckpt_freq: 100

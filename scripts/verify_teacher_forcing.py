@@ -113,6 +113,7 @@ def evaluate_teacher_forcing_sample(
         _, loss_dict = loss_components(
             output, codes, batch, padding_ids, torch,
             config.first_codebook_weight_multiplier, config.text_padding_weight,
+            user_loss=config.user_loss,
             distributed=False,
         )
 

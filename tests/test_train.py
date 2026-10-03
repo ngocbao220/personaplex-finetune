@@ -156,8 +156,11 @@ class TrainTest(unittest.TestCase):
                 AudioInfo(24000, 2, 1.0), 0.0, 1.0,
             )
             original = training_contract(config, [sample])
+            without_user_loss = training_contract(config.replace(user_loss=False), [sample])
             changed = training_contract(config, [sample.with_window(0.0, 1.0, "Speak English.")])
             self.assertNotEqual(original["prepared_sources_sha256"], changed["prepared_sources_sha256"])
+            self.assertTrue(original["user_loss"])
+            self.assertFalse(without_user_loss["user_loss"])
 
             kept = training_contract(config, [sample], [sample.with_window(0.0, 1.0)])
             rejected = training_contract(config, [sample], [])
@@ -304,9 +307,11 @@ class TrainTest(unittest.TestCase):
     def test_best_validation_checkpoint_uses_nonpadding_text_and_audio_losses(self) -> None:
         metrics = {
             "val/loss_total": 0.01,
-            "val/loss_text_nonpadding": 1.2,
-            "val/loss_audio_semantic": 0.3,
-            "val/loss_audio_nonsemantic": 0.02,
+            "val/loss_text_real": 1.2,
+            "val/loss_agent_semantic": 0.2,
+            "val/loss_agent_acoustic": 0.01,
+            "val/loss_user_semantic": 0.1,
+            "val/loss_user_acoustic": 0.01,
         }
         self.assertAlmostEqual(validation_selection_loss(metrics), 1.52)
         self.assertEqual(validation_selection_loss({"val/loss_total": 0.001}), float("inf"))
@@ -777,7 +782,10 @@ class TrainTest(unittest.TestCase):
         writer = Writer()
         write_tensorboard_scalars(
             writer,
-            {"step": 2, "loss/total": 1.0, "loss/text": 0.2, "loss/audio_semantic": 0.3,
+            {"step": 2, "loss/total": 1.0, "loss/text": 0.2, "loss/text_real": 0.25,
+             "loss/agent_semantic": 0.2, "loss/agent_acoustic": 0.3,
+             "loss/user_semantic": 0.1, "loss/user_acoustic": 0.1,
+             "loss/audio_semantic": 0.3,
              "loss/text_nonpadding": 1.5, "loss/audio_nonsemantic": 0.4,
              "lr": 2e-5, "grad_norm": 0.5, "gpu_peak_bytes": 1024,
              "timing/data_sec": 1.0, "timing/forward_loss_sec": 2.0,
@@ -788,8 +796,11 @@ class TrainTest(unittest.TestCase):
         )
 
         self.assertEqual({name for name, _, _ in writer.scalars}, {
-            "loss/total", "loss/text", "loss/text_nonpadding", "loss/audio_total",
+            "loss/total", "loss/text", "loss/text_real", "loss/text_nonpadding", "loss/audio_total",
+            "loss/agent_semantic", "loss/agent_acoustic", "loss/user_semantic", "loss/user_acoustic",
             "loss/audio_semantic", "loss/audio_nonsemantic", "accuracy/text", "accuracy/audio_total",
+            "accuracy/text_nonpad", "accuracy/text_pad", "target_pad_pct", "predicted_pad_pct",
+            "probability/pad_given_nonpad_target", "probability/correct_given_nonpad_target",
             "train/valid_token_pct",
             "train/learning_rate", "train/gradient_norm", "system/gpu_peak_bytes",
             "system/trainable_parameters", "system/cpu_threads", "timing/data_sec",

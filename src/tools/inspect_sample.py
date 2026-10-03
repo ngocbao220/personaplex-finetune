@@ -55,7 +55,12 @@ def _token_piece(tokenizer, token_id: int) -> str:
     return str(token_id)
 
 
-def build_debug_payload(sample, example: TrainingExample, tokenizer, frame_rate: float, delays):
+def build_debug_payload(
+    sample, example: TrainingExample, tokenizer, frame_rate: float, delays,
+    *, first_codebook_weight_multiplier: float = 1.0,
+    text_padding_weight: float = 0.3,
+    user_loss: bool = True,
+):
     if len(delays) != 17:
         raise ValueError("debug export requires 17 stream delays")
     text_offset = 1 + delays[0]
@@ -70,7 +75,12 @@ def build_debug_payload(sample, example: TrainingExample, tokenizer, frame_rate:
 
     labels = example.labels
     text_padding_ids = (tokenizer.padding_id, tokenizer.end_padding_id)
-    weights = stream_weights(labels, example.loss_mask, text_padding_ids)
+    weights = stream_weights(
+        labels, example.loss_mask, text_padding_ids,
+        text_padding_weight=text_padding_weight,
+        first_codebook_weight_multiplier=first_codebook_weight_multiplier,
+        user_loss=user_loss,
+    )
     max_delay = max(delays)
     content_frames = 1 + max_delay + example.prompt_frames + example.dialogue_frames
     word_at_frame: dict[int, str] = {}
@@ -151,7 +161,11 @@ def build_debug_payload(sample, example: TrainingExample, tokenizer, frame_rate:
     payload = {
         "sample_id": sample.sample_id,
         "window": {"start_sec": sample.window_start_sec, "end_sec": sample.window_end_sec},
-        "channel_map": {"left": "agent target", "right": "user conditioning"},
+        "channel_map": {
+            "left": "agent target",
+            "right": "user input and target" if user_loss else "user conditioning",
+        },
+        "user_loss": user_loss,
         "frame_rate": frame_rate,
         "frame_count": example.total_frames,
         "regions": regions,
@@ -258,7 +272,12 @@ def main() -> int:
         vietnamese_text_mode=config.vietnamese_text_mode,
     )
     example = native_debug_delay(builder.build(sample), runtime.initial_tokens, runtime.delays, runtime.zero_token)
-    payload = build_debug_payload(sample, example, runtime.tokenizer, runtime.codec.frame_rate, runtime.delays)
+    payload = build_debug_payload(
+        sample, example, runtime.tokenizer, runtime.codec.frame_rate, runtime.delays,
+        first_codebook_weight_multiplier=getattr(config, "first_codebook_weight_multiplier", 1.0),
+        text_padding_weight=getattr(config, "text_padding_weight", 0.3),
+        user_loss=getattr(config, "user_loss", True),
+    )
     output_dir = args.output_dir or Path("outputs/inspect") / sample.sample_id
     json_path, text_path = write_debug_artifacts(output_dir, payload)
     print(f"wrote {json_path}\nwrote {text_path}")

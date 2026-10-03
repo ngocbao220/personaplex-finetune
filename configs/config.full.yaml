@@ -79,7 +79,8 @@ train:
 # 5. LOSS WEIGHTING (Trọng số thành phần hàm mất mát)
 # ------------------------------------------------------------------------------
 first_codebook_weight_multiplier: 1.0 # Trọng số cho codebook âm thanh ngữ nghĩa số 1 [float: 0.5 -> 2.0]
-text_padding_weight: 0.5              # Trọng số cho token <pad> lúc Agent im lặng lắng nghe [float: 0.1 -> 0.5]
+text_padding_weight: 0.3              # Trọng số cho token <pad> lúc Agent im lặng lắng nghe [float: 0.0 -> 1.0]
+user_loss: true                       # Tính loss cho 8 codebook audio của user
 log_freq: 1                           # Tần suất in log loss ra console (steps) [int >= 1: 1, 5, 10]
 ckpt_freq: 500                        # Tần suất lưu checkpoint dự phòng [int >= 1: 100, 500]
 

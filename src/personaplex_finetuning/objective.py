@@ -29,8 +29,9 @@ def stream_weights(
     loss_mask: Sequence[Sequence[bool]],
     text_padding_id: int | Sequence[int],
     nonsemantic_audio_weight: float = 0.02,
-    text_padding_weight: float = 0.5,
+    text_padding_weight: float = 0.3,
     first_codebook_weight_multiplier: float = 1.0,
+    user_loss: bool = True,
 ) -> tuple[tuple[float, ...], ...]:
     """Return explicit per-token weights for [text, agent audio x8, user audio x8].
 
@@ -60,6 +61,9 @@ def stream_weights(
                 np.float64(text_padding_weight),
                 np.float64(1.0),
             ).astype(np.float64)
+        elif not user_loss and stream_index >= 9:
+            # User audio remains model input/context but is not supervised.
+            values = np.zeros(len(stream), dtype=np.float64)
         elif stream_index in (1, 9):
             # First (semantic) codebook of each audio stream: full weight.
             values = np.full(len(stream), first_codebook_weight_multiplier, dtype=np.float64)
@@ -79,8 +83,9 @@ def stream_weights_torch(
     loss_mask: "torch.Tensor",
     text_padding_id: int | Sequence[int],
     nonsemantic_audio_weight: float = 0.02,
-    text_padding_weight: float = 0.5,
+    text_padding_weight: float = 0.3,
     first_codebook_weight_multiplier: float = 1.0,
+    user_loss: bool = True,
 ) -> "torch.Tensor":
     """GPU-native weight computation for use inside the training loop.
 
@@ -119,6 +124,8 @@ def stream_weights_torch(
     weights[:, (1, 9)] = loss_mask[:, (1, 9)].float() * first_codebook_weight_multiplier
     weights[:, 2:9] = loss_mask[:, 2:9].float() * nonsemantic_audio_weight
     weights[:, 10:17] = loss_mask[:, 10:17].float() * nonsemantic_audio_weight
+    if not user_loss:
+        weights[:, 9:17] = 0.0
 
     return weights[0] if squeeze else weights
 

@@ -114,7 +114,11 @@ Sau đó chạy DDP bằng `torchrun` với số GPU thực tế:
 torchrun --nproc-per-node 4 train.py --config configs/full-finetuning.yaml
 ```
 
-Đổi `4` thành số GPU được cấp. `train.method=full` cập nhật LM PersonaPlex, gồm embedding của cả hai kênh; các head chỉ xuất user audio được đóng băng vì loss chỉ giám sát agent text/audio. Full checkpoint nằm trong `runs/full-finetuning/<run>/checkpoints/checkpoint_N/`, gồm `model.safetensors`, `training_state.pt` và `checkpoint.json`. Mỗi GPU DDP giữ một bản đầy đủ của model và AdamW; cần kiểm tra bộ nhớ GPU và dung lượng đĩa trước khi train dài. Dùng `--resume-from <checkpoint_dir>` để tiếp tục và `--checkpoint <checkpoint_dir>` với `tools.inference_smoke` để infer. `configs/config.yaml` và các lệnh LoRA cũ giữ nguyên mặc định.
+Đổi `4` thành số GPU được cấp. `train.method=full` cập nhật LM PersonaPlex, gồm embedding của cả hai kênh. Full checkpoint nằm trong `runs/full-finetuning/<run>/checkpoints/checkpoint_N/`, gồm `model.safetensors`, `training_state.pt` và `checkpoint.json`. Mỗi GPU DDP giữ một bản đầy đủ của model và AdamW; cần kiểm tra bộ nhớ GPU và dung lượng đĩa trước khi train dài. Dùng `--resume-from <checkpoint_dir>` để tiếp tục và `--checkpoint <checkpoint_dir>` với `tools.inference_smoke` để infer. `configs/config.yaml` và các lệnh LoRA cũ giữ nguyên mặc định.
+
+### Trọng số loss
+
+`user_loss: true` giám sát cả 8 codebook audio của user; đặt `user_loss: false` để user audio chỉ làm input/context. Layout forward luôn giữ nguyên 17 streams. Text token thật có weight `1.0`, PAD/END_PAD là `0.3`; semantic codebook của mỗi bên là `1.0`, bảy acoustic codebook là `0.02`. Log tách riêng `loss/text_real`, `loss/agent_semantic`, `loss/agent_acoustic`, `loss/user_semantic` và `loss/user_acoustic`.
 
 ## Log huấn luyện
 
