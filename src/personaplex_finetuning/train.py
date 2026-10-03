@@ -35,7 +35,12 @@ from .filter_cache import filter_fingerprint
 from .lora import adapter_state_dict, inject_lora, load_adapter
 from .full_checkpoint import load_full_weights, resolve_full_checkpoint, save_full_weights, write_full_metadata
 from .generation import GenerationSettings
-from .inference import generate_text_with_runtime, resolve_adapter_checkpoint, text_error_metrics
+from .inference import (
+    export_original_audio_window,
+    generate_text_with_runtime,
+    resolve_adapter_checkpoint,
+    text_error_metrics,
+)
 from .objective import (
     normalize_text_padding_ids,
     stream_weights_torch,
@@ -1232,8 +1237,10 @@ def evenly_spaced_validation_samples(samples: list, limit: int) -> list:
     return [samples[index] for index in indices]
 
 
-def evaluate_free_running(runtime, samples: list, config: Config) -> dict:
-    """Score autoregressive text on a small, fixed held-out subset."""
+def evaluate_free_running(
+    runtime, samples: list, config: Config, audio_output_dir: Path | None = None,
+) -> dict:
+    """Score autoregressive text and optionally export generated agent audio."""
     evaluated = []
     unique_conversations = []
     seen_groups = set()
@@ -1270,11 +1277,29 @@ def evaluate_free_running(runtime, samples: list, config: Config) -> dict:
         )
         if not reference.strip():
             continue
-        hypothesis = generate_text_with_runtime(
-            runtime, window,
-            generation=getattr(config, "generation_settings", GenerationSettings()),
-            seed=config.seed + len(evaluated),
+        audio_path = (
+            audio_output_dir / f"sample_{len(evaluated):03d}.wav"
+            if audio_output_dir is not None else None
         )
+        original_audio_path = (
+            audio_output_dir / f"sample_{len(evaluated):03d}_original.wav"
+            if audio_output_dir is not None else None
+        )
+        generation_kwargs = {
+            "generation": getattr(config, "generation_settings", GenerationSettings()),
+            "seed": config.seed + len(evaluated),
+        }
+        if audio_path is not None:
+            generation_kwargs["output_wav"] = audio_path
+        hypothesis = generate_text_with_runtime(runtime, window, **generation_kwargs)
+        if audio_path is not None and not audio_path.is_file():
+            raise RuntimeError(f"free-running validation did not write generated audio: {audio_path}")
+        if original_audio_path is not None:
+            export_original_audio_window(window, original_audio_path)
+            if not original_audio_path.is_file():
+                raise RuntimeError(
+                    f"free-running validation did not write original audio: {original_audio_path}"
+                )
         text_mode = getattr(config, "vietnamese_text_mode", "diacritics")
         metrics = text_error_metrics(
             reference, hypothesis, vietnamese_text_mode=text_mode,
@@ -1282,12 +1307,13 @@ def evaluate_free_running(runtime, samples: list, config: Config) -> dict:
         if metrics is not None:
             metrics_reference = normalize_vietnamese_text(reference, text_mode)
             evaluated.append((metrics, sample.sample_id, metrics_reference, hypothesis,
-                              window.window_start_sec, window.window_end_sec))
+                              window.window_start_sec, window.window_end_sec,
+                              audio_path, original_audio_path))
         if len(evaluated) >= config.free_running_eval_samples:
             break
     if not evaluated:
         raise RuntimeError("free-running validation found no samples with agent text references")
-    empty_hypotheses = sum(not hypothesis.strip() for _, _, _, hypothesis, _, _ in evaluated)
+    empty_hypotheses = sum(not hypothesis.strip() for _, _, _, hypothesis, _, _, _, _ in evaluated)
     return {
         "val/generation_cer": sum(float(item[0]["cer"]) for item in evaluated) / len(evaluated),
         "val/generation_wer": sum(float(item[0]["wer"]) for item in evaluated) / len(evaluated),
@@ -1296,12 +1322,19 @@ def evaluate_free_running(runtime, samples: list, config: Config) -> dict:
         "samples": [
             {"sample_id": sample_id, "reference": reference, "hypothesis": hypothesis,
              "cer": metrics["cer"], "wer": metrics["wer"],
+             "audio_path": str(audio_path.resolve()) if audio_path is not None else None,
+             "original_audio_path": (
+                 str(original_audio_path.resolve()) if original_audio_path is not None else None
+             ),
              "window_start_sec": start_sec, "window_end_sec": end_sec,
              "source_duration_sec": next(
                  sample.audio.duration_sec for sample in unique_conversations
                  if sample.sample_id == sample_id
              )}
-            for metrics, sample_id, reference, hypothesis, start_sec, end_sec in evaluated
+            for (
+                metrics, sample_id, reference, hypothesis, start_sec, end_sec,
+                audio_path, original_audio_path,
+            ) in evaluated
         ],
     }
 
@@ -1930,7 +1963,10 @@ def run(
         baseline_result = [None]
         if main_process:
             try:
-                baseline_result[0] = evaluate_free_running(runtime, val_samples, config)
+                baseline_result[0] = evaluate_free_running(
+                    runtime, val_samples, config,
+                    audio_output_dir=run_dir / "free_running_audio" / "baseline",
+                )
             except Exception as exc:
                 baseline_result[0] = {"error": f"{type(exc).__name__}: {exc}"}
         if distributed:
@@ -2283,6 +2319,9 @@ def run(
                         try:
                             generation_result[0] = evaluate_free_running(
                                 runtime, val_samples, config,
+                                audio_output_dir=(
+                                    run_dir / "free_running_audio" / f"step_{optimizer_step:06d}"
+                                ),
                             )
                         except Exception as exc:
                             generation_result[0] = {"error": f"{type(exc).__name__}: {exc}"}
@@ -2319,6 +2358,8 @@ def run(
                                 "event": "new_best_free_running_checkpoint", "step": optimizer_step,
                                 "cer": best_generation_cer,
                                 "wer": generation_metrics["val/generation_wer"],
+                                "audio_path": best_generation_sample["audio_path"],
+                                "original_audio_path": best_generation_sample["original_audio_path"],
                                 "adapter": str(best_inference_saved),
                             }, ensure_ascii=False))
                     barrier()

@@ -25,7 +25,7 @@ def update_sample(sample, **kwargs):
 import numpy as np
 
 from .config import Config
-from .data import AudioInfo, PreparedSample
+from .data import AudioInfo, PreparedSample, read_stereo_window
 from .full_checkpoint import load_full_weights, resolve_full_checkpoint
 from .generation import GenerationSettings, generation_from_config
 from .lora import inject_lora, load_adapter
@@ -344,13 +344,16 @@ def generate(
 
 def generate_text_with_runtime(
     runtime, sample: PreparedSample, generation: GenerationSettings | None = None, seed: int = 42,
+    output_wav: Path | None = None,
 ) -> str:
-    """Run PersonaPlex free-running text generation with an already-loaded model.
+    """Run free-running generation with an already-loaded model.
 
     This is used for validation between training checkpoints so validation measures the
-    autoregressive path without loading a second 7B model or decoding generated audio.
+    autoregressive path without loading a second 7B model. When ``output_wav`` is set,
+    generated agent Mimi tokens are decoded and saved alongside the text metrics.
     """
     import importlib
+    import numpy as np
     import torch
 
     settings = GenerationSettings() if generation is None else generation
@@ -379,6 +382,7 @@ def generate_text_with_runtime(
         )
         user = torch.tensor(user_codes, device=device).unsqueeze(0)
         token_ids: list[int] = []
+        pcm_frames: list[np.ndarray] = []
         with (
             torch.no_grad(),
             inference_autocast_context(device),
@@ -390,16 +394,47 @@ def generate_text_with_runtime(
                 tokens = generator.step(input_tokens=user[:, :, frame : frame + 1])
                 if tokens is None:
                     continue
+                if output_wav is not None:
+                    decoded = (
+                        runtime.codec.mimi.decode(tokens[:, 1:9])
+                        .squeeze().detach().float().cpu().numpy()
+                    )
+                    pcm_frames.append(decoded)
                 token = int(tokens[0, 0, 0])
                 ignored_tokens = (0, runtime.tokenizer.padding_id, getattr(runtime.tokenizer, "end_padding_id", 0))
                 if token not in ignored_tokens:
                     token_ids.append(token)
+        if output_wav is not None:
+            if not pcm_frames:
+                raise RuntimeError("native PersonaPlex free-running validation produced no audio frames")
+            import sphn
+
+            output_wav.parent.mkdir(parents=True, exist_ok=True)
+            sphn.write_wav(
+                str(output_wav), np.concatenate(pcm_frames), runtime.codec.sample_rate,
+            )
         processor = runtime.tokenizer._processor
         if hasattr(processor, "decode_ids"):
             return str(processor.decode_ids(token_ids))
         return "".join(processor.id_to_piece(token) for token in token_ids).strip()
     finally:
         model.train(was_training)
+
+
+def export_original_audio_window(sample: PreparedSample, output_wav: Path) -> Path:
+    """Write the exact stereo source window used by free-running validation."""
+    import sphn
+
+    audio = read_stereo_window(
+        sample.conversation_wav,
+        sample.window_start_sec,
+        min(sample.window_end_sec, sample.audio.duration_sec),
+        24_000,
+        sample.sample_id,
+    )
+    output_wav.parent.mkdir(parents=True, exist_ok=True)
+    sphn.write_wav(str(output_wav), np.ascontiguousarray(audio), 24_000)
+    return output_wav
 
 
 def _export_context(sample: PreparedSample, output_dir: Path) -> None:

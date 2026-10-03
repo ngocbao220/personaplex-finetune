@@ -399,6 +399,43 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(metrics["samples"][0]["window_start_sec"], 1.0)
         self.assertEqual(metrics["samples"][0]["source_duration_sec"], 60.0)
 
+    def test_free_running_validation_exports_audio_and_records_its_path(self) -> None:
+        from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
+
+        sample = PreparedSample(
+            sample_id="heldout-audio", conversation_wav=Path("conversation.wav"),
+            voice_prompt_wav=Path("voice.wav"), words=(Word("agent", "Xin chào.", 1.0, 1.5),),
+            text_prompt="Trò chuyện bằng tiếng Việt.", metadata={},
+            audio=AudioInfo(24_000, 2, 60.0), window_start_sec=0.0, window_end_sec=60.0,
+        )
+        config = SimpleNamespace(
+            seed=42, free_running_eval_samples=1, free_running_eval_window_seconds=30.0,
+        )
+
+        def generate(_runtime, _window, *, output_wav, **_kwargs):
+            output_wav.parent.mkdir(parents=True, exist_ok=True)
+            output_wav.write_bytes(b"wav")
+            return "Xin chào."
+
+        def export_original(_window, output_wav):
+            output_wav.parent.mkdir(parents=True, exist_ok=True)
+            output_wav.write_bytes(b"original")
+            return output_wav
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch("personaplex_finetuning.train.generate_text_with_runtime", side_effect=generate), \
+             patch("personaplex_finetuning.train.export_original_audio_window", side_effect=export_original):
+            metrics = evaluate_free_running(
+                object(), [sample], config, audio_output_dir=Path(directory) / "step_000100",
+            )
+
+            audio_path = Path(metrics["samples"][0]["audio_path"])
+            original_audio_path = Path(metrics["samples"][0]["original_audio_path"])
+            self.assertEqual(audio_path.name, "sample_000.wav")
+            self.assertEqual(audio_path.read_bytes(), b"wav")
+            self.assertEqual(original_audio_path.name, "sample_000_original.wav")
+            self.assertEqual(original_audio_path.read_bytes(), b"original")
+
     def test_free_running_metrics_log_reference_in_configured_text_mode(self) -> None:
         from personaplex_finetuning.data import AudioInfo, PreparedSample, Word
 

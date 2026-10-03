@@ -127,3 +127,10 @@ tensorboard --logdir runs/moshi-code-style --port 6006
 ```
 
 `runs/moshi-code-style` là thư mục log/checkpoint; thay bằng `train.output_dir` trong config nếu dùng đường dẫn khác.
+
+Mỗi lần free-running validation sẽ lưu audio agent do model sinh tại
+`<run_dir>/free_running_audio/baseline/sample_000.wav` và
+`<run_dir>/free_running_audio/step_XXXXXX/sample_000.wav`. Hội thoại stereo gốc của
+đúng cửa sổ đó nằm cạnh file sinh với tên `sample_000_original.wav`, giữ nguyên
+LEFT=agent và RIGHT=user. Các trường `audio_path` và `original_audio_path` trong
+`free_running_metrics.jsonl` liên kết mỗi transcript/CER/WER với hai WAV tương ứng.

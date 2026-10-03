@@ -198,6 +198,75 @@ class InferenceStreamingTest(unittest.TestCase):
         self.assertEqual(mimi.streaming_calls, [1])
         self.assertEqual(_Generator.instances[0].streaming_calls, [1])
 
+    def test_free_running_validation_can_write_generated_audio(self):
+        mimi = _Mimi()
+
+        class Model:
+            training = True
+
+            def eval(self):
+                self.training = False
+
+            def train(self, enabled=True):
+                self.training = enabled
+
+        runtime = SimpleNamespace(
+            model=Model(),
+            codec=SimpleNamespace(
+                mimi=mimi, device="cpu", sample_rate=24000, frame_rate=12.5,
+                encode_conversation=lambda *_args: ((1, 2),) * 8,
+            ),
+            tokenizer=SimpleNamespace(
+                padding_id=3, encode=lambda _text: [4],
+                _processor=SimpleNamespace(id_to_piece=lambda token: f"{token},"),
+            ),
+        )
+        sample = SimpleNamespace(
+            voice_prompt_wav=Path("voice.wav"), text_prompt="Việt",
+            conversation_wav=Path("conversation.wav"), user_channel=1,
+            window_start_sec=0.0, window_end_sec=1.0,
+            audio=SimpleNamespace(duration_sec=1.0),
+        )
+        fake_sphn = types.SimpleNamespace(
+            write_wav=lambda path, _audio, _sample_rate: Path(path).write_bytes(b"wav"),
+        )
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(sys.modules, {"sphn": fake_sphn}), \
+             patch.object(importlib, "import_module", return_value=SimpleNamespace(LMGen=_Generator)):
+            output_wav = Path(directory) / "generated.wav"
+            text = inference.generate_text_with_runtime(runtime, sample, seed=7, output_wav=output_wav)
+
+            self.assertEqual(text, "7,7,")
+            self.assertEqual(output_wav.read_bytes(), b"wav")
+            self.assertEqual(mimi.decode_calls, 2)
+
+    def test_free_running_original_export_preserves_stereo_source_window(self):
+        sample = SimpleNamespace(
+            sample_id="original-1", conversation_wav=Path("conversation.wav"),
+            window_start_sec=1.25, window_end_sec=3.5,
+            audio=SimpleNamespace(duration_sec=3.0),
+        )
+        stereo = np.zeros((2, 42), dtype=np.float32)
+        written = {}
+        fake_sphn = types.SimpleNamespace(
+            write_wav=lambda path, audio, rate: written.update(
+                path=Path(path), audio=audio, rate=rate,
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(sys.modules, {"sphn": fake_sphn}), \
+             patch.object(inference, "read_stereo_window", return_value=stereo) as read_window:
+            output_wav = Path(directory) / "sample_000_original.wav"
+            result = inference.export_original_audio_window(sample, output_wav)
+
+        self.assertEqual(result, output_wav)
+        read_window.assert_called_once_with(Path("conversation.wav"), 1.25, 3.0, 24_000, "original-1")
+        self.assertEqual(written["path"], output_wav)
+        self.assertEqual(written["rate"], 24_000)
+        np.testing.assert_array_equal(written["audio"], stereo)
+
     def test_generate_disables_moshi_compile_before_loading_runtime(self):
         with patch.dict(os.environ):
             os.environ.pop("NO_TORCH_COMPILE", None)
