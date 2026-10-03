@@ -10,6 +10,7 @@ import random
 import shlex
 import sys
 import time
+import traceback
 import math
 from contextlib import nullcontext
 from datetime import datetime, timedelta
@@ -1968,6 +1969,7 @@ def run(
                     audio_output_dir=run_dir / "free_running_audio" / "baseline",
                 )
             except Exception as exc:
+                traceback.print_exc()
                 baseline_result[0] = {"error": f"{type(exc).__name__}: {exc}"}
         if distributed:
             torch.distributed.broadcast_object_list(baseline_result, src=0, device=device)
@@ -2324,6 +2326,7 @@ def run(
                                 ),
                             )
                         except Exception as exc:
+                            traceback.print_exc()
                             generation_result[0] = {"error": f"{type(exc).__name__}: {exc}"}
                     if distributed:
                         torch.distributed.broadcast_object_list(generation_result, src=0, device=device)

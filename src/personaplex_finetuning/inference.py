@@ -48,6 +48,19 @@ def inference_autocast_context(device):
     return nullcontext()
 
 
+def decode_generated_audio(mimi, tokens, device):
+    """Decode FP32 Mimi audio outside LM BF16 autocast and cuDNN engines."""
+    import torch
+
+    if torch.device(device).type == "cuda":
+        # Streaming ConvTranspose1d can have no supported cuDNN engine for
+        # short frames. Use native CUDA convolution from the first frame;
+        # retrying a failed decode could advance Mimi's streaming state twice.
+        with torch.autocast(device_type="cuda", enabled=False), torch.backends.cudnn.flags(enabled=False):
+            return mimi.decode(tokens)
+    return mimi.decode(tokens)
+
+
 def _normalize_text_for_metrics(text: str) -> tuple[list[str], str]:
     normalized = unicodedata.normalize("NFC", text).casefold()
     normalized = "".join(
@@ -323,7 +336,7 @@ def generate(
             tokens = generator.step(input_tokens=user[:, :, frame : frame + 1])
             if tokens is None:
                 continue
-            decoded = runtime.codec.mimi.decode(tokens[:, 1:9]).squeeze().detach().float().cpu().numpy()
+            decoded = decode_generated_audio(runtime.codec.mimi, tokens[:, 1:9], config.device).squeeze().detach().float().cpu().numpy()
             pcm_frames.append(decoded)
             token = int(tokens[0, 0, 0])
             ignored_tokens = (0, runtime.tokenizer.padding_id, getattr(runtime.tokenizer, "end_padding_id", 0))
@@ -396,7 +409,7 @@ def generate_text_with_runtime(
                     continue
                 if output_wav is not None:
                     decoded = (
-                        runtime.codec.mimi.decode(tokens[:, 1:9])
+                        decode_generated_audio(runtime.codec.mimi, tokens[:, 1:9], device)
                         .squeeze().detach().float().cpu().numpy()
                     )
                     pcm_frames.append(decoded)
