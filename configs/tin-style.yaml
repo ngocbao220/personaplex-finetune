@@ -1,0 +1,41 @@
+# Thin adapter to the original trainer. All omitted native fields retain its
+# defaults, including text_padding_weight, first-codebook weighting and dep_q.
+# Run with torchrun --nproc-per-node=1 -m tin_style configs/tin-style.yaml
+# --check-config performs CPU-only composition + local asset validation.
+defaults:
+  - model: server
+  - _self_
+
+# Reference trains both audio streams. false is NOT supported in this path.
+user_loss: true
+duration_sec: 100
+data:
+  prepared_dir: ../../otospeech-prepared
+  shuffle: false
+train:
+  output_dir: ../runs/tin-style
+  max_steps: 100
+  learning_rate: 0.0001
+  gradient_accumulation_steps: 1
+  per_device_batch_size: 1
+  gradient_checkpointing: true
+lora:
+  enable: true
+  rank: 64
+  scaling: 2.0
+# Native TrainArgs can be supplied explicitly here, without current defaults.
+# Only local assets are accepted; model.root requires config.json as well as
+# model.safetensors, tokenizer-e351c8d8-checkpoint125.safetensors and
+# tokenizer_spm_32k_3.model. Alternatively set model.lm_checkpoint,
+# model.mimi_checkpoint, model.tokenizer and model.config individually.
+# Unsupported active options fail: user_loss=false, dep_q, QLoRA, separate
+# depformer LR, warmup_steps, random split, prompt augmentation, role swapping,
+# text transformations, custom worker/prefetch controls, free-running eval.
+reference:
+  do_eval: false
+  system_prompt:
+    enable: true
+    audio_silence_frames: 6
+    prompt_budget_frames: 0
+  gen_eval:
+    enable: false

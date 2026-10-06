@@ -1,5 +1,12 @@
 # PersonaPlex fine-tuning
 
+## Nhánh tin-style
+
+Pipeline tham chiếu, chỉ thích nghi data/config/local model, được đặt riêng tại
+`tin_style/`. Xem [hướng dẫn tin-style](tin_style/README.md); chạy bằng
+`python -m tin_style` / `torchrun -m tin_style`, không phải entrypoint legacy bên dưới.
+Trainer và loss của pipeline này giữ nguyên theo source tham chiếu.
+
 Các lệnh dưới đây chạy từ thư mục gốc repo, trong môi trường đã cài `requirements.txt`. Model phải có sẵn tại đường dẫn trong config; chương trình không tự tải model.
 
 ```bash
