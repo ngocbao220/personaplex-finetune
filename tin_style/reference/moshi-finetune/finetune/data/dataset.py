@@ -14,6 +14,7 @@ from finetune.distributed import get_rank
 from .interleaver import InterleavedTokenizer, Sample
 from tin_style.data import native_manifest
 from tin_style.data import chunk_rejections, validate_chunk_manifest
+from tin_style.data import filter_audio_chunks
 
 logger = logging.getLogger("dataset")
 
@@ -200,6 +201,7 @@ def get_dataset_iterator(
 ) -> Iterator[Sample]:
     epoch = 1
     while True:
+        valid_chunks = 0
         for jsonl_file in source.jsonl_files:
             validate_chunk_manifest(native_manifest(str(jsonl_file)), instruct_tokenizer.chunk_step_sec)
             dataset = sphn.dataset_jsonl(
@@ -216,7 +218,7 @@ def get_dataset_iterator(
                 seed += 1
             else:
                 dataset = dataset.seq(skip=rank, step_by=world_size)
-            for sample in dataset:
+            for sample in filter_audio_chunks(dataset, instruct_tokenizer.mimi):
                 if chunk_rejections(sample["path"], sample["start_time_sec"], instruct_tokenizer.chunk_step_sec):
                     continue
                 wav = sample["data"][..., : sample["unpadded_len"]]
@@ -235,7 +237,10 @@ def get_dataset_iterator(
                         f"sample_rate={instruct_tokenizer.mimi.sample_rate}"
                     ) from exc
 
+                valid_chunks += 1
                 yield encoded_sample
+        if not valid_chunks:
+            raise ValueError(f"Rank {rank}: no valid chunks remain in epoch {epoch}")
         if is_finite:
             break
         print(f"Rank {rank} finished epoch {epoch}")

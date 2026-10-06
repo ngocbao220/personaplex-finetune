@@ -31,6 +31,18 @@ def test_data_boundary_patch_does_not_change_interleaving():
     assert hashlib.sha256(restored.encode()).hexdigest() == provenance["sha256"][path]
     path = "moshi-finetune/finetune/data/dataset.py"
     code = (root / "reference" / path).read_text()
+    code = code.replace("from tin_style.data import filter_audio_chunks\n", "").replace(
+        "        valid_chunks = 0\n", ""
+    ).replace(
+        "            for sample in filter_audio_chunks(dataset, instruct_tokenizer.mimi):\n",
+        "            for sample in dataset:\n",
+    ).replace("                valid_chunks += 1\n", "").replace(
+        '        if not valid_chunks:\n'
+        '            raise ValueError(f"Rank {rank}: no valid chunks remain in epoch {epoch}")\n', ""
+    )
+    diagnostic_start = code.index("                try:\n", code.index("def get_dataset_iterator("))
+    diagnostic_end = code.index("                yield encoded_sample\n", diagnostic_start) + len("                yield encoded_sample\n")
+    code = code[:diagnostic_start] + '                yield instruct_tokenizer(wav, sample["start_time_sec"], sample["path"])\n' + code[diagnostic_end:]
     code = code.replace("from tin_style.data import chunk_rejections, validate_chunk_manifest\n", "").replace(
         "            validate_chunk_manifest(native_manifest(str(jsonl_file)), instruct_tokenizer.chunk_step_sec)\n", ""
     ).replace(

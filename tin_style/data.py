@@ -11,6 +11,7 @@ import math
 import logging
 import tempfile
 import wave
+from numbers import Integral
 from functools import lru_cache
 from pathlib import Path
 
@@ -81,6 +82,23 @@ def load_sidecar(wav_path: str) -> dict:
 
 # Temporary native manifests live for the process lifetime, not in the dataset.
 _MANIFEST_DIRECTORY = tempfile.TemporaryDirectory(prefix="tin-style-data-")
+
+
+def filter_audio_chunks(dataset, mimi):
+    """Check actual unpadded sphn lengths against the loaded SEANet encoder."""
+    hop = getattr(getattr(mimi, "encoder", None), "hop_length", None)
+    if isinstance(hop, bool) or not isinstance(hop, Integral) or hop <= 0:
+        raise ValueError("Mimi encoder must expose a positive integer hop_length")
+    for sample in dataset:
+        length = sample["data"][..., : sample["unpadded_len"]].shape[-1]
+        if length <= 0 or length % hop:
+            logging.getLogger(__name__).warning(
+                "Skipping invalid audio-length chunk: path=%s start_sec=%.6f "
+                "samples=%d encoder_hop=%d remainder=%d",
+                sample["path"], sample["start_time_sec"], length, hop, length % hop,
+            )
+            continue
+        yield sample
 
 
 def chunk_rejections(wav_path: str, start: float, step: float) -> list[dict]:

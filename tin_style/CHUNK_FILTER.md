@@ -27,8 +27,19 @@ Deploy both files together:
 is only known when the reference tokenizer is constructed. The normal reference
 iterator performs preflight and filtering automatically, before Mimi/tokenization.
 
+The iterator also filters actual unpadded audio lengths using the loaded
+`mimi.encoder.hop_length`. Empty chunks or lengths not divisible by this hop are
+logged and skipped before Mimi encoding, without padding or cropping. A missing
+or invalid hop fails explicitly rather than guessing from codec frame rate.
+If a rank yields no usable chunks across all source manifests in an epoch
+(after both filters), iteration fails instead of spinning through empty epochs.
+This checks encoder stride compatibility only; other Mimi assertions remain
+errors with path, start time and audio shape diagnostics.
+
 Verification: run `python3 -m pytest tests/test_tin_style_data.py
 tests/test_tin_style_config.py tests/test_tin_style_reference.py -q` from the
 repository root. Tests include real sphn chunk loading, retained audio shapes,
 boundary and multi-window rejection, empty-manifest protection, unchanged source
 files, and reference provenance guards. GPU training remains a server check.
+Also run `tests/test_tin_style_audio_filter.py` for audio-length filtering and
+execution of the actual reference iterator with CPU test doubles.
