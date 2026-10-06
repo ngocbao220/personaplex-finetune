@@ -43,6 +43,36 @@ no guaranteed VRAM minimum is claimed. No automatic CPU/QLoRA fallback.
 
 ## Gates and evidence
 
+### Gate 2 diagnostic report
+
+`phase_2.json` retains the original gate verdict and aggregate comparisons;
+`phase_2_diagnostics.json` adds temporal hidden, depth-only, text and audio
+summaries. Depth-only uses the **same batched temporal hidden tensor** for both
+depth paths, resetting native depth streaming each frame. It includes all depth
+steps (even steps excluded by the final undelay mask) to diagnose native behavior.
+These extra comparisons do not change the gate's pass criteria or tolerance.
+
+Each comparison records per-frame max/mean error, failed/total element counts,
+first failure frame, per-stream statistics and argmax agreement. Hidden-state
+argmax is only a generic vector statistic, not token agreement. Text/audio frame
+indices are undelayed; hidden/depth-only indices are delayed model steps.
+The runtime section records actual dtype, dep_q, delays, context, GPU and PyTorch,
+plus enabled SDP backend settings (not a claim about which kernel was selected).
+The additional batch/depth passes increase runtime and memory usage.
+
+On the reported server, rerun gates 1–2 only in a new directory:
+
+```bash
+python /home/voice/code/VDT_02/baottn/personaplex-finetune-v11/scripts/validate_one_sample.py \
+  --config /home/voice/code/VDT_02/baottn/personaplex-finetune-v11/configs/overfit-10-train-telex.yaml \
+  --output-dir /home/voice/code/VDT_02/baottn/personaplex-finetune-v11/validation-v4-diagnostic \
+  --index 0 --chunk 0 --device cuda --through 2
+```
+
+Preserve the prior `validation-v3` directory. Do not alter sample, text mode,
+duration, checkpoint or thresholds to manufacture parity. Failure still exits
+non-zero after writing reports; no training occurs with `--through 2`.
+
 1. Real Mimi/tokenizer, production builder. Raw/normalized words, every subword
    occurrence, target position/label, builder and delay-effective mask in
    `test1_dump.json`; actual tensor triplet in `sample.pt`. Empty transcript,

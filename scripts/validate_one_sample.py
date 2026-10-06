@@ -12,6 +12,11 @@ python "$PROJECT/scripts/validate_one_sample.py" \
   --output-dir "$OUT" \
   --index 0 --chunk 0 --device cuda \
   --train-steps 300 --through 6
+
+python /home/voice/code/VDT_02/baottn/personaplex-finetune-v11/scripts/validate_one_sample.py \
+  --config /home/voice/code/VDT_02/baottn/personaplex-finetune-v11/configs/overfit-10-train-telex.yaml \
+  --output-dir /home/voice/code/VDT_02/baottn/personaplex-finetune-v11/validation-v4-diagnostic \
+  --index 0 --chunk 0 --device cuda --through 2
 """
 from __future__ import annotations
 
@@ -156,6 +161,40 @@ def compare_logits(torch, batch, stream, mask, atol, rtol):
                 valid_positions=int(mask.sum()), atol=atol, rtol=rtol)
 
 
+def comparison_details(torch, batch, stream, mask, atol, rtol):
+    """Bounded-memory summaries on [B, streams, frames, classes] tensors."""
+    result = compare_logits(torch, batch, stream, mask, atol, rtol)
+    frames, codebooks = [], []
+    first_failure = None
+    for t in range(mask.shape[-1]):
+        valid = mask[..., t]
+        if not valid.any():
+            frames.append(dict(frame=t, valid_positions=0))
+            continue
+        a, b = batch[..., t, :][valid].float(), stream[..., t, :][valid].float()
+        close = torch.isclose(a, b, atol=atol, rtol=rtol)
+        failed = int((~close).sum())
+        if failed and first_failure is None:
+            first_failure = t
+        diff = (a - b).abs()
+        frames.append(dict(frame=t, valid_positions=int(valid.sum()),
+                           failed_elements=failed, total_elements=a.numel(),
+                           max_abs=float(diff.max()), mean_abs=float(diff.mean())))
+    for k in range(mask.shape[1]):
+        valid = mask[:, k]
+        if not valid.any():
+            codebooks.append(dict(stream=k, valid_positions=0))
+            continue
+        row = compare_logits(torch, batch[:, k], stream[:, k], valid, atol, rtol)
+        a, b = batch[:, k][valid].float(), stream[:, k][valid].float()
+        row.update(stream=k, argmax_agreement=float((a.argmax(-1) == b.argmax(-1)).float().mean()))
+        codebooks.append(row)
+    result.update(first_failure_frame=first_failure,
+                  failed_elements=sum(r.get("failed_elements", 0) for r in frames),
+                  frames=frames, streams=codebooks)
+    return result
+
+
 def parity(runtime, codes, args):
     """Native causal temporal streaming + per-frame GT depth streaming.
 
@@ -167,13 +206,17 @@ def parity(runtime, codes, args):
     model = runtime.model
     initial = model._get_initial_token()
     delayed = torch.cat([initial, _delay_sequence(model.delays, codes, initial)], dim=2)
-    texts, audios = [], []
+    texts, audios, hiddens, isolated = [], [], [], []
     with torch.inference_mode():
         batch = model.forward_train(codes)
+        # Independent batched temporal pass, using identical delayed inputs.
+        batch_hidden, _ = model.forward_codes(delayed[:, :, :-1])
+        isolated_batch = model.forward_depformer_training(delayed[:, :, 1:], batch_hidden).cpu()
         # Only temporal transformer state persists across time. Depth resets every frame.
         with model.transformer.streaming(1):
             for t in range(codes.shape[-1]):
                 hidden, text = model.forward_codes(delayed[:, :, t:t + 1])
+                hiddens.append(hidden.cpu())
                 texts.append(text.cpu())
                 depth = []
                 with model.depformer.streaming(1):
@@ -182,9 +225,19 @@ def parity(runtime, codes, args):
                         gt = delayed[:, previous_stream:previous_stream + 1, t + 1:t + 2]
                         depth.append(model.forward_depformer(k, gt, hidden).cpu())
                 audios.append(torch.cat(depth, dim=1))
-        audio, am = _undelay_sequence(model.delays[1:17], torch.cat(audios, dim=2), float("nan"))
+        # Same batch hidden and GT tokens: isolate depth from temporal error.
+        for t in range(codes.shape[-1]):
+            depth = []
+            with model.depformer.streaming(1):
+                for k in range(model.dep_q):
+                    previous_stream = 0 if k == 0 else model.audio_offset + k - 1
+                    gt = delayed[:, previous_stream:previous_stream + 1, t + 1:t + 2]
+                    depth.append(model.forward_depformer(k, gt, batch_hidden[:, t:t + 1]).cpu())
+            isolated.append(torch.cat(depth, dim=1))
+        audio_delays = model.delays[model.audio_offset:model.audio_offset + model.dep_q]
+        audio, am = _undelay_sequence(audio_delays, torch.cat(audios, dim=2), float("nan"))
         text, tm = _undelay_sequence(model.delays[:1], torch.cat(texts, dim=2), float("nan"))
-        am &= codes[:, 1:17].cpu() != model.zero_token_id
+        am &= codes[:, model.audio_offset:model.audio_offset + model.dep_q].cpu() != model.zero_token_id
         tm &= codes[:, :1].cpu() != model.zero_token_id
         masks_equal = torch.equal(am, batch.mask.cpu()) and torch.equal(tm, batch.text_mask.cpu())
         report = dict(masks_equal=masks_equal,
@@ -192,6 +245,27 @@ def parity(runtime, codes, args):
                       audio=compare_logits(torch, batch.logits.cpu(), audio, am, args.atol, args.rtol),
                       scope="native temporal/depth streaming GT-history, not LMGen cache parity")
         report["passed"] = masks_equal and report["text"]["passed"] and report["audio"]["passed"]
+        hidden_batch = batch_hidden.cpu().unsqueeze(1)
+        hidden_stream = torch.cat(hiddens, dim=1).unsqueeze(1)
+        hidden_mask = torch.ones(hidden_batch.shape[:-1], dtype=torch.bool)
+        depth_mask = torch.ones(isolated_batch.shape[:-1], dtype=torch.bool)
+        report["diagnostics"] = dict(
+            frame_grid="text/audio: undelayed; hidden/depth_only: delayed model steps",
+            temporal_hidden=comparison_details(torch, hidden_batch, hidden_stream, hidden_mask, args.atol, args.rtol),
+            depth_only=comparison_details(torch, isolated_batch, torch.cat(isolated, dim=2), depth_mask, args.atol, args.rtol),
+            text=comparison_details(torch, batch.text_logits.cpu(), text, tm, args.atol, args.rtol),
+            audio=comparison_details(torch, batch.logits.cpu(), audio, am, args.atol, args.rtol))
+        parameter = next(model.parameters())
+        report["runtime"] = dict(dtype=str(parameter.dtype), device=str(parameter.device),
+                                torch_version=torch.__version__, cuda_version=torch.version.cuda,
+                                gpu=torch.cuda.get_device_name(parameter.device) if parameter.is_cuda else None,
+                                total_frames=codes.shape[-1], dep_q=model.dep_q, delays=list(model.delays),
+                                temporal_context=getattr(model.transformer.layers[0].self_attn, "context", None),
+                                depth_context=getattr(model.depformer.layers[0].self_attn, "context", None),
+                                flash_sdp=torch.backends.cuda.flash_sdp_enabled(),
+                                mem_efficient_sdp=torch.backends.cuda.mem_efficient_sdp_enabled(),
+                                math_sdp=torch.backends.cuda.math_sdp_enabled(),
+                                adapter=str(getattr(args, "adapter", None)))
         return report, batch
 
 
@@ -254,6 +328,8 @@ def phase(args):
             if args.rtol is None:
                 args.rtol = 1e-4 if dtype == torch.float32 else 1e-3 if dtype == torch.float16 else 5e-3
             result, output = parity(runtime, codes, args)
+            write(out / "phase_2_diagnostics.json", result.pop("diagnostics"))
+            result["diagnostics_file"] = str(out / "phase_2_diagnostics.json")
             for row in json.loads((out / "test1_dump.json").read_text())["token_occurrences"]:
                 assert bool(output.text_mask[0, 0, row["sequence_frame"]]), "Test1 analytical mask disagrees"
             return result

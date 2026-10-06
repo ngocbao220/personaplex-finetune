@@ -60,6 +60,10 @@ def test_native_small_model_parity_detects_depth_mismatch():
     assert result["audio"]["finite"]
     assert not result["passed"]
     assert result["audio"]["max_abs"] > 1e-3
+    assert result["diagnostics"]["temporal_hidden"]["passed"]
+    assert not result["diagnostics"]["depth_only"]["passed"]
+    assert result["runtime"]["dep_q"] == 16
+    assert result["runtime"]["total_frames"] == 4
 
 
 def test_invalid_masked_logits_do_not_pollute_comparison():
@@ -67,6 +71,20 @@ def test_invalid_masked_logits_do_not_pollute_comparison():
     a = torch.tensor([[[[1., 2.], [float("nan"), float("nan")]]]])
     mask = torch.tensor([[[True, False]]])
     assert harness().compare_logits(torch, a, a.clone(), mask, 0, 0)["passed"]
+
+
+def test_comparison_details_localizes_failure_and_ignores_masked_nan():
+    import torch
+    a = torch.tensor([[[[1., 2.], [3., 4.], [float("nan"), float("nan")]]]])
+    b = a.clone()
+    b[0, 0, 1, 0] = 5.
+    result = harness().comparison_details(torch, a, b, torch.tensor([[[True, True, False]]]), 0, 0)
+    assert result["finite"]
+    assert not result["passed"]
+    assert result["first_failure_frame"] == 1
+    assert result["failed_elements"] == 1
+    assert result["streams"][0]["argmax_agreement"] == 0.5
+    assert result["frames"][2]["valid_positions"] == 0
 
 
 def test_acoustic_diagnostics_are_unweighted_and_exclude_padding():
