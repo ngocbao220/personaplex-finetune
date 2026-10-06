@@ -123,3 +123,52 @@ def test_native_argmax_instrumentation_restores_function():
         assert lm.sample_token(torch.tensor([[1., 3.]]), False, 0).item() == 1
     assert counts["calls"] == 1
     assert lm.sample_token is original
+
+
+def test_math_backend_and_fp32_controls_restore_on_failure():
+    import torch
+    prior = (torch.backends.cuda.flash_sdp_enabled(),
+             torch.backends.cuda.mem_efficient_sdp_enabled(),
+             torch.backends.cuda.math_sdp_enabled(),
+             torch.backends.cuda.matmul.allow_tf32,
+             torch.backends.cudnn.allow_tf32)
+    with pytest.raises(RuntimeError, match="probe"):
+        with harness().parity_backend(torch, "math", True):
+            assert not torch.backends.cuda.flash_sdp_enabled()
+            assert not torch.backends.cuda.mem_efficient_sdp_enabled()
+            assert torch.backends.cuda.math_sdp_enabled()
+            assert not torch.backends.cuda.matmul.allow_tf32
+            assert not torch.backends.cudnn.allow_tf32
+            raise RuntimeError("probe")
+    assert prior == (torch.backends.cuda.flash_sdp_enabled(),
+                     torch.backends.cuda.mem_efficient_sdp_enabled(),
+                     torch.backends.cuda.math_sdp_enabled(),
+                     torch.backends.cuda.matmul.allow_tf32,
+                     torch.backends.cudnn.allow_tf32)
+
+
+def test_diagnostic_flags_cannot_advance_to_training(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["validate_one_sample.py", "--config", "unused.yaml",
+                                    "--output-dir", str(tmp_path / "run"), "--through", "6",
+                                    "--train-steps", "300", "--parity-sdp-backend", "math"])
+    with pytest.raises(SystemExit) as exc:
+        harness().main()
+    assert exc.value.code == 2
+    assert not (tmp_path / "run").exists()
+
+
+def test_full_runtime_requests_fp32_at_load(monkeypatch):
+    from personaplex_finetuning import runtime as runtime_module
+    import torch
+    received = {}
+
+    def fake_load(*args, **kwargs):
+        received.update(kwargs)
+        return SimpleNamespace(model=torch.nn.Linear(2, 2))
+
+    monkeypatch.setattr(runtime_module, "load_runtime", fake_load)
+    config = SimpleNamespace(model_root=Path("/models"), personaplex_source=Path("/source"),
+                             device="cpu", qlora=False, quant_type="nf4")
+    loaded = harness().full_runtime(config, full_precision_model=True)
+    assert received["full_precision_model"] is True
+    assert not loaded.model.training

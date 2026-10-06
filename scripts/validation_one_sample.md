@@ -6,6 +6,48 @@ All child logs and failures remain on disk. A non-zero gate stops the parent.
 
 ## Server commands
 
+### Controlled gate 2 diagnostics
+
+Run BF16/math first, then FP32/math if needed. Preserve the existing
+`validation-v4-diagnostic` baseline and use separate empty output directories:
+
+```bash
+PROJECT=/home/voice/code/VDT_02/baottn/personaplex-finetune-v11
+
+python "$PROJECT/scripts/validate_one_sample.py" \
+  --config "$PROJECT/configs/overfit-10-train-telex.yaml" \
+  --output-dir "$PROJECT/validation-v5-bf16-math" \
+  --index 0 --chunk 0 --device cuda --through 2 \
+  --parity-dtype bf16 --parity-sdp-backend math
+
+python "$PROJECT/scripts/validate_one_sample.py" \
+  --config "$PROJECT/configs/overfit-10-train-telex.yaml" \
+  --output-dir "$PROJECT/validation-v6-fp32-math" \
+  --index 0 --chunk 0 --device cuda --through 2 \
+  --parity-dtype fp32 --parity-sdp-backend math
+```
+
+These overrides require `--through 2` and cannot advance to training or gates
+3–6. Phase 1 is unchanged. FP32 requests `full_precision_model=True` at model
+load, verifies the loaded dtype, rejects QLoRA, and disables CUDA matmul/cuDNN
+TF32 during parity. BF16 verifies that the runtime actually loaded BF16.
+The math SDP scope surrounds all gate 2 comparisons, including temporal and
+isolated depth diagnostics, and restores backend settings afterward.
+
+No tolerance is relaxed: existing dtype defaults apply (BF16 `0.05/0.005`,
+FP32 `1e-5/1e-4` for atol/rtol). Do not supply tolerance overrides for these
+experiments. `phase_2.json` marks overridden runs as `diagnostic_only`;
+`phase_2_diagnostics.json` records actual dtype, enabled SDP backends, requested
+controls, and TF32 flags. Auto backend flags do not identify which kernel ran.
+Passing an alternate-configuration diagnostic does not overturn the original
+BF16/auto gate failure or authorize training under that configuration.
+
+Compare sample identity, `sample.pt` tensors, temporal statistics, depth-only
+per-stream statistics (especially stream 15), and original text/audio results.
+Math attention and FP32 may require much more memory; if OOM occurs, preserve
+the failure rather than silently shorten the sample. No GPU rerun has been
+validated by the local CPU tests.
+
 Set these to actual absolute paths on the server:
 
 ```bash

@@ -21,6 +21,7 @@ python /home/voice/code/VDT_02/baottn/personaplex-finetune-v11/scripts/validate_
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 import hashlib
 import json
@@ -135,7 +136,7 @@ def supervision_dump(config, sample, runtime, example):
                 effective_text_mask_source="native delay/zero-token semantics; verified against model in Test2")
 
 
-def full_runtime(config, adapter=None):
+def full_runtime(config, adapter=None, *, full_precision_model=False):
     from personaplex_finetuning.runtime import load_runtime, RuntimePaths
     from personaplex_finetuning.inference import resolve_adapter_checkpoint
     from personaplex_finetuning.lora import inject_lora, load_adapter
@@ -143,12 +144,41 @@ def full_runtime(config, adapter=None):
         file, rank, alpha, base, prefixes = resolve_adapter_checkpoint(Path(adapter))
         assert base == config.model_root.resolve(), "checkpoint base differs from config"
     runtime = load_runtime(RuntimePaths(config.model_root, config.personaplex_source),
-                           config.device, config.qlora, config.quant_type)
+                           config.device, config.qlora, config.quant_type,
+                           full_precision_model=full_precision_model)
     if adapter:
         inject_lora(runtime.model, rank, alpha, prefixes=prefixes)
         load_adapter(runtime.model, file)
     runtime.model.eval()
     return runtime
+
+
+@contextmanager
+def parity_backend(torch, backend, fp32):
+    """Scope diagnostic kernel selection and restore global precision settings."""
+    matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
+    cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    try:
+        if fp32:
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+        if backend == "math":
+            try:
+                from torch.nn.attention import SDPBackend, sdpa_kernel
+                scope = sdpa_kernel(SDPBackend.MATH)
+            except ImportError:
+                # Compatibility with the older PyTorch installed on the Mac.
+                scope = torch.backends.cuda.sdp_kernel(enable_flash=False,
+                                                       enable_math=True,
+                                                       enable_mem_efficient=False)
+            with scope:
+                yield
+        else:
+            yield
+    finally:
+        if fp32:
+            torch.backends.cuda.matmul.allow_tf32 = matmul_tf32
+            torch.backends.cudnn.allow_tf32 = cudnn_tf32
 
 
 def compare_logits(torch, batch, stream, mask, atol, rtol):
@@ -265,6 +295,10 @@ def parity(runtime, codes, args):
                                 flash_sdp=torch.backends.cuda.flash_sdp_enabled(),
                                 mem_efficient_sdp=torch.backends.cuda.mem_efficient_sdp_enabled(),
                                 math_sdp=torch.backends.cuda.math_sdp_enabled(),
+                                matmul_tf32=torch.backends.cuda.matmul.allow_tf32,
+                                cudnn_tf32=torch.backends.cudnn.allow_tf32,
+                                requested_dtype=getattr(args, "parity_dtype", "default"),
+                                requested_sdp_backend=getattr(args, "parity_sdp_backend", "auto"),
                                 adapter=str(getattr(args, "adapter", None)))
         return report, batch
 
@@ -320,14 +354,22 @@ def phase(args):
         adapter = args.adapter
         if args.phase == "5":
             adapter = json.loads((out / "trained.json").read_text())["adapter"]
-        runtime = full_runtime(config, adapter)
+        fp32 = args.phase == "2" and args.parity_dtype == "fp32"
+        if fp32 and config.qlora:
+            raise ValueError("FP32 parity diagnostic requires qlora=false")
+        runtime = full_runtime(config, adapter, full_precision_model=fp32)
         if args.phase == "2":
             dtype = next(runtime.model.parameters()).dtype
+            if args.parity_dtype != "default":
+                expected_dtype = torch.float32 if fp32 else torch.bfloat16
+                assert dtype == expected_dtype, f"requested {expected_dtype}, loaded {dtype}"
             if args.atol is None:
                 args.atol = 1e-5 if dtype == torch.float32 else 1e-2 if dtype == torch.float16 else 5e-2
             if args.rtol is None:
                 args.rtol = 1e-4 if dtype == torch.float32 else 1e-3 if dtype == torch.float16 else 5e-3
-            result, output = parity(runtime, codes, args)
+            with parity_backend(torch, args.parity_sdp_backend, fp32):
+                result, output = parity(runtime, codes, args)
+            result["diagnostic_only"] = args.parity_dtype != "default" or args.parity_sdp_backend != "auto"
             write(out / "phase_2_diagnostics.json", result.pop("diagnostics"))
             result["diagnostics_file"] = str(out / "phase_2_diagnostics.json")
             for row in json.loads((out / "test1_dump.json").read_text())["token_occurrences"]:
@@ -422,8 +464,15 @@ def main():
     parser.add_argument("--min-audio-accuracy", type=float, default=0.99)
     parser.add_argument("--max-audio-ce", type=float, default=0.1)
     parser.add_argument("--worker-timeout", type=int, default=7200)
+    parser.add_argument("--parity-dtype", choices=["default", "bf16", "fp32"], default="default",
+                        help="gate 2 diagnostic model dtype; non-default requires --through 2")
+    parser.add_argument("--parity-sdp-backend", choices=["auto", "math"], default="auto",
+                        help="gate 2 SDP backend; math requires --through 2")
     parser.add_argument("--phase", choices=["1", "2", "train", "3", "4", "5", "6"], help=argparse.SUPPRESS)
     args = parser.parse_args()
+    diagnostic = args.parity_dtype != "default" or args.parity_sdp_backend != "auto"
+    if diagnostic and (args.through != 2 or args.phase not in (None, "1", "2")):
+        parser.error("parity diagnostic overrides require --through 2 and cannot advance to training/gates 3–6")
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.phase:
