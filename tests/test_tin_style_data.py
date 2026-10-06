@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tin_style.data import load_sidecar, native_manifest
+from tin_style.data import load_sidecar, native_manifest, chunk_rejections, validate_chunk_manifest
 
 
 def wav(path, channels):
@@ -72,7 +72,7 @@ def test_flat_rejects_explicit_reversed_mapping(prepared):
         load_sidecar(str(sample / "conversation.wav"))
 
 
-@pytest.mark.parametrize("change", ["channels", "timestamp", "speaker", "prompt", "voice"])
+@pytest.mark.parametrize("change", ["channels", "speaker", "prompt", "voice"])
 def test_invalid_prepared_assets_fail(prepared, change):
     sample, manifest = prepared
     if change in ("channels", "prompt"):
@@ -99,6 +99,55 @@ def test_native_format_passthrough(tmp_path):
     manifest.write_text(json.dumps({"path": str(audio), "duration": 3.0}))
     assert native_manifest(str(manifest)) == str(manifest)
     assert load_sidecar(str(audio)) == sidecar
+
+
+@pytest.mark.parametrize("start,end,rejected", [
+    (.8, 2.0, [False, True]),
+    (.4, 2.0, [True, True]),
+    (2.0, 3.0, [False, True]),
+    (-1.0, -.1, [True, False]),
+    (.8, .6, [False, True]),
+    (.5, .5, [False, True]),
+    (.8, 1.022, [False, False]),
+])
+def test_invalid_words_reject_only_affected_windows(prepared, start, end, rejected):
+    sample, manifest = prepared
+    words = [{"speaker": "agent", "word": "bad", "start": start, "end": end}]
+    (sample / "words.json").write_text(json.dumps(words))
+    before = {p.name: p.read_bytes() for p in sample.iterdir()}
+    path = str(sample / "conversation.wav")
+    native_manifest(str(manifest))
+    assert [bool(chunk_rejections(path, t, .5)) for t in (0.0, .5)] == rejected
+    assert {p.name: p.read_bytes() for p in sample.iterdir()} == before
+
+
+def test_filter_preflight_and_real_sphn_windows(prepared, caplog):
+    sphn = pytest.importorskip("sphn")
+    sample, manifest = prepared
+    words = json.loads((sample / "words.json").read_text())
+    words[0]["end"] = 2.0
+    (sample / "words.json").write_text(json.dumps(words))
+    converted = native_manifest(str(manifest))
+    validate_chunk_manifest(converted, .5)
+    assert "Skipping invalid chunk" in caplog.text
+    dataset = sphn.dataset_jsonl(converted, duration_sec=.5, num_threads=1,
+                                sample_rate=24000, pad_last_segment=True).seq(skip=0, step_by=1)
+    kept = [s for s in dataset if not chunk_rejections(s["path"], s["start_time_sec"], .5)]
+    assert len(kept) == 1
+    assert kept[0]["start_time_sec"] == 0
+    assert kept[0]["data"].shape == (2, 12000)
+    with pytest.raises(ValueError, match="no valid chunks"):
+        validate_chunk_manifest(converted, 1.0)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_unlocatable_timestamp_still_fails(prepared, value):
+    sample, manifest = prepared
+    (sample / "words.json").write_text(json.dumps([
+        {"speaker": "agent", "word": "bad", "start": value, "end": 2.0},
+    ]))
+    with pytest.raises(ValueError, match="invalid timestamps"):
+        native_manifest(str(manifest))
 
 
 def test_prepared_manifest_reads_through_reference_sphn(prepared):

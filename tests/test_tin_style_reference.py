@@ -31,6 +31,12 @@ def test_data_boundary_patch_does_not_change_interleaving():
     assert hashlib.sha256(restored.encode()).hexdigest() == provenance["sha256"][path]
     path = "moshi-finetune/finetune/data/dataset.py"
     code = (root / "reference" / path).read_text()
+    code = code.replace("from tin_style.data import chunk_rejections, validate_chunk_manifest\n", "").replace(
+        "            validate_chunk_manifest(native_manifest(str(jsonl_file)), instruct_tokenizer.chunk_step_sec)\n", ""
+    ).replace(
+        '                if chunk_rejections(sample["path"], sample["start_time_sec"], instruct_tokenizer.chunk_step_sec):\n'
+        "                    continue\n", ""
+    )
     restored = code.replace("from tin_style.data import native_manifest\n", "").replace(
         "native_manifest(str(jsonl_file)),", "str(jsonl_file),"
     )

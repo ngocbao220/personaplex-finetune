@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import logging
 import tempfile
 import wave
 from functools import lru_cache
@@ -45,6 +46,7 @@ def prepared_sidecar(directory: Path) -> dict:
         raise ValueError(f"{directory}: words.json must be a non-empty list")
     speakers = {"agent": "SPEAKER_BROKER", "user": "SPEAKER_CLIENT"}
     alignments = []
+    invalid_words = []
     for index, word in enumerate(words):
         if word.get("speaker") not in speakers:
             raise ValueError(f"{directory}: invalid speaker at word {index}")
@@ -52,8 +54,10 @@ def prepared_sidecar(directory: Path) -> dict:
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"{directory}: empty word at index {index}")
         start, end = float(word["start"]), float(word["end"])
-        if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end <= duration):
+        if not (math.isfinite(start) and math.isfinite(end)):
             raise ValueError(f"{directory}: invalid timestamps at word {index}: {start}, {end}")
+        if not 0 <= start < end <= duration + 0.05:
+            invalid_words.append({"index": index, "start": start, "end": end})
         alignments.append([text, [start, end], speakers[word["speaker"]]])
     # The reference binary search expects timestamp-sorted alignments.
     alignments.sort(key=lambda item: item[1][0])
@@ -61,6 +65,8 @@ def prepared_sidecar(directory: Path) -> dict:
         "text_prompt": prompt,
         "voice_prompt": str(voice_path.resolve()),
         "alignments": alignments,
+        "invalid_words": invalid_words,
+        "duration": duration,
     }
 
 
@@ -75,6 +81,56 @@ def load_sidecar(wav_path: str) -> dict:
 
 # Temporary native manifests live for the process lifetime, not in the dataset.
 _MANIFEST_DIRECTORY = tempfile.TemporaryDirectory(prefix="tin-style-data-")
+
+
+def chunk_rejections(wav_path: str, start: float, step: float) -> list[dict]:
+    """Reject windows touching invalid words; never repair transcript timestamps.
+
+    Out-of-audio endpoints are mapped to the edge chunk for filtering only.
+    Native reference sidecars without invalid_words remain unchanged.
+    """
+    if not math.isfinite(step) or step <= 0:
+        raise ValueError("chunk step must be finite and positive")
+    data = load_sidecar(wav_path)
+    rejected = []
+    for word in data.get("invalid_words", []):
+        duration = data["duration"]
+        low = max(0.0, min(duration, min(word["start"], word["end"])))
+        high = max(0.0, min(duration, max(word["start"], word["end"])))
+        if low == high:
+            overlaps = start <= low < start + step or (low == duration and start < duration <= start + step)
+        else:
+            overlaps = low < start + step and high > start
+        if overlaps:
+            rejected.append(word)
+    return rejected
+
+
+@lru_cache(maxsize=128)
+def validate_chunk_manifest(manifest: str, step: float) -> None:
+    """Preflight every window, log exclusions, fail instead of empty infinite epochs."""
+    if not math.isfinite(step) or step <= 0:
+        raise ValueError("chunk step must be finite and positive")
+    kept = dropped = 0
+    for line in Path(manifest).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        start = 0.0
+        while start < row["duration"]:
+            rejected = chunk_rejections(row["path"], start, step)
+            if rejected:
+                dropped += 1
+                logging.getLogger(__name__).warning(
+                    "Skipping invalid chunk: path=%s window=[%.6f, %.6f) words=%s",
+                    row["path"], start, start + step, rejected,
+                )
+            else:
+                kept += 1
+            start += step
+    print(f"[tin-style chunks] kept={kept} dropped={dropped} step={step}", flush=True)
+    if not kept:
+        raise ValueError(f"{manifest}: no valid chunks remain")
 
 
 @lru_cache(maxsize=128)
