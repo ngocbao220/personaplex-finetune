@@ -47,6 +47,31 @@ def test_prepared_mapping_and_native_manifest(prepared):
     assert {p.name: p.read_bytes() for p in sample.iterdir()} == before
 
 
+def test_flat_prepared_schema(prepared):
+    sample, manifest = prepared
+    (sample / "voice_prompt.wav").rename(sample / "voice_prompt_left.wav")
+    metadata = {"layout": "flat", "text_prompt_left": "Left prompt",
+                "text_prompt_right": "Right prompt",
+                "voice_prompt_left": "same_conversation"}
+    (sample / "metadata.json").write_text(json.dumps(metadata))
+    before = {p.name: p.read_bytes() for p in sample.iterdir()}
+    data = load_sidecar(str(sample / "conversation.wav"))
+    assert data["text_prompt"] == "Left prompt"
+    assert data["voice_prompt"] == str(sample / "voice_prompt_left.wav")
+    native_manifest(str(manifest))
+    assert {p.name: p.read_bytes() for p in sample.iterdir()} == before
+
+
+def test_flat_rejects_explicit_reversed_mapping(prepared):
+    sample, _ = prepared
+    (sample / "metadata.json").write_text(json.dumps({
+        "layout": "flat", "agent_channel": "right", "user_channel": "left",
+        "text_prompt_left": "Left prompt",
+    }))
+    with pytest.raises(ValueError, match="require LEFT=agent"):
+        load_sidecar(str(sample / "conversation.wav"))
+
+
 @pytest.mark.parametrize("change", ["channels", "timestamp", "speaker", "prompt", "voice"])
 def test_invalid_prepared_assets_fail(prepared, change):
     sample, manifest = prepared

@@ -27,13 +27,18 @@ def _audio_info(path: Path, channels: int) -> float:
 def prepared_sidecar(directory: Path) -> dict:
     """Read a prepared sample into the reference sidecar schema in memory."""
     metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
-    if metadata.get("agent_channel") != "left" or metadata.get("user_channel") != "right":
+    # Current flat prepared format defines roles by channel, like the legacy
+    # reader. Older explicit-role samples must still declare their mapping.
+    flat = metadata.get("layout") == "flat"
+    agent_channel = metadata.get("agent_channel", "left" if flat else None)
+    user_channel = metadata.get("user_channel", "right" if flat else None)
+    if agent_channel != "left" or user_channel != "right":
         raise ValueError(f"{directory}: require LEFT=agent and RIGHT=user")
-    prompt = metadata.get("text_prompt")
+    prompt = metadata.get("text_prompt_left" if flat else "text_prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError(f"{directory}: metadata.text_prompt must be non-empty")
     duration = _audio_info(directory / "conversation.wav", 2)
-    voice_path = directory / "voice_prompt.wav"
+    voice_path = directory / ("voice_prompt_left.wav" if flat else "voice_prompt.wav")
     _audio_info(voice_path, 1)
     words = json.loads((directory / "words.json").read_text(encoding="utf-8"))
     if not isinstance(words, list) or not words:
