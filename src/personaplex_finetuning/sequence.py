@@ -132,11 +132,11 @@ def pad_training_example(example: TrainingExample, total_frames: int, text_paddi
     if padding == 0:
         return example
     codes = tuple(
-        stream + ((text_padding_id if index == 0 else zero_token),) * padding
+        stream + (zero_token,) * padding
         for index, stream in enumerate(example.input_codes)
     )
     labels = tuple(
-        stream + ((text_padding_id if index == 0 else zero_token),) * padding
+        stream + (zero_token,) * padding
         for index, stream in enumerate(example.labels)
     )
     masks = tuple(mask + (False,) * padding for mask in example.loss_mask)

@@ -61,7 +61,7 @@ def post_encode_collate(examples, text_padding_id: int, zero_token: int, device)
     max_frames = max(lengths)
     batch = len(examples)
     codes = torch.zeros((batch, 17, max_frames), dtype=torch.long, device=device)
-    codes[:, 0] = text_padding_id
+    codes[:, 0] = zero_token
     labels = torch.full_like(codes, zero_token)
     loss_mask = torch.zeros((batch, 17, max_frames), dtype=torch.bool, device=device)
     valid_frame_mask = torch.zeros((batch, max_frames), dtype=torch.bool, device=device)
