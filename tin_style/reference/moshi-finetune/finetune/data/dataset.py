@@ -220,7 +220,22 @@ def get_dataset_iterator(
                 if chunk_rejections(sample["path"], sample["start_time_sec"], instruct_tokenizer.chunk_step_sec):
                     continue
                 wav = sample["data"][..., : sample["unpadded_len"]]
-                yield instruct_tokenizer(wav, sample["start_time_sec"], sample["path"])
+                try:
+                    encoded_sample = instruct_tokenizer(
+                        wav, sample["start_time_sec"], sample["path"]
+                    )
+                except AssertionError as exc:
+                    raise RuntimeError(
+                        "Tokenizer failed: "
+                        f"path={sample['path']} "
+                        f"start_sec={sample['start_time_sec']} "
+                        f"unpadded_len={sample['unpadded_len']} "
+                        f"wav_shape={wav.shape} "
+                        f"chunk_step_sec={instruct_tokenizer.chunk_step_sec} "
+                        f"sample_rate={instruct_tokenizer.mimi.sample_rate}"
+                    ) from exc
+
+                yield encoded_sample
         if is_finite:
             break
         print(f"Rank {rank} finished epoch {epoch}")
