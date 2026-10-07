@@ -1,0 +1,39 @@
+{
+  "argv": [
+    "scripts/audit_personaplex.py",
+    "alignment",
+    "--sample-dir",
+    "../otospeech-prepared/samples/conv_0001",
+    "--sample-dir",
+    "../otospeech-prepared/samples/conv_0002",
+    "--sample-dir",
+    "../otospeech-prepared/samples/conv_0003",
+    "--sample-dir",
+    "../otospeech-prepared/samples/conv_0004",
+    "--sample-dir",
+    "../otospeech-prepared/samples/conv_0005",
+    "--sample-dir",
+    "../otospeech-prepared/samples/conv_0006",
+    "--sample-dir",
+    "../otospeech-prepared/samples/conv_0007",
+    "--sample-dir",
+    "../otospeech-prepared/samples/conv_0008",
+    "--sample-dir",
+    "../otospeech-prepared/samples/conv_0009",
+    "--sample-dir",
+    "../otospeech-prepared/samples/conv_0010",
+    "--tokenizer",
+    "../models/tokenizer_spm_32k_3.model",
+    "--end-sec",
+    "10000",
+    "--output-dir",
+    "audit-artifacts/otospeech-alignment-all-v2"
+  ],
+  "python": "/opt/anaconda3/envs/personaplex/bin/python",
+  "git": {
+    "root": "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning",
+    "commit": "ea69615b635ad3021422f814a2296c2dccba0d20",
+    "status": "M src/personaplex_finetuning/lora.py\n?? artifact.zip\n?? artifact/\n?? audit-artifacts/\n?? scripts/audit_core.py\n?? scripts/audit_native.py\n?? scripts/audit_personaplex.py\n?? tests/test_audit_harness.py",
+    "diff": "diff --git a/src/personaplex_finetuning/lora.py b/src/personaplex_finetuning/lora.py\nindex a88aa7e..48eb952 100644\n--- a/src/personaplex_finetuning/lora.py\n+++ b/src/personaplex_finetuning/lora.py\n@@ -97,6 +97,26 @@ def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0, prefixes:\n         root = getattr(model, prefix, None)\n         if root is None:\n             continue\n+        # Expose hidden Moshi QKV projections as proper Linear modules before searching\n+        for name, module in list(root.named_modules()):\n+            if hasattr(module, \"in_proj_weight\") and isinstance(module.in_proj_weight, torch.nn.Parameter):\n+                has_bias = hasattr(module, \"in_proj_bias\") and isinstance(module.in_proj_bias, torch.nn.Parameter)\n+                in_proj = torch.nn.Linear(module.in_proj_weight.shape[1], module.in_proj_weight.shape[0], bias=has_bias, device=module.in_proj_weight.device)\n+                in_proj.weight = module.in_proj_weight\n+                if has_bias:\n+                    in_proj.bias = module.in_proj_bias\n+                module.in_proj = in_proj\n+                \n+                class LoRAAttentionWrapper(module.__class__):\n+                    @property\n+                    def in_proj_weight(self):\n+                        return self.in_proj.weight\n+                    @property\n+                    def in_proj_bias(self):\n+                        return self.in_proj.bias if hasattr(self.in_proj, \"bias\") else None\n+                module.__class__ = LoRAAttentionWrapper\n+\n+\n         for name, module in root.named_modules():\n             is_dense_linear = isinstance(module, torch.nn.Linear)\n             is_4bit_linear = module.__class__.__module__.startswith(\"bitsandbytes.\") and module.__class__.__name__ == \"Linear4bit\""
+  }
+}

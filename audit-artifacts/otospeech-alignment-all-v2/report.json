@@ -1,0 +1,66 @@
+{
+  "scope": "explicit legacy schema bridge; not production loader compatibility or failing synthetic corpus",
+  "tokenizer_sha256": "78d4336533ddc26f9acf7250d7fb83492152196c6ea4212c841df76933f18d2d",
+  "samples": [
+    {
+      "sample_id": "conv_0001",
+      "local_lost": 0,
+      "reference_lost": 72,
+      "frame_mismatches": 150
+    },
+    {
+      "sample_id": "conv_0002",
+      "local_lost": 0,
+      "reference_lost": 120,
+      "frame_mismatches": 236
+    },
+    {
+      "sample_id": "conv_0003",
+      "local_lost": 0,
+      "reference_lost": 177,
+      "frame_mismatches": 388
+    },
+    {
+      "sample_id": "conv_0004",
+      "local_lost": 0,
+      "reference_lost": 119,
+      "frame_mismatches": 258
+    },
+    {
+      "sample_id": "conv_0005",
+      "local_lost": 0,
+      "reference_lost": 92,
+      "frame_mismatches": 184
+    },
+    {
+      "sample_id": "conv_0006",
+      "local_lost": 0,
+      "reference_lost": 200,
+      "frame_mismatches": 371
+    },
+    {
+      "sample_id": "conv_0007",
+      "local_lost": 0,
+      "reference_lost": 47,
+      "frame_mismatches": 95
+    },
+    {
+      "sample_id": "conv_0008",
+      "local_lost": 0,
+      "reference_lost": 95,
+      "frame_mismatches": 203
+    },
+    {
+      "sample_id": "conv_0009",
+      "local_lost": 0,
+      "reference_lost": 42,
+      "frame_mismatches": 89
+    },
+    {
+      "sample_id": "conv_0010",
+      "local_lost": 0,
+      "reference_lost": 90,
+      "frame_mismatches": 176
+    }
+  ]
+}

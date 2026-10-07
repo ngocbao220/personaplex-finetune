@@ -1,0 +1,29 @@
+{
+  "seconds": 2673.515401184559,
+  "peak_gpu_bytes": 28090744832,
+  "checkpoint": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/overfit-100-train-no-diaritics-no-userloss/train_20261006_072419_114738/checkpoints/checkpoint_001000/lora.safetensors",
+  "best_checkpoint": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/overfit-100-train-no-diaritics-no-userloss/train_20261006_072419_114738/checkpoints/best_loss/lora.safetensors",
+  "best_val_loss": 0.8322712247691504,
+  "best_inference_checkpoint": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/overfit-100-train-no-diaritics-no-userloss/train_20261006_072419_114738/checkpoints/best_inference/lora.safetensors",
+  "best_generation_cer": 0.712468193384224,
+  "starting_generation_cer": 0.7888040712468194,
+  "inference_checkpoint_status": "validated_generation_improves_base",
+  "best_inference_sample": {
+    "sample_id": "text_dialogue_deepdialogue__test__creativity_20079__var00",
+    "reference": "Toi thuc su rat hao huc duoc chia se niem dam me ve phong canh cua minh No la mot so thich thu gian va day y nghia doi voi toi u U dung vay toi thich ve nhung ngon nui thanh binh va ho nuoc tinh lang Chung luon mang lai cho toi cam giac binh yen va niem vui Con ban thi sao Ban co canh yeu thich nao de ve khong u u u O qua la thu vi khi ca hai chung ta deu tim thay niem vui trong phong cach ve rieng biet nhi No giong nhu mot su ket hop tuyet voi giua su tinh lang va nang luong trong nghe thuat cua chung ta vay",
+    "hypothesis": "Oi toi thuc su thao hoci mot mot chia se nhau nam de ve phan khac mot moi Ban da mot sao thich thu gan va day nghia do voi toi Ban Dung vao luon mot lam cho tuong tro dan dinh ve noi voi Ban co bang thi sao Ban O",
+    "base_audio_path": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/overfit-100-train-no-diaritics-no-userloss/train_20261006_072419_114738/free-running/step_000500/text_dialogue_deepdialogue__test__creativity_20079__var00/dialogue_base.wav",
+    "manifest_path": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/overfit-100-train-no-diaritics-no-userloss/train_20261006_072419_114738/free-running/step_000500/text_dialogue_deepdialogue__test__creativity_20079__var00/manifest.json",
+    "vietnamese_text_mode": "no_diacritics",
+    "raw_reference": "T\u00f4i th\u1ef1c s\u1ef1 r\u1ea5t h\u00e1o h\u1ee9c \u0111\u01b0\u1ee3c chia s\u1ebb ni\u1ec1m \u0111am m\u00ea v\u1ebd phong c\u1ea3nh c\u1ee7a m\u00ecnh N\u00f3 l\u00e0 m\u1ed9t s\u1edf th\u00edch th\u01b0 gi\u00e3n v\u00e0 \u0111\u1ea7y \u00fd ngh\u0129a \u0111\u1ed1i v\u1edbi t\u00f4i \u1eeb \u1eea \u0111\u00fang v\u1eady t\u00f4i th\u00edch v\u1ebd nh\u1eefng ng\u1ecdn n\u00fai thanh b\u00ecnh v\u00e0 h\u1ed3 n\u01b0\u1edbc t\u0129nh l\u1eb7ng Ch\u00fang lu\u00f4n mang l\u1ea1i cho t\u00f4i c\u1ea3m gi\u00e1c b\u00ecnh y\u00ean v\u00e0 ni\u1ec1m vui C\u00f2n b\u1ea1n th\u00ec sao B\u1ea1n c\u00f3 c\u1ea3nh y\u00eau th\u00edch n\u00e0o \u0111\u1ec3 v\u1ebd kh\u00f4ng \u1eeb \u1eeb \u1eeb \u1ed2 qu\u1ea3 l\u00e0 th\u00fa v\u1ecb khi c\u1ea3 hai ch\u00fang ta \u0111\u1ec1u t\u00ecm th\u1ea5y ni\u1ec1m vui trong phong c\u00e1ch v\u1ebd ri\u00eang bi\u1ec7t nh\u1ec9 N\u00f3 gi\u1ed1ng nh\u01b0 m\u1ed9t s\u1ef1 k\u1ebft h\u1ee3p tuy\u1ec7t v\u1eddi gi\u1eefa s\u1ef1 t\u0129nh l\u1eb7ng v\u00e0 n\u0103ng l\u01b0\u1ee3ng trong ngh\u1ec7 thu\u1eadt c\u1ee7a ch\u00fang ta v\u1eady",
+    "cer": 0.712468193384224,
+    "wer": 0.8360655737704918,
+    "audio_path": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/overfit-100-train-no-diaritics-no-userloss/train_20261006_072419_114738/free-running/step_000500/text_dialogue_deepdialogue__test__creativity_20079__var00/dialogue_step.wav",
+    "original_audio_path": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/overfit-100-train-no-diaritics-no-userloss/train_20261006_072419_114738/free-running/step_000500/text_dialogue_deepdialogue__test__creativity_20079__var00/dialogue_original.wav",
+    "window_start_sec": 0.0,
+    "window_end_sec": 43.75991666666667,
+    "source_duration_sec": 43.75991666666667
+  },
+  "reload_checks": [],
+  "inference_config": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/overfit-100-train-no-diaritics-no-userloss/train_20261006_072419_114738/inference_config.json"
+}

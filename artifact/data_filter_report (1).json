@@ -1,0 +1,565 @@
+{
+  "dataset_load": {
+    "train": {
+      "manifest_entries": 21014,
+      "loaded_samples": 21005,
+      "skipped_out_of_bounds_samples": 9,
+      "skipped_invalid_samples": 0,
+      "rejected_entries": [
+        "line 46 (text_dialogue_deepdialogue__test__creativity_20178__var00): text_dialogue_deepdialogue__test__creativity_20178__var00: word 176 is outside audio bounds",
+        "line 136 (text_dialogue_deepdialogue__train__creativity_0175__var00): text_dialogue_deepdialogue__train__creativity_0175__var00: word 148 is outside audio bounds",
+        "line 146 (text_dialogue_deepdialogue__train__creativity_0203__var00): text_dialogue_deepdialogue__train__creativity_0203__var00: word 111 is outside audio bounds",
+        "line 298 (text_dialogue_interviewer__test__work_0815__var00): text_dialogue_interviewer__test__work_0815__var00: word 1241 is outside audio bounds",
+        "line 483 (text_dialogue_interviewer__train__work_0202__var00): text_dialogue_interviewer__train__work_0202__var00: word 1399 is outside audio bounds",
+        "line 507 (text_dialogue_interviewer__train__work_0258__var00): text_dialogue_interviewer__train__work_0258__var00: word 1282 is outside audio bounds",
+        "line 1306 (text_dialogue_multiwoz__test__PMUL4524__var00): text_dialogue_multiwoz__test__PMUL4524__var00: word 315 is outside audio bounds",
+        "line 3003 (text_dialogue_multiwoz__train__MUL2142__var00): text_dialogue_multiwoz__train__MUL2142__var00: word 221 is outside audio bounds",
+        "line 4808 (text_dialogue_multiwoz__train__PMUL2233__var00): text_dialogue_multiwoz__train__PMUL2233__var00: word 176 is outside audio bounds"
+      ]
+    }
+  },
+  "chunk_filter": {
+    "train": {
+      "split": "train",
+      "candidate_chunks": 100,
+      "kept_chunks": 57,
+      "skipped_out_of_bounds_chunks": 43,
+      "skipped_text_overflow_chunks": 0,
+      "rejected": [
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20076__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "mà",
+          "word_start_sec": 47.8158
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20094__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "không",
+          "word_start_sec": 69.6885
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20096__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "đó",
+          "word_start_sec": 38.2376
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20103__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nhé",
+          "word_start_sec": 80.6038
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20104__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nào",
+          "word_start_sec": 32.9325
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20105__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "luôn",
+          "word_start_sec": 29.3076
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20106__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nhất",
+          "word_start_sec": 17.1682
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20108__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nhé",
+          "word_start_sec": 78.603
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20119__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "không",
+          "word_start_sec": 22.8842
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20121__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "bạn",
+          "word_start_sec": 39.3575
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20122__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "hơn",
+          "word_start_sec": 71.5942
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20129__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "lỡ",
+          "word_start_sec": 22.4742
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20130__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nữa",
+          "word_start_sec": 27.6142
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20136__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nhé",
+          "word_start_sec": 40.8075
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20137__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "diệu",
+          "word_start_sec": 23.4442
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20145__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nhé",
+          "word_start_sec": 25.0782
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20152__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "vậy",
+          "word_start_sec": 49.4903
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20165__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nữa",
+          "word_start_sec": 40.0202
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20168__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "đó",
+          "word_start_sec": 38.2329
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20173__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "bạn",
+          "word_start_sec": 89.7298
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20177__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "người",
+          "word_start_sec": 25.5152
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20187__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "vậy",
+          "word_start_sec": 45.4399
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20198__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nhé",
+          "word_start_sec": 44.4779
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20203__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "ngữ",
+          "word_start_sec": 46.5215
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20207__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "ích",
+          "word_start_sec": 55.2262
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20208__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nhẹ",
+          "word_start_sec": 54.0414
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20210__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "mới",
+          "word_start_sec": 42.3403
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20229__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nhé",
+          "word_start_sec": 28.1042
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__test__creativity_20233__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "vậy",
+          "word_start_sec": 27.1852
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0006__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "hút",
+          "word_start_sec": 21.6042
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0012__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "vậy",
+          "word_start_sec": 19.4162
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0020__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "luôn",
+          "word_start_sec": 31.0176
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0025__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "mới",
+          "word_start_sec": 27.5042
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0026__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "quá",
+          "word_start_sec": 23.4376
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0033__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "vậy",
+          "word_start_sec": 33.8168
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0041__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "đấy",
+          "word_start_sec": 21.8922
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0050__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "hướng",
+          "word_start_sec": 37.3625
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0053__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "động",
+          "word_start_sec": 24.4942
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0054__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "nữa",
+          "word_start_sec": 23.1296
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0071__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "họ",
+          "word_start_sec": 30.3448
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0077__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "giờ",
+          "word_start_sec": 24.0042
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0079__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "giới",
+          "word_start_sec": 54.5466
+        },
+        {
+          "sample_id": "text_dialogue_deepdialogue__train__creativity_0081__var00",
+          "window_start_sec": 0.0,
+          "window_end_sec": 100.0,
+          "reason": "out_of_bounds",
+          "roles": [
+            "left-agent",
+            "right-agent"
+          ],
+          "word": "khích",
+          "word_start_sec": 34.3995
+        }
+      ]
+    },
+    "validation": {
+      "split": "validation",
+      "candidate_chunks": 0,
+      "kept_chunks": 57,
+      "skipped_out_of_bounds_chunks": 0,
+      "skipped_text_overflow_chunks": 0,
+      "rejected": [],
+      "reused_from": "train"
+    },
+    "test": {
+      "split": "test",
+      "candidate_chunks": 0,
+      "kept_chunks": 0,
+      "skipped_out_of_bounds_chunks": 0,
+      "skipped_text_overflow_chunks": 0,
+      "rejected": []
+    }
+  }
+}

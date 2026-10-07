@@ -1,0 +1,8 @@
+{
+  "command": "mini",
+  "source_state": "worktree",
+  "device": "mps",
+  "timeout": 600,
+  "output_dir": "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/audit-artifacts/mini-worktree-mps-torch280",
+  "reference": "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/refs/personaplex-finetune"
+}

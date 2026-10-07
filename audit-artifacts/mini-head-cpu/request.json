@@ -1,0 +1,8 @@
+{
+  "command": "mini",
+  "source_state": "head",
+  "device": "cpu",
+  "timeout": 600,
+  "output_dir": "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/audit-artifacts/mini-head-cpu",
+  "reference": "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/refs/personaplex-finetune"
+}

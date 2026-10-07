@@ -1,0 +1,25 @@
+{
+  "masks_equal": true,
+  "text": {
+    "passed": true,
+    "finite": true,
+    "valid_positions": 24,
+    "max_abs": 0.0,
+    "argmax_agreement": 1.0,
+    "first_failure_b_stream_frame": null,
+    "atol": 1e-05,
+    "rtol": 0.0001
+  },
+  "audio": {
+    "passed": true,
+    "finite": true,
+    "valid_positions": 370,
+    "max_abs": 0.0,
+    "argmax_agreement": 1.0,
+    "first_failure_b_stream_frame": null,
+    "atol": 1e-05,
+    "rtol": 0.0001
+  },
+  "greedy_tokens_equal": true,
+  "greedy_frames": 22
+}

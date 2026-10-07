@@ -1,0 +1,2 @@
+/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/src/moshi/modules/transformer.py:268: UserWarning: The operator 'aten::index_copy.out' is not currently supported on the MPS backend and will fall back to run on the CPU. This may have performance implications. (Triggered internally at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/mps/MPSFallback.mm:13.)
+  self.cache[0].index_copy_(2, indexes, k)

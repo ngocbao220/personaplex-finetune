@@ -97,6 +97,26 @@ def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0, prefixes: 
         root = getattr(model, prefix, None)
         if root is None:
             continue
+        # Expose hidden Moshi QKV projections as proper Linear modules before searching
+        for name, module in list(root.named_modules()):
+            if hasattr(module, "in_proj_weight") and isinstance(module.in_proj_weight, torch.nn.Parameter):
+                has_bias = hasattr(module, "in_proj_bias") and isinstance(module.in_proj_bias, torch.nn.Parameter)
+                in_proj = torch.nn.Linear(module.in_proj_weight.shape[1], module.in_proj_weight.shape[0], bias=has_bias, device=module.in_proj_weight.device)
+                in_proj.weight = module.in_proj_weight
+                if has_bias:
+                    in_proj.bias = module.in_proj_bias
+                module.in_proj = in_proj
+                
+                class LoRAAttentionWrapper(module.__class__):
+                    @property
+                    def in_proj_weight(self):
+                        return self.in_proj.weight
+                    @property
+                    def in_proj_bias(self):
+                        return self.in_proj.bias if hasattr(self.in_proj, "bias") else None
+                module.__class__ = LoRAAttentionWrapper
+
+
         for name, module in root.named_modules():
             is_dense_linear = isinstance(module, torch.nn.Linear)
             is_4bit_linear = module.__class__.__module__.startswith("bitsandbytes.") and module.__class__.__name__ == "Linear4bit"

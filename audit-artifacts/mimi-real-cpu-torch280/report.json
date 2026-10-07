@@ -1,0 +1,28 @@
+{
+  "scope": "explicit legacy schema bridge; not production loader compatibility or failing synthetic corpus",
+  "tokenizer_sha256": "78d4336533ddc26f9acf7250d7fb83492152196c6ea4212c841df76933f18d2d",
+  "samples": [
+    {
+      "sample_id": "conv_0001",
+      "local_lost": 0,
+      "reference_lost": 2,
+      "frame_mismatches": 5,
+      "codec": {
+        "prompt_masked": true,
+        "user_tokens_equal": true,
+        "agent_channel": 0,
+        "user_channel": 1,
+        "prompt_frames": 111,
+        "dialogue_frames": 125,
+        "voice_local_native_equal": true,
+        "voice_reference_overlap_mismatches": 480,
+        "assets": {
+          "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/otospeech-prepared/samples/conv_0001/conversation.wav": "a81c773af57c12dce95a0837127fd2a5e7437db08918fc39198e8678eadbc82a",
+          "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/otospeech-prepared/samples/conv_0001/voice_prompt.wav": "8b90ca73ac7d318f78a447c15255d21302fb78c0cf250a40ddbb9bb77212bd70",
+          "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/models/tokenizer_spm_32k_3.model": "78d4336533ddc26f9acf7250d7fb83492152196c6ea4212c841df76933f18d2d",
+          "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/models/tokenizer-e351c8d8-checkpoint125.safetensors": "09b782f0629851a271227fb9d36db65c041790365f11bbe5d3d59369cf863f50"
+        }
+      }
+    }
+  ]
+}

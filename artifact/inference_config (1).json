@@ -1,0 +1,36 @@
+{
+  "model": {
+    "root": "/home/voice/data/voice/personaplex-7b-v1",
+    "source": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/src",
+    "device": "cuda"
+  },
+  "data": {
+    "prepared_dir": "/home/voice/data/voice/vdt/data_ready/synthetic_500h",
+    "window_seconds": null,
+    "val_ratio": 0.05,
+    "vietnamese_text_mode": "no_diacritics"
+  },
+  "lora": {
+    "qlora": false,
+    "quant_type": "nf4"
+  },
+  "seed": 42,
+  "generation": {
+    "use_sampling": false,
+    "temp": 0.0,
+    "temp_text": 0.0,
+    "top_k": 250,
+    "top_k_text": 25,
+    "audio_silence_frame_cnt": 6
+  },
+  "inference": {
+    "output_dir": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/overfit-100-train-no-diaritics-no-userloss/train_20261006_072419_114738/inference_smoke",
+    "sample_id": null,
+    "input_file": null,
+    "voice_prompt": null,
+    "text_prompt": null
+  },
+  "adapter": {
+    "path": "/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/overfit-100-train-no-diaritics-no-userloss/train_20261006_072419_114738/checkpoints/best_inference/lora.safetensors"
+  }
+}

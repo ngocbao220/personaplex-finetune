@@ -1,0 +1,27 @@
+Traceback (most recent call last):
+  File "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/scripts/audit_personaplex.py", line 341, in <module>
+    main()
+  File "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/scripts/audit_personaplex.py", line 269, in main
+    tiny_probe(request["device"], request["reference"], request["output_dir"], request["source_state"])
+  File "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/scripts/audit_native.py", line 261, in tiny_probe
+    base = model.forward_train(codes)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/src/moshi/models/lm.py", line 540, in forward_train
+    transformer_out, text_logits = self.forward_codes(delayed_codes[:, :, :-1])
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/src/moshi/models/lm.py", line 445, in forward_codes
+    return self.forward_embeddings(self.embed_codes(sequence))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/src/moshi/models/lm.py", line 453, in forward_embeddings
+    text_logits = self.text_linear(transformer_out)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/envs/personaplex/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/envs/personaplex/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1603, in _call_impl
+    result = forward_call(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/envs/personaplex/lib/python3.11/site-packages/torch/nn/modules/linear.py", line 117, in forward
+    return F.linear(input, self.weight, self.bias)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: Tensor for argument weight is on cpu but expected on mps

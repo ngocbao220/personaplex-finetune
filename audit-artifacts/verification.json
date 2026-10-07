@@ -1,0 +1,17 @@
+{
+  "torch": "2.8.0",
+  "torchaudio": "2.8.0",
+  "audit_tests": {
+    "run": 11,
+    "status": "passed"
+  },
+  "full_suite": {
+    "run": 256,
+    "failures": 3,
+    "errors": 4,
+    "skipped": 4
+  },
+  "real_7b_server_probe": "not_run_assets_unavailable",
+  "production_policy_changed": false,
+  "mps_cpu_fallback": false
+}

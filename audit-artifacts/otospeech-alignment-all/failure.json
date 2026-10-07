@@ -1,0 +1,4 @@
+{
+  "error": "missing prepared voice/text prompt",
+  "traceback": "Traceback (most recent call last):\n  File \"/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/scripts/audit_personaplex.py\", line 289, in main\n    sample = legacy_sample(path.resolve(), args.start_sec, args.end_sec)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/scripts/audit_personaplex.py\", line 87, in legacy_sample\n    raise ValueError(\"missing prepared voice/text prompt\")\nValueError: missing prepared voice/text prompt\n"
+}
