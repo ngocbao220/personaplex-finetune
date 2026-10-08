@@ -138,3 +138,49 @@ class ParallelChunkFilterTest(unittest.TestCase):
 def test_expected_fixed_duration_mimi_grid_uses_ceil_for_partial_frames():
     assert expected_mimi_frames(100.0, 12.5) == 1250
     assert expected_mimi_frames(100.01, 12.5) == 1251
+
+
+class ChunkQuotaTest(unittest.TestCase):
+    def chunks(self, count=40):
+        return [replace(_chunk([Word("agent", "word", .9 if i % 3 == 0 else .1,
+                                    .95 if i % 3 == 0 else .3)]), sample_id=str(i))
+                for i in range(count)]
+
+    def test_quota_counts_valid_chunks_and_stops_at_required_prefix(self):
+        from unittest.mock import patch
+        chunks = self.chunks()
+        with patch("personaplex_finetuning.chunk_filter._filter_chunk", wraps=_filter_chunk) as check:
+            result = filter_text_capacity_chunks(chunks, FakeTokenizer(), 10, max_kept=3)
+        self.assertEqual([s.sample_id for s in result.kept], ["1", "2", "4"])
+        self.assertEqual(check.call_count, 5)
+        self.assertEqual(len(result.rejected), 2)
+
+    def test_exhausted_source_returns_available_valid_chunks(self):
+        result = filter_text_capacity_chunks(self.chunks(3), FakeTokenizer(), 10, max_kept=100)
+        self.assertEqual(len(result.kept), 2)
+        self.assertEqual(len(result.rejected), 1)
+
+    def test_parallel_quota_matches_sequential_prefix(self):
+        chunks = self.chunks()
+        sequential = filter_text_capacity_chunks(chunks, FakeTokenizer(), 10, max_kept=11)
+        parallel = filter_text_capacity_chunks(chunks, FakeTokenizer(), 10, max_kept=11, num_workers=2)
+        self.assertEqual(parallel, sequential)
+        self.assertEqual(len(parallel.kept), 11)
+
+    def test_cache_is_separate_for_each_quota_and_unlimited(self):
+        from unittest.mock import patch
+        chunks = self.chunks(6)
+        with tempfile.TemporaryDirectory() as directory:
+            kwargs = dict(cache_path=Path(directory) / "quota.jsonl", cache_fingerprint="same-source")
+            one = filter_text_capacity_chunks(chunks, FakeTokenizer(), 10, max_kept=1, **kwargs)
+            with patch("personaplex_finetuning.chunk_filter._filter_chunk", side_effect=AssertionError("cache miss")):
+                self.assertEqual(filter_text_capacity_chunks(chunks, FakeTokenizer(), 10, max_kept=1, **kwargs), one)
+            two = filter_text_capacity_chunks(chunks, FakeTokenizer(), 10, max_kept=2, **kwargs)
+            all_chunks = filter_text_capacity_chunks(chunks, FakeTokenizer(), 10, **kwargs)
+        self.assertEqual(len(two.kept), 2)
+        self.assertEqual(len(all_chunks.kept), 4)
+
+    def test_invalid_quota_fails_before_filtering(self):
+        for quota in (0, -1, True, 1.5):
+            with self.subTest(quota=quota), self.assertRaises(ValueError):
+                filter_text_capacity_chunks(self.chunks(), FakeTokenizer(), 10, max_kept=quota)

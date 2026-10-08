@@ -95,6 +95,7 @@ class MimiCodec:
     """Mimi adapter using the same source helpers as PersonaPlex inference."""
 
     codebooks = 8
+    conversation_encoding_contract = "mono-batch1-fp32-no-autocast"
 
     def __init__(
         self, mimi, sample_rate: int, frame_rate: float, device: str, lm_helpers,
@@ -115,12 +116,11 @@ class MimiCodec:
         ])[0]
 
     def encode_conversation_stereo_batch(self, windows, raw_audio=None):
-        """Encode each batch's stereo windows in one Mimi call, preserving per-window padding.
+        """Encode stereo windows with the same mono batch-1 contract as inference.
 
         ``windows`` contains ``(path, agent_channel, user_channel, start_sec, end_sec)``
-        tuples. Each conversation contributes two independent Mimi batch items, in agent/user
-        order. This replaces repeated tiny codec launches when the LM microbatch is greater
-        than one without changing the audio window or channel semantics.
+        tuples. Agent/user channels are encoded separately, independent of LM batch size
+        or cache hits. Grouped transfer preserves per-window padding and channel order.
         """
         import numpy as np
         import torch
@@ -170,7 +170,7 @@ class MimiCodec:
             lengths = {audio.shape[-1] for audio in audio_items}
             if len(lengths) != 1:
                 raise ValueError("batched Mimi windows must have one fixed duration")
-            # [B, speaker, T] -> [B*speaker, mono, T], matching the former [2,1,T] call.
+            # Group only the transfer; Mimi always receives [1,1,T] per channel.
             host_batch = torch.from_numpy(
                 np.stack(audio_items, axis=0).reshape(-1, 1, audio_items[0].shape[-1])
             )
@@ -184,11 +184,10 @@ class MimiCodec:
             batch = host_batch.to(
                 self.device, dtype=torch.float32, non_blocking=use_pinned_transfer,
             )
-            with torch.no_grad():
-                encoded = self.mimi.encode(batch).detach().cpu().tolist()
+            encoded = [self._encode(channel, torch) for channel in batch]
             for pending_index, (result_index, *_rest) in enumerate(pending):
-                agent_codes = tuple(tuple(int(token) for token in stream) for stream in encoded[pending_index * 2])
-                user_codes = tuple(tuple(int(token) for token in stream) for stream in encoded[pending_index * 2 + 1])
+                agent_codes = encoded[pending_index * 2]
+                user_codes = encoded[pending_index * 2 + 1]
                 self._validate_cached_codes(agent_codes, user_codes, Path("<Mimi batch>"))
                 results[result_index] = (agent_codes, user_codes)
                 info = cache_info[result_index]
@@ -207,11 +206,8 @@ class MimiCodec:
             raise ValueError("Mimi input must be an unpadded stereo waveform [2, T]")
         if {agent_channel, user_channel} != {0, 1}:
             raise ValueError("agent/user channels must be a permutation of LEFT/RIGHT")
-        batch = waveform[[agent_channel, user_channel]].to(self.device, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            codes = self.mimi.encode(batch)
-        agent_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[0, 0])
-        user_codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in codes[0, 1])
+        agent_codes = self._encode(waveform[agent_channel : agent_channel + 1], torch)
+        user_codes = self._encode(waveform[user_channel : user_channel + 1], torch)
         return agent_codes, user_codes
 
     def encode_conversation_stereo_cached(self, path: Path, agent_channel: int, user_channel: int, start_sec: float, end_sec: float):
@@ -231,7 +227,9 @@ class MimiCodec:
         path = Path(path).expanduser().resolve()
         stat = path.stat()
         identity = json.dumps({
-            "format_version": 1,
+            "format_version": 2,
+            "encoding_contract": self.conversation_encoding_contract,
+            "encoding_device": str(self.device),
             "source_path": str(path),
             "source_size": stat.st_size,
             "source_mtime_ns": stat.st_mtime_ns,
@@ -317,8 +315,12 @@ class MimiCodec:
         return tuple((int(token),) * frames for token in tokens)
 
     def _encode(self, audio, torch):
-        with torch.no_grad():
-            codes = self.mimi.encode(torch.as_tensor(audio, dtype=torch.float32, device=self.device).unsqueeze(0))[0]
+        audio = torch.as_tensor(audio, dtype=torch.float32, device=self.device)
+        if audio.ndim != 2 or audio.shape[0] != 1 or audio.shape[-1] == 0:
+            raise ValueError("Mimi encoding requires one nonempty mono channel [1,T]")
+        # A shared contract avoids batch-dependent quantization and inherited LM autocast.
+        with torch.no_grad(), torch.autocast(device_type=torch.device(self.device).type, enabled=False):
+            codes = self.mimi.encode(audio.unsqueeze(0))[0]
         return tuple(tuple(int(token) for token in stream.tolist()) for stream in codes)
 
 

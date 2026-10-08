@@ -58,7 +58,7 @@ Các override dạng `key=value` thay YAML cho lần chạy đó. Tham số chí
 | --- | --- |
 | `model=server` | Chọn cấu hình đường dẫn model; sửa `configs/model/server.yaml` theo máy. |
 | `duration_sec` | Độ dài chunk hội thoại. |
-| `sample_number=10` / `sample_number=null` | Giới hạn 10 hội thoại hoặc dùng toàn bộ dữ liệu. |
+| `sample_number=10` / `sample_number=null` | Giữ 10 chunk hợp lệ đầu tiên sau bộ lọc hoặc dùng toàn bộ dữ liệu. |
 | `batch_size` | Số chunk mỗi GPU trong một microbatch. |
 | `train.gradient_accumulation_steps` | Số microbatch tích lũy trước mỗi cập nhật. Batch toàn cục = batch mỗi GPU × accumulation × số GPU. |
 | `max_steps` | Số lần cập nhật optimizer. |

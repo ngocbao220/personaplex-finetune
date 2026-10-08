@@ -109,6 +109,9 @@ def main() -> None:
 
     common = [sys.executable, str(SCRIPT)]
     shared = ["--config", str(args.config)]
+    # Missing contract means the historical trainer limited conversations first.
+    selection_contract = c.get("sample_number_contract", "conversations-v1")
+    shared += ["--sample-number-contract", selection_contract]
     for o in overrides:
         shared += ["--override", o]
     if sample_id is not None:
@@ -134,6 +137,7 @@ def main() -> None:
     (args.output_dir / "vi_invocation.json").write_text(json.dumps(
         {"run_dir": str(args.run_dir), "adapter": str(adapter), "sample_id": sample_id,
          "sample_selection": "explicit_sample_id" if sample_id is not None else "first_retained_training_chunk",
+         "sample_number_contract": selection_contract,
          "text_mode": text_mode, "overrides": overrides, "commands": cmds}, indent=2, ensure_ascii=False))
     env = {**os.environ, "NO_CUDA_GRAPH": os.environ.get("NO_CUDA_GRAPH", "1")}
     for cmd in cmds:

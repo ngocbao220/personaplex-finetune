@@ -63,7 +63,7 @@ class BatchContractTest(unittest.TestCase):
 
             def encode(self, audio):
                 self.calls += 1
-                return torch.full((2, 8, 3), self.calls, dtype=torch.long)
+                return torch.full((audio.shape[0], 8, 3), self.calls, dtype=torch.long)
 
         fake_sphn = SimpleNamespace(
             read=lambda *_args, **_kwargs: (np.zeros((2, 24000), dtype=np.float32), 24000)
@@ -82,7 +82,7 @@ class BatchContractTest(unittest.TestCase):
                 audio_path.write_bytes(b"audio-v2-changed")
                 third = codec.encode_conversation_stereo_cached(audio_path, 0, 1, 0.0, 1.0)
 
-        self.assertEqual(mimi.calls, 2)
+        self.assertEqual(mimi.calls, 4)
         self.assertEqual(first, second)
         self.assertNotEqual(first, third)
 
@@ -136,9 +136,10 @@ class BatchContractTest(unittest.TestCase):
 
     def test_direct_mimi_encoding_retries_empty_time_slice(self):
         class FakeMimi:
+            def __init__(self): self.audio = []
             def encode(self, audio):
-                self.audio = audio.clone()
-                return torch.zeros((2, 8, 1), dtype=torch.long)
+                self.audio.append(audio.clone())
+                return torch.zeros((audio.shape[0], 8, 1), dtype=torch.long)
 
         full_audio = np.stack([np.arange(100), 100 + np.arange(100)]).astype(np.float32)
 
@@ -151,7 +152,8 @@ class BatchContractTest(unittest.TestCase):
         codec = MimiCodec(mimi, 100, 12.5, "cpu", None)
         with patch.dict("sys.modules", {"sphn": SimpleNamespace(read=read_audio)}):
             codec.encode_conversation_stereo_batch([(Path("conversation.wav"), 0, 1, 0.25, 0.5)])
-        self.assertTrue(torch.equal(mimi.audio[:, 0], torch.from_numpy(full_audio[:, 25:50])))
+        self.assertEqual(len(mimi.audio), 2)
+        self.assertTrue(torch.equal(torch.cat(mimi.audio)[:, 0], torch.from_numpy(full_audio[:, 25:50])))
 
     def test_empty_window_beyond_decoded_duration_is_not_padded_as_silence(self):
         fake_sphn = SimpleNamespace(read=lambda *_args, **_kwargs: (np.empty((2, 0), dtype=np.float32), 100))
@@ -162,16 +164,19 @@ class BatchContractTest(unittest.TestCase):
 
     def test_mimi_receives_each_unpadded_stereo_item_with_requested_channel_order(self):
         class FakeMimi:
+            def __init__(self): self.audio = []
             def encode(self, audio):
-                self.audio = audio.clone()
-                return torch.zeros((1, 2, 8, 2), dtype=torch.long)
+                self.audio.append(audio.clone())
+                return torch.zeros((1, 8, 2), dtype=torch.long)
 
         mimi = FakeMimi()
         codec = MimiCodec(mimi, 24000, 12.5, "cpu", None)
         waveform = torch.tensor([[1.0, 2.0, 3.0], [7.0, 8.0, 9.0]])
         agent, user = codec.encode_stereo_waveform(waveform, 1, 0)
-        self.assertEqual(mimi.audio.shape, (1, 2, 3))
-        self.assertTrue(torch.equal(mimi.audio[0], waveform.flip(0)))
+        self.assertEqual(len(mimi.audio), 2)
+        self.assertTrue(all(audio.shape == (1, 1, 3) for audio in mimi.audio))
+        self.assertTrue(torch.equal(mimi.audio[0][0], waveform[1:2]))
+        self.assertTrue(torch.equal(mimi.audio[1][0], waveform[0:1]))
         self.assertEqual(len(agent), 8)
         self.assertEqual(len(user), 8)
 

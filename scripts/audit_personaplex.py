@@ -43,20 +43,29 @@ def selected_sample(args):
         raise ValueError("this matched-training audit requires eval_on_train_samples=true; preserve the original run split")
     dataset = PreparedDataset(cfg.manifest, cfg.window_seconds, filter_num_workers=1)
     samples = dataset.load()
-    selected = limit_conversations(samples, cfg.sample_number, cfg.sample_index)
+    selection_contract = getattr(args, "sample_number_contract", "valid-chunks-v1")
+    selected = limit_conversations(samples, sample_index=cfg.sample_index,
+                                   sample_number=cfg.sample_number if selection_contract == "conversations-v1" else None)
     chunks = duration_chunks(selected, cfg.duration_sec)
     if cfg.sample_index is not None:
         chunks = chunks[:1]
     assets = RuntimePaths(cfg.model_root, cfg.personaplex_source).validate(require_model=False)
     tokenizer = SentencePieceTokenizer(assets.tokenizer)
+    quota = cfg.sample_number if cfg.sample_index is None and selection_contract == "valid-chunks-v1" else None
     filtered = filter_text_capacity_chunks(chunks, tokenizer, 12.5, swap_roles=cfg.swap_roles_after_pass,
-                                          vietnamese_text_mode=cfg.vietnamese_text_mode, num_workers=1)
+                                          vietnamese_text_mode=cfg.vietnamese_text_mode, num_workers=1,
+                                          max_kept=quota)
+    from personaplex_finetuning.train import chunk_filter_payload, chunk_filter_summary
+    selection = chunk_filter_payload("train", len(chunks), filtered, quota)
+    print(chunk_filter_summary(selection), flush=True)
     write_json(args.output_dir / "training_chunks.json", {
         "dataset_load": asdict(dataset.load_report),
+        "sample_number_contract": selection_contract,
+        "selection": selection,
         "config": asdict(cfg), "manifest_sha256": digest(cfg.manifest),
         "kept": [{"sample_id": s.sample_id, "start": s.window_start_sec, "end": s.window_end_sec} for s in filtered.kept],
         "rejected": [asdict(r) for r in filtered.rejected],
-        "updates": replay_updates(cfg, filtered.kept)})
+        "updates": replay_updates(cfg, filtered.kept) if filtered.kept else {"status": "no_retained_chunks"}})
     # Explicit IDs retain the historical default crop at t=0. Automatic selection
     # happens after all training filters, and can start at a later retained chunk.
     start = args.start_sec
@@ -157,7 +166,7 @@ def audit_user_encoding(sample, runtime, example, out, *, match_inference=False)
               "codec_device": str(codec.device),
               "codec_cache_dir": str(codec._cache_dir) if getattr(codec, "_cache_dir", None) else None,
               "continued_with_matched_user_conditioning": False,
-              "scope": "production training stereo-batch user codes versus inference single-channel codes"}
+              "scope": "production training stereo-channel user codes versus inference mono codes"}
     write_json(path, report)
     if comparison["equal"]:
         return inference
@@ -414,6 +423,8 @@ def main():
         p = subs.add_parser(name, help="retained train sample audit" if name == "data" else "existing 7B checkpoint audit in sequential workers")
         p.add_argument("--config", type=Path, required=True)
         p.add_argument("--override", action="append", default=[])
+        p.add_argument("--sample-number-contract", choices=["valid-chunks-v1", "conversations-v1"],
+                       default="valid-chunks-v1", help="legacy conversations-v1 only for reconstructing older runs")
         p.add_argument("--sample-id", help="default: first retained training chunk after all filters")
         p.add_argument("--start-sec", type=float,
                        help="default: 0 for an explicit sample ID; retained chunk start for automatic selection")

@@ -7,7 +7,7 @@ defaults:
 
 seed: 42
 duration_sec: 100
-sample_number: 10             # Number of unique conversations to train on (> 1)
+sample_number: 10             # Number of valid training chunks to retain
 sample_index: null
 profile_steps: false
 free_running_eval_every_steps: 0

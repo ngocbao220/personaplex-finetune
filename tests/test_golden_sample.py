@@ -51,9 +51,11 @@ class CapturingMimi:
     def __init__(self, mimi) -> None:
         self.mimi = mimi
         self.received = None
+        self.calls = []
 
     def encode(self, audio):
         self.received = audio.detach().cpu().numpy().copy()
+        self.calls.append(self.received)
         return self.mimi.encode(audio)
 
     def parameters(self):
@@ -125,15 +127,19 @@ class GoldenSampleTest(unittest.TestCase):
             agent_codes, user_codes = codec.encode_conversation_stereo(conversation, 0, 1, 0.0, duration)
 
             expected_pcm = np.rint(original * 32767.0).astype(np.int16).astype(np.float32) / 32768.0
-            self.assertEqual(capture.received.shape, (2, 1, sample_rate * 5))
-            np.testing.assert_array_equal(capture.received[0, 0], expected_pcm[0])
-            np.testing.assert_array_equal(capture.received[1, 0], expected_pcm[1])
-            self.assertEqual(_dominant_frequency(capture.received[0, 0, 2 * sample_rate : 3 * sample_rate], sample_rate), 440)
-            self.assertEqual(_dominant_frequency(capture.received[1, 0, :sample_rate], sample_rate), 880)
-            self.assertTrue(np.all(capture.received[0, 0, 4 * sample_rate :] == 0))
-            self.assertTrue(np.all(capture.received[1, 0, 4 * sample_rate :] == 0))
+            self.assertEqual(len(capture.calls), 2)
+            self.assertTrue(all(audio.shape == (1, 1, sample_rate * 5) for audio in capture.calls))
+            received = np.concatenate(capture.calls, axis=0)
+            np.testing.assert_array_equal(received[0, 0], expected_pcm[0])
+            np.testing.assert_array_equal(received[1, 0], expected_pcm[1])
+            self.assertEqual(_dominant_frequency(received[0, 0, 2 * sample_rate : 3 * sample_rate], sample_rate), 440)
+            self.assertEqual(_dominant_frequency(received[1, 0, :sample_rate], sample_rate), 880)
+            self.assertTrue(np.all(received[0, 0, 4 * sample_rate :] == 0))
+            self.assertTrue(np.all(received[1, 0, 4 * sample_rate :] == 0))
             self.assertEqual(agent_codes, self._encode_one(mimi, expected_pcm[0]))
             self.assertEqual(user_codes, self._encode_one(mimi, expected_pcm[1]))
+            self.assertEqual(agent_codes, codec.encode_conversation(conversation, 0, 0.0, duration))
+            self.assertEqual(user_codes, codec.encode_conversation(conversation, 1, 0.0, duration))
 
             delays = list(self.loaders._lm_kwargs["delays"])
             builder = PersonaPlexTrainingExampleBuilder(

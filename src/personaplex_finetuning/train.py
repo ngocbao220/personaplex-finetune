@@ -48,7 +48,7 @@ from .objective import (
     text_padding_mask_torch,
     torch_weighted_cross_entropy_stats,
 )
-from .runtime import PERSONAPLEX_MIMI_FRAME_RATE, RuntimePaths, SentencePieceTokenizer, load_runtime
+from .runtime import PERSONAPLEX_MIMI_FRAME_RATE, MimiCodec, RuntimePaths, SentencePieceTokenizer, load_runtime
 from .sequence import PersonaPlexTrainingExampleBuilder, pad_training_example
 from .text_normalization import normalize_vietnamese_text
 
@@ -125,10 +125,13 @@ def dataset_load_summary(label: str, report) -> str:
     )
 
 
-def chunk_filter_payload(label: str, candidate_count: int, result: ChunkFilterResult) -> dict:
+def chunk_filter_payload(label: str, candidate_count: int, result: ChunkFilterResult, max_kept: int | None = None) -> dict:
     return {
         "split": label,
         "candidate_chunks": candidate_count,
+        "scanned_chunks": len(result.kept) + len(result.rejected),
+        "requested_valid_chunks": max_kept,
+        "quota_shortfall": max(0, max_kept - len(result.kept)) if max_kept is not None else 0,
         "kept_chunks": len(result.kept),
         "skipped_out_of_bounds_chunks": result.skipped_out_of_bounds,
         "skipped_text_overflow_chunks": result.skipped_text_overflow,
@@ -151,6 +154,8 @@ def chunk_filter_summary(payload: dict) -> str:
     return (
         f"[Chunk filter] split={payload['split']} candidates={payload['candidate_chunks']} "
         f"kept={payload['kept_chunks']} "
+        f"scanned={payload.get('scanned_chunks', payload['candidate_chunks'])} "
+        f"requested={payload.get('requested_valid_chunks')} shortfall={payload.get('quota_shortfall', 0)} "
         f"skipped_out_of_bounds_chunks={payload['skipped_out_of_bounds_chunks']} "
         f"skipped_text_overflow_chunks={payload['skipped_text_overflow_chunks']}"
     )
@@ -263,6 +268,8 @@ def training_contract(config: Config, train_conversations: list, train_chunks: l
         "manifest": str(manifest), "manifest_sha256": digest.hexdigest(),
         "prepared_sources_sha256": source_digest.hexdigest(),
         "text_capacity_filter_version": 1,
+        "sample_number_contract": "valid-chunks-v1",
+        "mimi_encoding_contract": MimiCodec.conversation_encoding_contract,
         "kept_train_chunks_sha256": chunk_digest,
         "kept_train_chunk_count": len(chunk_items),
         "seed": config.seed, "duration_sec": config.duration_sec,
@@ -1606,18 +1613,12 @@ def run(
 
     train_conversations = limit_conversations(
         train_samples,
-        sample_number=config.sample_number,
         sample_index=config.sample_index,
     )
     train_samples = duration_chunks(train_conversations, config.duration_sec)
     if config.sample_index is not None:
         # User specified an exact sample index to overfit: train on exactly the first 100s window of that sample
         train_samples = train_samples[:1]
-    if config.swap_roles_after_pass:
-        # Fail before model allocation if any training item lacks the RIGHT
-        # speaker's prepared conditioning assets.
-        for sample in train_samples:
-            sample.swapped_roles()
     val_samples = duration_chunks(val_samples, config.duration_sec) if val_samples else []
     test_samples = duration_chunks(test_samples, config.duration_sec) if test_samples else []
 
@@ -1626,6 +1627,7 @@ def run(
     filter_payloads = {}
 
     def filter_split(label: str, chunks: list, check_role_swap: bool = False) -> list:
+        max_kept = config.sample_number if label == "train" and config.sample_index is None else None
         result = None
         filter_error = None
         filter_state = [None]
@@ -1636,11 +1638,13 @@ def run(
                     vietnamese_text_mode=config.vietnamese_text_mode,
                     swap_roles=check_role_swap,
                     num_workers=config.filter_num_workers,
+                    max_kept=max_kept,
                     cache_path=config.prepared_dir / ".filter-cache" / f"training-{label}.jsonl",
                     cache_fingerprint=filter_fingerprint(
                         [path for path in (config.manifest, config.val_manifest, config.test_manifest) if path],
                         {
                             "kind": "training-chunks", "split": label,
+                            "sample_number_contract": "valid-chunks-v1",
                             "duration_sec": config.duration_sec,
                             "window_seconds": config.window_seconds,
                             "sample_number": config.sample_number,
@@ -1683,7 +1687,7 @@ def run(
                 rejected=tuple(rejected),
             )
         assert result is not None
-        payload = chunk_filter_payload(label, len(chunks), result)
+        payload = chunk_filter_payload(label, len(chunks), result, max_kept)
         filter_payloads[label] = payload
         if main_process:
             print(chunk_filter_summary(payload), flush=True)
@@ -1699,11 +1703,17 @@ def run(
 
     train_candidate_count = len(train_samples)
     train_samples = filter_split("train", train_samples, config.swap_roles_after_pass)
+    retained_groups = {key for sample in train_samples for key in conversation_group_keys(sample)}
+    train_conversations = [
+        sample for sample in train_conversations
+        if retained_groups.intersection(conversation_group_keys(sample))
+    ]
     if config.eval_on_train_samples:
         # Reuse the exact kept training chunks; do not classify them twice.
         val_samples = list(train_samples)
         filter_payloads["validation"] = {
             "split": "validation", "candidate_chunks": 0,
+            "scanned_chunks": 0, "requested_valid_chunks": None, "quota_shortfall": 0,
             "kept_chunks": len(val_samples), "skipped_out_of_bounds_chunks": 0,
             "skipped_text_overflow_chunks": 0, "rejected": [],
             "reused_from": "train",
@@ -1751,12 +1761,7 @@ def run(
                 for label, report in dataset_load_reports.items()
             },
             "chunk_filter": {
-                label: {
-                    "candidate_chunks": payload["candidate_chunks"],
-                    "kept_chunks": payload["kept_chunks"],
-                    "skipped_out_of_bounds_chunks": payload["skipped_out_of_bounds_chunks"],
-                    "skipped_text_overflow_chunks": payload["skipped_text_overflow_chunks"],
-                }
+                label: {key: value for key, value in payload.items() if key != "rejected"}
                 for label, payload in filter_payloads.items()
             },
             "codec_cache_dir": str(config.codec_cache_dir) if config.codec_cache_dir else None,

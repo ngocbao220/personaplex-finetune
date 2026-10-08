@@ -81,12 +81,22 @@ class AuditSelectionTest(unittest.TestCase):
                 self.assertNotIn("--end-sec", cmd)
                 self.assertIn("sample_index=null", cmd)
                 self.assertIn("data.swap_roles_after_pass=true", cmd)
+                self.assertEqual(cmd[cmd.index("--sample-number-contract") + 1], "conversations-v1")
+            recorded = json.loads((root / "config.json").read_text())
+            recorded["training_contract"] = {"sample_number_contract": "valid-chunks-v1"}
+            (root / "config.json").write_text(json.dumps(recorded))
+            with patch.object(sys, "argv", argv):
+                audit_vi.main()
+            invocation = json.loads((root / "audit/vi_invocation.json").read_text())
+            for cmd in invocation["commands"]:
+                self.assertEqual(cmd[cmd.index("--sample-number-contract") + 1], "valid-chunks-v1")
 
     def _select(self, root, sample_id=None, start=None, end=None):
         from types import SimpleNamespace
         from unittest.mock import patch
         from personaplex_finetuning.config import Config
         from audit_personaplex import selected_sample
+        from personaplex_finetuning.chunk_filter import ChunkFilterResult
         (root / "train.jsonl").write_text("{}\n")
         cfg = Config(path=root / "config.yaml", model_root=root, personaplex_source=root,
                      prepared_dir=root, output_dir=root, eval_on_train_samples=True,
@@ -100,7 +110,7 @@ class AuditSelectionTest(unittest.TestCase):
              patch("personaplex_finetuning.runtime.RuntimePaths") as assets, \
              patch("personaplex_finetuning.runtime.SentencePieceTokenizer"), \
              patch("personaplex_finetuning.chunk_filter.filter_text_capacity_chunks",
-                   return_value=SimpleNamespace(kept=[kept], rejected=[])):
+                   return_value=ChunkFilterResult((kept,), ())):
             dataset.return_value.load.return_value = [kept]
             dataset.return_value.load_report = AudioInfo(24000, 2, 143)
             assets.return_value.validate.return_value = SimpleNamespace(tokenizer=root / "tokenizer")
@@ -422,3 +432,70 @@ class AuditNativeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ValidChunkSelectionTest(unittest.TestCase):
+    def test_train_and_audit_retain_same_quota_after_rejections(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from personaplex_finetuning.config import Config
+        from personaplex_finetuning.data import DatasetLoadReport
+        from personaplex_finetuning.train import run
+        from audit_personaplex import selected_sample
+        from test_chunk_filter import FakeTokenizer
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "train.jsonl").write_text("{}\n")
+            # First two conversations fail. The third has two valid windows;
+            # the fourth fills quota, beyond the old first-three-conversation cap.
+            samples = [PreparedSample(
+                str(i), root / f"audio{i}.wav", root / "voice.wav",
+                (Word("agent", "late", .99, .995),) if i < 2 else (),
+                "test", {}, AudioInfo(24000, 2, 2 if i == 2 else 1), 0, 2 if i == 2 else 1,
+            ) for i in range(5)]
+            cfg = Config(root / "config.yaml", root, root, root, root,
+                         device="cpu", duration_sec=1, sample_number=3,
+                         eval_on_train_samples=True, max_steps=1, per_device_batch_size=1)
+            with patch("personaplex_finetuning.train.PreparedDataset") as dataset, \
+                 patch("personaplex_finetuning.train.RuntimePaths") as assets, \
+                 patch("personaplex_finetuning.train.SentencePieceTokenizer", return_value=FakeTokenizer()), \
+                 patch("personaplex_finetuning.train.validate_resume_checkpoint", side_effect=RuntimeError("selection finished")) as resume:
+                dataset.return_value.load.return_value = samples
+                dataset.return_value.load_report = DatasetLoadReport()
+                assets.return_value.validate.return_value = SimpleNamespace(tokenizer=root / "tokenizer")
+                with self.assertRaisesRegex(RuntimeError, "selection finished"):
+                    run(cfg, resume_from="unused")
+            training_chunks = resume.call_args.kwargs["train_chunks"]
+            self.assertEqual([(s.sample_id, s.window_start_sec) for s in training_chunks],
+                             [("2", 0), ("2", 1), ("3", 0)])
+            self.assertEqual([s.sample_id for s in resume.call_args.args[3]], ["2", "3"])
+
+            args = SimpleNamespace(config=cfg.path, override=[], device="cpu", output_dir=root,
+                                   sample_id=None, start_sec=None, end_sec=None, role="left-agent")
+            with patch("personaplex_finetuning.config.load_config", return_value=cfg) as load_config, \
+                 patch("personaplex_finetuning.data.PreparedDataset") as dataset, \
+                 patch("personaplex_finetuning.runtime.RuntimePaths") as assets, \
+                 patch("personaplex_finetuning.runtime.SentencePieceTokenizer", return_value=FakeTokenizer()):
+                dataset.return_value.load.return_value = samples
+                dataset.return_value.load_report = DatasetLoadReport()
+                assets.return_value.validate.return_value = SimpleNamespace(tokenizer=root / "tokenizer")
+                selected_sample(args)
+                report = json.loads((root / "training_chunks.json").read_text())
+                self.assertEqual(report["kept"], [{"sample_id": s.sample_id,
+                    "start": s.window_start_sec, "end": s.window_end_sec} for s in training_chunks])
+                self.assertEqual(report["selection"]["scanned_chunks"], 5)
+                self.assertEqual(report["selection"]["quota_shortfall"], 0)
+                # An indexed conversation never falls back to later valid ones.
+                cfg = cfg.replace(sample_index=0)
+                load_config.return_value = cfg
+                with self.assertRaisesRegex(ValueError, "found 0"):
+                    selected_sample(args)
+                # Historical audits preserve conversation-count selection.
+                cfg = cfg.replace(sample_index=None)
+                load_config.return_value = cfg
+                args.sample_number_contract = "conversations-v1"
+                selected_sample(args)
+                legacy = json.loads((root / "training_chunks.json").read_text())
+                self.assertEqual(len(legacy["kept"]), 2)
+                self.assertEqual(legacy["sample_number_contract"], "conversations-v1")

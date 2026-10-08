@@ -132,15 +132,20 @@ def filter_text_capacity_chunks(
     cache_fingerprint: str | None = None,
     force_filter: bool = False,
     vietnamese_text_mode: str = "diacritics",
+    max_kept: int | None = None,
 ) -> ChunkFilterResult:
-    """Keep chunks whose configured agent role views fit without retiming text."""
+    """Keep the first max_kept valid chunks, or all when no quota is set."""
     if frame_rate <= 0:
         raise ValueError("Mimi frame_rate must be positive")
     if num_workers < 1:
         raise ValueError("num_workers must be positive")
+    if max_kept is not None and (type(max_kept) is not int or max_kept < 1):
+        raise ValueError("max_kept must be a positive integer or None")
     if cache_path is not None:
         if not cache_fingerprint:
             raise ValueError("cache_fingerprint is required when cache_path is set")
+        if max_kept is not None:
+            cache_fingerprint = f"{cache_fingerprint}:valid-chunk-quota={max_kept}"
         from .filter_cache import load_filter_manifest, save_filter_manifest
 
         if not force_filter:
@@ -174,23 +179,42 @@ def filter_text_capacity_chunks(
         flush=True,
     )
 
+    kept = []
+    rejected = []
+
+    def retain(batch, decisions):
+        for chunk, rejection in zip(batch, decisions, strict=True):
+            if rejection is None:
+                kept.append(chunk)
+            else:
+                rejected.append(rejection)
+
     if use_process_pool:
-        worker_chunks = _compact_chunks_for_workers(chunks)
         with ProcessPoolExecutor(
             max_workers=active_workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_initialize_filter_worker,
             initargs=(tokenizer, frame_rate, swap_roles, vietnamese_text_mode),
         ) as executor:
-            decisions = list(executor.map(_filter_chunk_worker, worker_chunks, chunksize=tasks_per_worker))
+            cursor = 0
+            while cursor < len(chunks) and (max_kept is None or len(kept) < max_kept):
+                # Never schedule more than the remaining quota: even if all
+                # are valid, no worker evaluates a chunk past the stopping point.
+                size = active_workers * tasks_per_worker
+                if max_kept is not None:
+                    size = min(size, max_kept - len(kept))
+                batch = chunks[cursor:cursor + size]
+                decisions = list(executor.map(
+                    _filter_chunk_worker, _compact_chunks_for_workers(batch),
+                    chunksize=tasks_per_worker,
+                ))
+                retain(batch, decisions)
+                cursor += len(batch)
     else:
-        decisions = [
-            _filter_chunk(chunk, tokenizer, frame_rate, swap_roles, vietnamese_text_mode)
-            for chunk in chunks
-        ]
-
-    kept = [chunk for chunk, rejection in zip(chunks, decisions, strict=True) if rejection is None]
-    rejected = [rejection for rejection in decisions if rejection is not None]
+        for chunk in chunks:
+            retain([chunk], [_filter_chunk(chunk, tokenizer, frame_rate, swap_roles, vietnamese_text_mode)])
+            if max_kept is not None and len(kept) >= max_kept:
+                break
     result = ChunkFilterResult(tuple(kept), tuple(rejected))
     if cache_path is not None:
         save_filter_manifest(cache_path, cache_fingerprint, {

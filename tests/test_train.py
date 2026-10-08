@@ -96,6 +96,10 @@ class TrainTest(unittest.TestCase):
         self.assertIn("skipped_out_of_bounds_chunks=0", summary)
         self.assertIn("skipped_text_overflow_chunks=1", summary)
         self.assertEqual(payload["rejected"][0]["word"], "hello")
+        quota = chunk_filter_payload("train", 1, ChunkFilterResult((), (rejected,)), max_kept=100)
+        self.assertEqual(quota["scanned_chunks"], 1)
+        self.assertEqual(quota["requested_valid_chunks"], 100)
+        self.assertEqual(quota["quota_shortfall"], 100)
 
     def test_resume_requires_complete_matching_checkpoint(self) -> None:
         from safetensors.torch import save_file
@@ -129,6 +133,17 @@ class TrainTest(unittest.TestCase):
             run_config.write_text(json.dumps({"training_contract": training_contract(config, [])}))
             adapter, step = validate_resume_checkpoint(config, str(checkpoint), ("transformer",), [])
             self.assertEqual((adapter, step), (checkpoint / "lora.safetensors", 7))
+            old_contract = training_contract(config, [])
+            old_contract.pop("mimi_encoding_contract", None)
+            run_config.write_text(json.dumps({"training_contract": old_contract}))
+            with self.assertRaisesRegex(RuntimeError, "mimi_encoding_contract"):
+                validate_resume_checkpoint(config, str(checkpoint), ("transformer",), [])
+            old_contract = training_contract(config, [])
+            old_contract.pop("sample_number_contract")
+            run_config.write_text(json.dumps({"training_contract": old_contract}))
+            with self.assertRaisesRegex(RuntimeError, "sample_number_contract"):
+                validate_resume_checkpoint(config, str(checkpoint), ("transformer",), [])
+            run_config.write_text(json.dumps({"training_contract": training_contract(config, [])}))
             with self.assertRaisesRegex(RuntimeError, "LoRA configuration differs"):
                 validate_resume_checkpoint(config, str(checkpoint), ("depformer",), [])
             with self.assertRaisesRegex(RuntimeError, "base model differs"):

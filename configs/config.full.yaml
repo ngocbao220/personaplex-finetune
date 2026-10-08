@@ -5,7 +5,7 @@
 
 seed: 42                           # Random seed tái lập kết quả [int: bất kỳ số nguyên nào, vd: 42, 1234]
 duration_sec: 100                  # Độ dài mỗi chunk âm thanh huấn luyện (giây) [float: 25.0 -> 100.0]
-sample_number: null                # Giới hạn N cuộc hội thoại đầu tiên [null: dùng toàn bộ data, int >= 1: 10, 100]
+sample_number: null                # Giữ N chunk hợp lệ đầu tiên [null: dùng toàn bộ data, int >= 1: 10, 100]
 sample_index: null                 # Chọn đúng 1 hội thoại theo index cụ thể [null: tắt, int >= 0: 0, 1, 2...]
 no_eval: false                     # Bỏ qua khâu đánh giá validation [true: không eval giúp train nhanh hơn, false: có eval]
 free_running_eval_every_steps: 500 # Chu kỳ đánh giá sinh text/audio tự do (bước) [0: tắt, int > 0: 100, 500]
