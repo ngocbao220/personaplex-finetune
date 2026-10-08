@@ -276,7 +276,6 @@ def full_worker(request, phase):
     write_json(out / f"{phase}_padded_metrics.json", padded_metrics)
     del padded_output
     if phase == "in_memory":
-        write_json(out / "sequence.json", asdict(example))
         write_json(out / "alignment.json", compare_alignment(sample, runtime.tokenizer, example.dialogue_frames,
                         runtime.codec.frame_rate, config.vietnamese_text_mode, request["reference"]))
         roundtrip = out / "roundtrip"
@@ -303,6 +302,11 @@ def full_worker(request, phase):
         if request["forced_text"]:
             forced = list(example.input_codes[0][example.prompt_frames:])
             generate_observed(config, sample, out / "forced_text", runtime=runtime, forced_text=forced)
+        if request.get("full_gt"):
+            forced = list(example.input_codes[0][example.prompt_frames:])
+            forced_audio = [list(row[example.prompt_frames:]) for row in example.input_codes[1:9]]
+            generate_observed(config, sample, out / "full_gt", runtime=runtime,
+                              forced_text=forced, forced_agent_audio=forced_audio)
         if request["parity_frames"]:
             # Restrict only this expensive GT-history parity pass; never silently crop the primary inference.
             bounded = codes[:, :, :min(codes.shape[-1], request["parity_frames"])]
@@ -377,6 +381,8 @@ def main():
                            help="force GT agent audio via native moshi_tokens while text stays free; diagnostic only")
             p.add_argument("--match-user-conditioning", action="store_true",
                            help="audit-only: preserve mismatch evidence, use stable inference user codes in TF tensor")
+            p.add_argument("--full-gt", action="store_true",
+                           help="force GT text and agent audio; measure raw text logits before forcing")
             p.add_argument("--parity-frames", type=int, default=0, help="explicit bounded GT-history parity prefix; 0 disables")
             p.add_argument("--atol", type=float, default=.05)
             p.add_argument("--rtol", type=float, default=.005)
@@ -453,6 +459,7 @@ def main():
                            "output_dir": str(args.output_dir), "forced_text": args.forced_text,
                            "forced_agent_audio": args.forced_agent_audio,
                            "match_user_conditioning": args.match_user_conditioning,
+                           "full_gt": args.full_gt,
                            "reference": str(args.reference.resolve()),
                            "parity_frames": args.parity_frames, "atol": args.atol, "rtol": args.rtol}
                 if args.parity_frames < 0:
@@ -477,6 +484,8 @@ def main():
                 if args.forced_agent_audio:
                     result["forced_agent_audio"] = json.loads(
                         (args.output_dir / "forced_agent_audio/generation.json").read_text())
+                if args.full_gt:
+                    result["full_gt"] = json.loads((args.output_dir / "full_gt/generation.json").read_text())
                 identities = [json.loads((args.output_dir / f"identity_{p}.json").read_text())
                               for p in ("in_memory", "reload")]
                 result["fresh_worker_identity_equal"] = {

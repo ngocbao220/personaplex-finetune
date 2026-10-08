@@ -5,6 +5,13 @@ The harness reads production code and reference code; it does not modify either,
 download assets, or change alignment/loss policy. Every invocation needs a fresh output directory.
 Failures leave `failure.json` and child logs. A completed report can contain failed parity checks.
 
+For a CUDA Graph capture failure, rerun in a fresh process/output directory with
+`NO_CUDA_GRAPH=1 NO_TORCH_COMPILE=1 CUDA_LAUNCH_BLOCKING=1`. Native Moshi already
+supports `NO_CUDA_GRAPH`; disabling torch.compile alone does not disable graph capture.
+Record these environment flags alongside results: eager execution is a diagnostic
+configuration, not evidence that the original graph-enabled path passes. A capture-end
+error can mask an earlier failure inside the captured function; preserve the full log.
+
 ```sh
 export PYTHONPATH=src
 export NO_TORCH_COMPILE=1
@@ -78,6 +85,18 @@ and `tokens.json` with `in_memory/`. Recovered text supports a dependency on gen
 agent audio/history, but does not prove a specific implementation defect. Its WAV is
 GT-conditioned and cannot be used as evidence of generated audio quality. The independent
 `--forced-text` condition does not also force audio. These probes do not retrain.
+
+`--full-gt` adds `full_gt/`, forcing both GT text and GT agent audio. Every observed
+generation now exports `text_logits.json` with raw text argmax, top tokens, PAD probability,
+native offset, text delay and provided GT target/log-probability before native forcing.
+Its summary reports CE/accuracy and PAD prediction frequency at nonpadding GT targets.
+Free-text conditions have no provided GT targets, so these GT accuracy fields are null.
+Compare `full_gt/text_logits.json` against the same-window text stream in
+`in_memory_metrics.json`, checking token counts and masks rather than historic step losses.
+The targets are taken from native delayed cache, not inferred from decoded text.
+`full_gt/generated.txt` is supplied GT and does not prove prediction quality. A failure
+still exports partial traces marked `completed=false`. Native logits and outputs are never
+modified by observation. Keep `NO_CUDA_GRAPH=1` for the reported graph-capture failure.
 
 The in-memory worker already loads a saved checkpoint: it cannot establish equivalence to
 the original historical training process. Capture a live training snapshot using the existing

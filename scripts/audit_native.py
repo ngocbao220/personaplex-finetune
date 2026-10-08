@@ -4,6 +4,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 import importlib
 import importlib.util
+import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -153,7 +155,8 @@ def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None)
     import torch
     lm = importlib.import_module("moshi.models.lm")
     original = lm.LMGen
-    steps, returned = [], []
+    steps, returned, text_frames = [], [], []
+    completed = False
     if forced_agent_audio is not None and (
         len(forced_agent_audio) != 8 or not forced_agent_audio[0]
         or any(len(row) != len(forced_agent_audio[0]) for row in forced_agent_audio)
@@ -178,6 +181,32 @@ def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None)
                               "provided": provided.cpu().flatten().tolist()})
             return value
 
+        def process_transformer_output(self, transformer_out, text_logits, provided_, target_,
+                                       model_input_position, target_position):
+            # Observe before native torch.where replaces the predicted token with GT.
+            # Never change logits, sampling, cache contents or returned outputs.
+            if self.in_dialogue:
+                logits = text_logits.detach()[0, 0, 0].float()
+                if not torch.isfinite(logits).all():
+                    raise ValueError("non-finite native text logits")
+                log_probs = logits.log_softmax(-1)
+                top = logits.topk(min(5, logits.numel())).indices.tolist()
+                provided = bool(provided_[0, 0, 0])
+                target = int(target_[0, 0, 0]) if provided else None
+                if target is not None and not 0 <= target < logits.numel():
+                    raise ValueError(f"provided native text target outside vocabulary: {target}")
+                text_frames.append({
+                    "dialogue_input_frame": self.dialogue_index,
+                    "native_offset": int(self._streaming_state.offset),
+                    "text_delay": int(self.lm_model.delays[0]),
+                    "prediction": int(logits.argmax()), "top_tokens": top,
+                    "pad_probability": float(log_probs[[0, 3]].exp().sum()),
+                    "gt_target": target,
+                    "target_log_probability": float(log_probs[target]) if target is not None else None,
+                })
+            return super().process_transformer_output(transformer_out, text_logits, provided_, target_,
+                                                       model_input_position, target_position)
+
         def step(self, *args, **kwargs):
             if self.in_dialogue and forced_agent_audio is not None:
                 if self.dialogue_index >= len(forced_agent_audio[0]):
@@ -201,12 +230,31 @@ def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None)
     lm.LMGen = ObservedLMGen
     try:
         yield
+        completed = True
     finally:
         lm.LMGen = original
         write_json(Path(output_dir) / "tokens.json", {"diagnostic_forced_text": forced_text is not None,
                                                      "diagnostic_forced_agent_audio": forced_agent_audio is not None,
                                                      "steps": steps, "returned": returned,
                                                      "returned_frames": len(returned)})
+        real = [r for r in text_frames if r["gt_target"] is not None and r["gt_target"] not in (0, 3)]
+        gt = [r for r in text_frames if r["gt_target"] is not None]
+        summary = {
+            "logit_frames": len(text_frames), "provided_gt_frames": len(gt),
+            "nonpadding_gt_frames": len(real),
+            "prediction_pad_fraction": sum(r["prediction"] in (0, 3) for r in text_frames) / len(text_frames) if text_frames else None,
+            "accuracy_on_nonpadding_gt": sum(r["prediction"] == r["gt_target"] for r in real) / len(real) if real else None,
+            "ce_on_nonpadding_gt": -sum(r["target_log_probability"] for r in real) / len(real) if real else None,
+            "pad_prediction_on_nonpadding_gt": sum(r["prediction"] in (0, 3) for r in real) / len(real) if real else None,
+            "first_nonpadding_gt_failure": next((r for r in real if r["prediction"] != r["gt_target"]), None),
+        }
+        write_json(Path(output_dir) / "text_logits.json", {
+            "completed": completed, "summary": summary, "frames": text_frames,
+            "scope": "raw native text prediction before GT forcing; targets come from delayed provided cache",
+            "diagnostic_forced_text": forced_text is not None,
+            "diagnostic_forced_agent_audio": forced_agent_audio is not None,
+            "NO_CUDA_GRAPH": os.environ.get("NO_CUDA_GRAPH"),
+        })
 
 
 def generate_observed(config, sample, out, *, runtime=None, adapter=None, forced_text=None,
@@ -234,6 +282,7 @@ def generate_observed(config, sample, out, *, runtime=None, adapter=None, forced
     result = {"sample_id": sample.sample_id, "window": [sample.window_start_sec, sample.window_end_sec],
               "diagnostic_forced_text": forced_text is not None, "argmax_checks": checks,
               "diagnostic_forced_agent_audio": forced_agent_audio is not None,
+              "native_text_predictions": json.loads((out / "text_logits.json").read_text())["summary"],
               "errors": text_error_metrics(reference, text, config.vietnamese_text_mode)}
     write_json(out / "generation.json", result)
     return result

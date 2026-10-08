@@ -263,6 +263,40 @@ class AuditNativeTest(unittest.TestCase):
                     with capture_generation(directory, forced_agent_audio=gt):
                         pass
 
+    def test_full_gt_observer_measures_prediction_before_text_is_forced(self):
+        import torch
+        from unittest.mock import patch
+        from audit_native import capture_generation
+        from moshi.models import loaders, lm
+        kwargs = loaders._lm_kwargs.copy()
+        kwargs.update(dim=32, text_card=128, card=64, num_heads=2, num_layers=1, hidden_scale=2,
+                      depformer_dim=16, depformer_dim_feedforward=32, depformer_num_heads=2,
+                      depformer_num_layers=1, dep_q=16)
+        model = loaders.LMModel(device="cpu", dtype=torch.float32, **kwargs).eval()
+        native = model.forward_codes
+        def biased(codes):
+            hidden, logits = native(codes)
+            logits = torch.full_like(logits, -10.)
+            logits[..., 3] = 10.  # Predict PAD despite the forced GT text=7.
+            return hidden, logits
+        with tempfile.TemporaryDirectory() as directory, patch.object(model, "forward_codes", side_effect=biased):
+            with capture_generation(directory, forced_text=[7] * 6, forced_agent_audio=[[10] * 6 for _ in range(8)]):
+                generator = lm.LMGen(model, device="cpu", use_sampling=False, temp=0, temp_text=0)
+                with generator.streaming(1):
+                    for _ in range(generator.max_delay + 2):
+                        generator.step(input_tokens=torch.ones(1, 8, 1, dtype=torch.long))
+                    generator.in_dialogue = True
+                    for _ in range(6):
+                        generator.step(input_tokens=torch.ones(1, 8, 1, dtype=torch.long))
+            report = json.loads((Path(directory) / "text_logits.json").read_text())
+            rows = report["frames"]
+            self.assertTrue(all(r["prediction"] == 3 for r in rows))
+            self.assertTrue(all(r["gt_target"] == 7 for r in rows))
+            self.assertEqual(report["summary"]["accuracy_on_nonpadding_gt"], 0.)
+            self.assertEqual(report["summary"]["pad_prediction_on_nonpadding_gt"], 1.)
+            tokens = json.loads((Path(directory) / "tokens.json").read_text())
+            self.assertTrue(all(r["tokens"][0] == 7 for r in tokens["returned"][generator.max_delay:]))
+
 
 if __name__ == "__main__":
     unittest.main()
