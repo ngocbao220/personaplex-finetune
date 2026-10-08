@@ -69,6 +69,7 @@ class Config:
     pct_start: float = 0.05
     first_codebook_weight_multiplier: float = 1.0
     text_padding_weight: float = 0.3
+    epad_as_padding: bool = False  # True = legacy: EPAD down-weighted like PAD
     user_loss: bool = False
     log_freq: int = 1
     no_eval: bool = False
@@ -252,6 +253,9 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     first_codebook_weight_multiplier = float(raw.get("first_codebook_weight_multiplier", 1.0))
     text_padding_weight = float(raw.get("text_padding_weight", 0.3))
     user_loss = raw.get("user_loss", False)
+    epad_as_padding = raw.get("epad_as_padding", False)
+    if not isinstance(epad_as_padding, bool):
+        raise ValueError("epad_as_padding must be a boolean")
     if not isinstance(user_loss, bool):
         raise ValueError("user_loss must be a boolean")
     if first_codebook_weight_multiplier < 0:
@@ -343,6 +347,7 @@ gradient_checkpointing=bool(raw.get("gradient_checkpointing", train.get("gradien
         pct_start=pct_start,
         first_codebook_weight_multiplier=first_codebook_weight_multiplier,
         text_padding_weight=text_padding_weight,
+        epad_as_padding=epad_as_padding,
         user_loss=user_loss,
         log_freq=max(1, int(raw.get("log_freq", 1))),
         no_eval=bool(raw.get("no_eval", True)),

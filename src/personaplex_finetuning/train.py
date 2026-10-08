@@ -279,6 +279,7 @@ def training_contract(config: Config, train_conversations: list, train_chunks: l
         "pct_start": config.pct_start,
         "first_codebook_weight_multiplier": config.first_codebook_weight_multiplier,
         "text_padding_weight": config.text_padding_weight,
+        "epad_as_padding": config.epad_as_padding,
         "user_loss": config.user_loss,
         "train_stage": config.train_stage,
         "qlora": config.qlora, "quant_type": config.quant_type if config.qlora else None,
@@ -435,10 +436,17 @@ def pack_text_training_stats(
     ))
 
 
-def tokenizer_text_padding_ids(tokenizer) -> tuple[int, ...]:
+def tokenizer_text_padding_ids(tokenizer, include_end_padding: bool = False) -> tuple[int, ...]:
+    """Text IDs treated as padding (down-weighted in loss, excluded from "real" text metrics).
+
+    EPAD (end_padding_id) marks a word onset. Free-running generation can only start a
+    word after the model itself emits EPAD, so by default EPAD is a full-weight target.
+    Audit evidence: with EPAD down-weighted, the model never emitted EPAD and stayed on PAD.
+    ``include_end_padding=True`` restores the legacy (and moshi-finetune reference) behavior.
+    """
     ids = [int(tokenizer.padding_id)]
     end_padding_id = getattr(tokenizer, "end_padding_id", None)
-    if end_padding_id is not None and int(end_padding_id) not in ids:
+    if include_end_padding and end_padding_id is not None and int(end_padding_id) not in ids:
         ids.append(int(end_padding_id))
     return normalize_text_padding_ids(ids)
 
@@ -932,7 +940,7 @@ def one_step(config: Config, runtime, example, optimizer=None):
     codes = torch.tensor(example.input_codes, dtype=torch.long, device=config.device).unsqueeze(0)
     output = model_forward_train(runtime.model, codes)
     total, components = loss_components(
-        output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer), torch,
+        output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding), torch,
         config.first_codebook_weight_multiplier, config.text_padding_weight,
         user_loss=config.user_loss,
     )
@@ -1123,7 +1131,7 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
             codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
             output = model_forward_train(unwrapped, codes)
             total, comps = loss_components(
-                output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer), torch,
+                output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding), torch,
                 config.first_codebook_weight_multiplier, config.text_padding_weight,
                 user_loss=config.user_loss,
             )
@@ -1134,7 +1142,7 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
             labels = torch.tensor(example.labels, dtype=torch.long, device=device).unsqueeze(0)
             loss_mask = torch.tensor(example.loss_mask, dtype=torch.bool, device=device).unsqueeze(0)
             text_loss_sum, text_token_count = text_target_token_loss_stats(
-                {"labels": labels, "loss_mask": loss_mask}, output, tokenizer_text_padding_ids(runtime.tokenizer),
+                {"labels": labels, "loss_mask": loss_mask}, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding),
             )
             nonpadding_text_loss_sum += float(text_loss_sum)
             nonpadding_text_token_count += int(text_token_count)
@@ -1768,6 +1776,7 @@ def run(
             "pct_start": config.pct_start,
             "first_codebook_weight_multiplier": config.first_codebook_weight_multiplier,
             "text_padding_weight": config.text_padding_weight,
+            "epad_as_padding": config.epad_as_padding,
             "user_loss": config.user_loss,
             "log_freq": config.log_freq,
             "no_eval": config.no_eval,
@@ -2132,28 +2141,28 @@ def run(
                 forward_started = time.monotonic() if config.profile_steps else 0.0
                 output = model_forward_train(runtime.model, codes)
                 text_targets, text_padding = text_supervision_counts(
-                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
+                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding)
                 )
                 pending_text_target_tokens += text_targets.detach()
                 pending_text_padding_positions += text_padding.detach()
                 target_ce_sum, target_ce_count = text_target_token_loss_stats(
-                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
+                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding)
                 )
                 pending_text_target_ce_sum += target_ce_sum
                 pending_text_target_ce_count += target_ce_count.detach()
                 diag_t_corr, diag_t_cnt, diag_t_loss, diag_cb_corr, diag_cb_cnt, diag_cb_loss = codebook_diagnostic_stats(
-                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
+                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding)
                 )
                 pending_text_target_correct += diag_t_corr
                 pending_text_prediction_counts += text_prediction_diagnostic_counts(
-                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
+                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding)
                 )
                 pending_audio_cb_correct += diag_cb_corr
                 pending_audio_cb_count += diag_cb_cnt
                 pending_audio_cb_loss_sum += diag_cb_loss
 
                 loss_result = loss_components(
-                    output, codes, batch, tokenizer_text_padding_ids(runtime.tokenizer), torch,
+                    output, codes, batch, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding), torch,
                     config.first_codebook_weight_multiplier, config.text_padding_weight,
                     user_loss=config.user_loss,
                     distributed=distributed,

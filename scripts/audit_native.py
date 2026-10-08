@@ -232,6 +232,7 @@ def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None,
                     "text_delay": int(self.lm_model.delays[0]),
                     "prediction": int(logits.argmax()), "top_tokens": top,
                     "pad_probability": float(log_probs[[0, 3]].exp().sum()),
+                    "epad_probability": float(log_probs[0].exp()),
                     "gt_target": target,
                     "target_log_probability": float(log_probs[target]) if target is not None else None,
                     "reference_dialogue_frame": reference_frame,
@@ -285,6 +286,15 @@ def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None,
             "pad_prediction_on_nonpadding_gt": sum(r["prediction"] in (0, 3) for r in real) / len(real) if real else None,
             "first_nonpadding_gt_failure": next((r for r in real if r["prediction"] != r["gt_target"]), None),
         }
+        # EPAD (0) is the word-onset trigger; it is hidden inside "padding" above.
+        epad_gt = [r for r in text_frames if r["gt_target"] == 0]
+        summary.update(
+            epad_gt_frames=len(epad_gt),
+            epad_recall_on_gt=sum(r["prediction"] == 0 for r in epad_gt) / len(epad_gt) if epad_gt else None,
+            epad_ce_on_gt=-sum(r["target_log_probability"] for r in epad_gt) / len(epad_gt) if epad_gt else None,
+            prediction_epad_fraction=sum(r["prediction"] == 0 for r in text_frames) / len(text_frames) if text_frames else None,
+            first_epad_gt_failure=next((r for r in epad_gt if r["prediction"] != 0), None),
+        )
         reference_real = [r for r in text_frames if r["reference_target"] is not None
                           and r["reference_target"] not in (0, 3)]
         after = [r for r in reference_real if release_at_frame is not None

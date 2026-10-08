@@ -181,7 +181,7 @@ class GoldenSampleTest(unittest.TestCase):
             mask = self.torch.tensor(delayed.loss_mask, dtype=self.torch.bool)
             labels = self.torch.nn.functional.pad(labels, (0, 2), value=-1)
             mask = self.torch.nn.functional.pad(mask, (0, 2), value=False)
-            weights = stream_weights_torch(labels, mask, (tokenizer.padding_id, tokenizer.end_padding_id), user_loss=True)
+            weights = stream_weights_torch(labels, mask, (tokenizer.padding_id,), user_loss=True)
             self.assertTrue(self.torch.all(weights[:, 0] == 0).item())
             self.assertTrue(self.torch.all(weights[:, -2:] == 0).item())
             for stream, delay in enumerate(delays):
@@ -198,7 +198,8 @@ class GoldenSampleTest(unittest.TestCase):
             dialog_text = labels[0, text_dialogue_begin:text_dialogue_end]
             dialog_text_weights = weights[0, text_dialogue_begin:text_dialogue_end]
             self.assertTrue(self.torch.any((dialog_text == tokenizer.padding_id) & (dialog_text_weights == 0.3)).item())
-            self.assertTrue(self.torch.any((dialog_text == tokenizer.end_padding_id) & (dialog_text_weights == 0.3)).item())
+            self.assertTrue(self.torch.any((dialog_text == tokenizer.end_padding_id) & (dialog_text_weights == 1.0)).item())
+            self.assertFalse(self.torch.any((dialog_text == tokenizer.end_padding_id) & (dialog_text_weights == 0.3)).item())
             for stream in range(1, 9):
                 dialogue_begin = 1 + delays[stream] + base.prompt_frames
                 dialogue_end = dialogue_begin + base.dialogue_frames

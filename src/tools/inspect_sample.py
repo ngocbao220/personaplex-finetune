@@ -74,7 +74,7 @@ def build_debug_payload(
         raise AssertionError("hybrid prompt segments are not ordered with pauses")
 
     labels = example.labels
-    text_padding_ids = (tokenizer.padding_id, tokenizer.end_padding_id)
+    text_padding_ids = (tokenizer.padding_id,)  # EPAD is a full-weight target (matches training default)
     weights = stream_weights(
         labels, example.loss_mask, text_padding_ids,
         text_padding_weight=text_padding_weight,
