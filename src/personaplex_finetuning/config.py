@@ -228,6 +228,13 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
 
 
     prepared_dir = resolve(data, "prepared_dir") if "prepared_dir" in data else resolve(data, "manifest").parent
+    output_dir_config = train.get("output_dir") if isinstance(train, dict) else None
+    output_dir_default = f"../runs/{path.stem}"
+    output_dir_section = (
+        {}
+        if isinstance(output_dir_config, str) and not output_dir_config.strip()
+        else train
+    )
     codec_cache_raw = data.get("codec_cache_dir")
     if codec_cache_raw is not None and (not isinstance(codec_cache_raw, str) or not codec_cache_raw.strip()):
         raise ValueError("data.codec_cache_dir must be null or a non-empty path")
@@ -292,7 +299,9 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         model_root=resolve(model, "root"),
         personaplex_source=resolve(model, "source"),
         prepared_dir=prepared_dir,
-        output_dir=resolve(train if isinstance(train, dict) else {}, "output_dir", "../runs/overfit_10"),
+        # An empty output_dir opts into a config-name-based default, e.g.
+        # configs/overfit.yaml -> ../runs/overfit.
+        output_dir=resolve(output_dir_section, "output_dir", output_dir_default),
         codec_cache_dir=codec_cache_dir,
         seed=int(raw.get("seed", 42)),
         window_seconds=(

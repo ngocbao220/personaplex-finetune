@@ -175,6 +175,19 @@ class ConfigTest(unittest.TestCase):
 
             self.assertTrue(load_config(config).profile_steps)
 
+    def test_empty_output_dir_falls_back_to_config_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "configs" / "experiment.yaml"
+            config.parent.mkdir()
+            config.write_text(
+                "model:\n  root: /models/base\n  source: /source\n"
+                "data:\n  prepared_dir: /data\n"
+                "train:\n  output_dir: \"\"\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(load_config(config).output_dir, (config.parent.parent / "runs" / "experiment").resolve())
+
     def test_hydra_moshi_overrides_target_the_effective_top_level_parameters(self) -> None:
         config = Path(__file__).resolve().parents[1] / "configs" / "config.yaml"
 
