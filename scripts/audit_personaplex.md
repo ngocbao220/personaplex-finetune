@@ -44,6 +44,14 @@ retained/rejected windows, conditional sampler replay counts, token/frame alignm
 sides, lost occurrence counts, voice codes, loss masks, asset hashes and exact source WAV.
 Sampler replay is conditional on a fresh single-GPU run; it is not historical observed counts.
 
+`user_encoding.json` is saved before the strict equality assertion. If user tokens
+differ, it contains both grids, shapes, mismatch count/fraction, first mismatch and
+repeated mono/stereo results (or repeat error). Run `data` first to gather this evidence
+without allocating 7B. A successful repeat can come from cache when a cache directory
+is configured; the report records that directory. Do not disable the assertion or
+infer causality merely from nonidentical quantized codes. Small numeric differences
+between batch sizes and larger layout/window differences require separate diagnosis.
+
 `probe` sequentially loads the existing adapter in memory, saves a roundtrip adapter, reloads
 in a fresh process, runs the production standalone adapter inference, then base inference.
 It compares masked TF logits, per-stream loss/count/accuracy, raw generated tokens, PCM/text,

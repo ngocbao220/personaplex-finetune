@@ -108,6 +108,57 @@ def source_identity():
             if (module := importlib.import_module(name))}
 
 
+def audit_user_encoding(sample, runtime, example, out):
+    """Persist the actual mismatch before stopping; repeat paths only on failure."""
+    codec = runtime.codec
+    training = tuple(tuple(row[example.prompt_frames:]) for row in example.input_codes[9:])
+    inference = codec.encode_conversation(sample.conversation_wav, sample.user_channel,
+                                         sample.window_start_sec, sample.window_end_sec)
+
+    def compare(a, b):
+        shapes = [len(row) for row in a], [len(row) for row in b]
+        positions = [(k, t, x, y) for k, (left, right) in enumerate(zip(a, b))
+                     for t, (x, y) in enumerate(zip(left, right)) if x != y]
+        overlap = sum(min(len(x), len(y)) for x, y in zip(a, b))
+        first = positions[0] if positions else None
+        return {"equal": shapes[0] == shapes[1] and not positions,
+                "training_shape": shapes[0], "inference_shape": shapes[1],
+                "overlap_tokens": overlap, "mismatched_overlap_tokens": len(positions),
+                "mismatch_fraction": len(positions) / overlap if overlap else None,
+                "unmatched_tokens": sum(shapes[0]) + sum(shapes[1]) - 2 * overlap,
+                "first_mismatch": dict(zip(("codebook", "frame", "training", "inference"), first))
+                                  if first else None}
+
+    comparison = compare(training, inference)
+    path = out / "user_encoding.json"
+    report = {"training_vs_inference": comparison,
+              "training_user_tokens": training, "inference_user_tokens": inference,
+              "window": [sample.window_start_sec, sample.window_end_sec],
+              "channels": {"agent": sample.agent_channel, "user": sample.user_channel},
+              "codec_device": str(codec.device),
+              "codec_cache_dir": str(codec._cache_dir) if getattr(codec, "_cache_dir", None) else None,
+              "scope": "production training stereo-batch user codes versus inference single-channel codes"}
+    write_json(path, report)
+    if comparison["equal"]:
+        return
+    try:
+        repeated_mono = codec.encode_conversation(sample.conversation_wav, sample.user_channel,
+                                                  sample.window_start_sec, sample.window_end_sec)
+        _, repeated_stereo = codec.encode_conversation_stereo(sample.conversation_wav,
+            sample.agent_channel, sample.user_channel, sample.window_start_sec, sample.window_end_sec)
+        report.update(inference_repeat=compare(inference, repeated_mono),
+                      training_repeat=compare(training, repeated_stereo),
+                      repeated_stereo_vs_mono=compare(repeated_stereo, repeated_mono),
+                      repeated_inference_user_tokens=repeated_mono,
+                      repeated_training_user_tokens=repeated_stereo)
+    except Exception:
+        report["repeat_error"] = traceback.format_exc()
+    write_json(path, report)
+    raise AssertionError("training and inference user codes differ: "
+        f"{comparison['mismatched_overlap_tokens']}/{comparison['overlap_tokens']} overlapping tokens; "
+        f"unmatched={comparison['unmatched_tokens']}; inspect {path}")
+
+
 def encode_data(cfg, sample, tokenizer, reference, out):
     import torch
     from validate_one_sample import codec_runtime
@@ -117,11 +168,7 @@ def encode_data(cfg, sample, tokenizer, reference, out):
     runtime = codec_runtime(cfg, cfg.device)
     with torch.inference_mode():
         example = build_example(cfg, sample, runtime)
-        user = runtime.codec.encode_conversation(sample.conversation_wav, sample.user_channel,
-                                                 sample.window_start_sec, sample.window_end_sec)
-    train_user = tuple(tuple(row[example.prompt_frames:]) for row in example.input_codes[9:])
-    if train_user != user:
-        raise AssertionError("training and inference user Mimi tokens differ")
+        audit_user_encoding(sample, runtime, example, out)
     if any(any(row[:example.prompt_frames]) for row in example.loss_mask):
         raise AssertionError("prompt is supervised")
     if (sample.agent_channel, sample.user_channel) not in {(0, 1), (1, 0)}:
@@ -172,6 +219,9 @@ def full_worker(request, phase):
                             config.model_root / "tokenizer-e351c8d8-checkpoint125.safetensors",
                             sample.conversation_wav, sample.voice_prompt_wav)}})
     example = build_example(config, sample, runtime)
+    if phase == "in_memory":
+        write_json(out / "sequence.json", asdict(example))
+        audit_user_encoding(sample, runtime, example, out)
     if any(any(row[:example.prompt_frames]) for row in example.loss_mask):
         raise AssertionError("conditioning prompt is supervised")
     codes = torch.tensor(example.input_codes, device=config.device).unsqueeze(0)
@@ -202,11 +252,6 @@ def full_worker(request, phase):
         write_json(out / "sequence.json", asdict(example))
         write_json(out / "alignment.json", compare_alignment(sample, runtime.tokenizer, example.dialogue_frames,
                         runtime.codec.frame_rate, config.vietnamese_text_mode, request["reference"]))
-        infer_user = runtime.codec.encode_conversation(sample.conversation_wav, sample.user_channel,
-                                                       sample.window_start_sec, sample.window_end_sec)
-        train_user = tuple(tuple(row[example.prompt_frames:]) for row in example.input_codes[9:])
-        if train_user != infer_user:
-            raise AssertionError("training and inference user codes differ")
         roundtrip = out / "roundtrip"
         roundtrip.mkdir()
         save_file(adapter_state_dict(runtime.model), str(roundtrip / "lora.safetensors"))

@@ -99,6 +99,28 @@ class AuditAlignmentTest(unittest.TestCase):
 
 
 class AuditNativeTest(unittest.TestCase):
+    def test_user_encoding_failure_preserves_tokens_and_repeat_evidence(self):
+        from types import SimpleNamespace
+        from audit_personaplex import audit_user_encoding
+        train = tuple((1, 2) for _ in range(8))
+        mono = tuple((1, 3) for _ in range(8))
+        codec = SimpleNamespace(device="cpu", _cache_dir=None,
+            encode_conversation=lambda *a: mono,
+            encode_conversation_stereo=lambda *a: (train, train))
+        sample = SimpleNamespace(conversation_wav=Path("test.wav"), agent_channel=0, user_channel=1,
+                                 window_start_sec=0, window_end_sec=1)
+        example = SimpleNamespace(prompt_frames=1, input_codes=((0, 0, 0),) * 9 +
+                                  tuple((0,) + row for row in train))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(AssertionError, "8/16.*user_encoding.json"):
+                audit_user_encoding(sample, SimpleNamespace(codec=codec), example, Path(directory))
+            report = json.loads((Path(directory) / "user_encoding.json").read_text())
+            self.assertEqual(report["training_vs_inference"]["first_mismatch"],
+                             {"codebook": 0, "frame": 1, "training": 2, "inference": 3})
+            self.assertTrue(report["inference_repeat"]["equal"])
+            self.assertTrue(report["training_repeat"]["equal"])
+            self.assertEqual(report["training_user_tokens"], [list(row) for row in train])
+
     def test_tensor_comparison_ignores_invalid_nan_and_locates_first_mismatch(self):
         import torch
         from audit_native import tensor_comparison
