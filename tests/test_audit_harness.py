@@ -57,6 +57,72 @@ class AuditLogsTest(unittest.TestCase):
         self.assertEqual(sum(counts.values()), 5)
 
 
+class AuditSelectionTest(unittest.TestCase):
+    def test_vi_default_defers_selection_and_crop_to_retained_training_chunks(self):
+        from unittest.mock import patch
+        import audit_vi
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # The wrapper must not read a raw manifest row to pick the default.
+            (root / "config.json").write_text(json.dumps({
+                "manifest": str(root / "missing" / "train.jsonl"),
+                "vietnamese_text_mode": "no_diacritics", "duration_sec": 100,
+                "sample_number": 100, "sample_index": None, "window_seconds": None,
+                "swap_roles_after_pass": True, "eval_on_train_samples": True,
+            }))
+            argv = ["audit_vi", "--run-dir", str(root), "--config", "config.yaml",
+                    "--adapter", str(root / "lora.safetensors"), "--output-dir", str(root / "audit"), "--dry-run"]
+            with patch.object(sys, "argv", argv):
+                audit_vi.main()
+            invocation = json.loads((root / "audit/vi_invocation.json").read_text())
+            for cmd in invocation["commands"]:
+                self.assertNotIn("--sample-id", cmd)
+                self.assertNotIn("--start-sec", cmd)
+                self.assertNotIn("--end-sec", cmd)
+                self.assertIn("sample_index=null", cmd)
+                self.assertIn("data.swap_roles_after_pass=true", cmd)
+
+    def _select(self, root, sample_id=None, start=None, end=None):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from personaplex_finetuning.config import Config
+        from audit_personaplex import selected_sample
+        (root / "train.jsonl").write_text("{}\n")
+        cfg = Config(path=root / "config.yaml", model_root=root, personaplex_source=root,
+                     prepared_dir=root, output_dir=root, eval_on_train_samples=True,
+                     sample_number=100, max_steps=1, per_device_batch_size=1)
+        kept = PreparedSample("kept", root / "audio.wav", root / "voice.wav", (), "test", {},
+                              AudioInfo(24000, 2, 143), 100, 143)
+        args = SimpleNamespace(config=cfg.path, override=[], device="cpu", output_dir=root,
+                               sample_id=sample_id, start_sec=start, end_sec=end, role="left-agent")
+        with patch("personaplex_finetuning.config.load_config", return_value=cfg), \
+             patch("personaplex_finetuning.data.PreparedDataset") as dataset, \
+             patch("personaplex_finetuning.runtime.RuntimePaths") as assets, \
+             patch("personaplex_finetuning.runtime.SentencePieceTokenizer"), \
+             patch("personaplex_finetuning.chunk_filter.filter_text_capacity_chunks",
+                   return_value=SimpleNamespace(kept=[kept], rejected=[])):
+            dataset.return_value.load.return_value = [kept]
+            dataset.return_value.load_report = AudioInfo(24000, 2, 143)
+            assets.return_value.validate.return_value = SimpleNamespace(tokenizer=root / "tokenizer")
+            return selected_sample(args)
+
+    def test_default_selects_retained_nonzero_window_and_actual_audio_end(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, sample, _ = self._select(root)
+            self.assertEqual((sample.sample_id, sample.window_start_sec, sample.window_end_sec), ("kept", 100, 143))
+            evidence = json.loads((root / "sample_selection.json").read_text())
+            self.assertEqual(evidence["mode"], "first_retained_training_chunk")
+
+    def test_explicit_missing_sample_and_out_of_bounds_crop_do_not_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "not-retained"):
+                self._select(root, sample_id="not-retained", start=0)
+            with self.assertRaisesRegex(ValueError, "crop must fit"):
+                self._select(root, sample_id="kept", start=100, end=200)
+
+
 class AuditAlignmentTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

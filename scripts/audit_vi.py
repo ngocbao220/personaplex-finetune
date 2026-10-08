@@ -58,15 +58,6 @@ def find_adapter(run_dir: Path, step: int | None) -> Path:
     return max(found)[1]
 
 
-def first_sample_id(manifest: Path) -> str:
-    with manifest.open() as f:
-        row = json.loads(f.readline())
-    for key in ("sample_id", "id", "conversation_id", "name"):
-        if key in row:
-            return str(row[key])
-    raise SystemExit(f"Cannot infer sample id from manifest keys {sorted(row)}; pass --sample-id")
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", type=Path, required=True, help="train_vi run directory")
@@ -74,9 +65,9 @@ def main() -> None:
     ap.add_argument("--output-dir", type=Path, required=True)
     ap.add_argument("--adapter", type=Path, help="default: latest checkpoint-*/lora.safetensors")
     ap.add_argument("--step", type=int, help="pick checkpoint-<step>")
-    ap.add_argument("--sample-id", help="default: first manifest entry")
-    ap.add_argument("--start-sec", type=float, default=0.0)
-    ap.add_argument("--end-sec", type=float, help="default: start + duration_sec of training")
+    ap.add_argument("--sample-id", help="default: first retained training chunk after all filters")
+    ap.add_argument("--start-sec", type=float, help="default: retained chunk start (explicit sample ID defaults to 0)")
+    ap.add_argument("--end-sec", type=float, help="default: selected chunk end, bounded by actual audio duration")
     ap.add_argument("--text-mode", choices=sorted(TEXT_MODES), help="override recorded text mode (not recommended)")
     ap.add_argument("--role", choices=["left-agent", "right-agent"], default="left-agent")
     ap.add_argument("--device", default="cuda")
@@ -101,22 +92,32 @@ def main() -> None:
         f"data.vietnamese_text_mode={text_mode}",
         f"duration_sec={duration}",
     ]
-    for key in ("sample_number", "text_padding_weight", "first_codebook_weight_multiplier", "user_loss"):
-        if c.get(key) is not None:
+    for key in ("sample_number", "sample_index", "text_padding_weight", "first_codebook_weight_multiplier", "user_loss"):
+        if key in c:
             val = c[key]
-            overrides.append(f"{key}={str(val).lower() if isinstance(val, bool) else val}")
+            overrides.append(f"{key}={'null' if val is None else str(val).lower() if isinstance(val, bool) else val}")
+    for key, config_key in (("window_seconds", "data.window_seconds"),
+                            ("swap_roles_after_pass", "data.swap_roles_after_pass"),
+                            ("eval_on_train_samples", "train.eval_on_train_samples")):
+        if key in c:
+            val = c[key]
+            overrides.append(f"{config_key}={'null' if val is None else str(val).lower() if isinstance(val, bool) else val}")
     overrides += args.override
 
     adapter = args.adapter or find_adapter(args.run_dir, args.step)
-    sample_id = args.sample_id or first_sample_id(manifest)
-    end = args.end_sec if args.end_sec is not None else args.start_sec + duration
+    sample_id = args.sample_id
 
     common = [sys.executable, str(SCRIPT)]
     shared = ["--config", str(args.config)]
     for o in overrides:
         shared += ["--override", o]
-    shared += ["--sample-id", sample_id, "--start-sec", str(args.start_sec), "--end-sec", str(end),
-               "--role", args.role, "--device", args.device]
+    if sample_id is not None:
+        shared += ["--sample-id", sample_id]
+    if args.start_sec is not None:
+        shared += ["--start-sec", str(args.start_sec)]
+    if args.end_sec is not None:
+        shared += ["--end-sec", str(args.end_sec)]
+    shared += ["--role", args.role, "--device", args.device]
 
     cmds = []
     if not args.skip_data:
@@ -132,6 +133,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "vi_invocation.json").write_text(json.dumps(
         {"run_dir": str(args.run_dir), "adapter": str(adapter), "sample_id": sample_id,
+         "sample_selection": "explicit_sample_id" if sample_id is not None else "first_retained_training_chunk",
          "text_mode": text_mode, "overrides": overrides, "commands": cmds}, indent=2, ensure_ascii=False))
     env = {**os.environ, "NO_CUDA_GRAPH": os.environ.get("NO_CUDA_GRAPH", "1")}
     for cmd in cmds:

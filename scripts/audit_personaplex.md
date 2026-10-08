@@ -30,6 +30,36 @@ and fresh-process reload. Reference LM comparison holds local shared dependencie
 
 ## Prepared data and existing checkpoints on the server
 
+### Vietnamese run wrapper
+
+`audit_vi.py` reads the run's recorded contract. Without `--sample-id`, it delegates
+sample selection to the audit's production dataset loading, conversation limiting,
+duration chunking and text-capacity filtering. It selects the first **retained training
+chunk**, not the first raw manifest entry, and defaults to that chunk's start/end bounded
+by actual audio duration. `sample_selection.json` in each data/probe directory records
+the selected sample, crop, role, requested values and original training chunk boundaries.
+Recorded sample index, pre-chunk window, role swapping and eval split settings are also
+passed through when available; extra `--override` values remain last.
+
+An explicit `--sample-id` never falls back to another sample. It defaults to time zero
+when no start is supplied; pass `--start-sec` to select a later retained window.
+An explicit start/end must fit the selected retained chunk and actual audio. If selection
+fails, inspect `training_chunks.json` for kept/rejected windows.
+
+After syncing `scripts/audit_vi.py` and `scripts/audit_personaplex.py`, rerun with a new
+output directory (use the same Python training environment):
+
+```sh
+NO_CUDA_GRAPH=1 NO_TORCH_COMPILE=1 python /home/voice/code/VDT_02/baottn/personaplex-finetune-v10/scripts/audit_vi.py \
+  --run-dir /home/voice/code/VDT_02/baottn/personaplex-finetune-v10/runs/train-vi/train_20261008_023102_393962 \
+  --config /home/voice/code/VDT_02/baottn/personaplex-finetune-v10/configs/train_vi.yaml \
+  --output-dir /home/voice/code/VDT_02/baottn/personaplex-finetune-v10/audit-artifacts/vi-probe-v2
+```
+
+The wrapper's `--dry-run` prints the planned commands without loading the corpus.
+Its invocation records automatic selection rather than inventing a sample ID before
+filtering. Strict user-code equality and all existing GPU gates remain in effect.
+
 Use the original YAML and **all original overrides**, not a reconstructed configuration.
 Replace paths below with the actual server paths. The failed artifact used `no_diacritics`;
 the effective overrides of the successful 10-sample run remain unknown. Do not assume

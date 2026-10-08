@@ -57,19 +57,38 @@ def selected_sample(args):
         "kept": [{"sample_id": s.sample_id, "start": s.window_start_sec, "end": s.window_end_sec} for s in filtered.kept],
         "rejected": [asdict(r) for r in filtered.rejected],
         "updates": replay_updates(cfg, filtered.kept)})
-    matches = [s for s in filtered.kept if s.sample_id == args.sample_id
-               and s.window_start_sec <= args.start_sec < s.window_end_sec]
+    # Explicit IDs retain the historical default crop at t=0. Automatic selection
+    # happens after all training filters, and can start at a later retained chunk.
+    start = args.start_sec
+    if start is None and args.sample_id is not None:
+        start = 0.0
+    matches = [s for s in filtered.kept if (args.sample_id is None or s.sample_id == args.sample_id)
+               and (start is None or s.window_start_sec <= start < s.window_end_sec)]
+    if args.sample_id is None:
+        matches = matches[:1]
     if len(matches) != 1:
-        raise ValueError(f"expected one retained training chunk for {args.sample_id} at {args.start_sec}; found {len(matches)}")
+        raise ValueError(f"expected one retained training chunk for {args.sample_id or 'automatic selection'} "
+                         f"at {start}; found {len(matches)}; inspect {args.output_dir / 'training_chunks.json'} "
+                         "for kept/rejected chunks; explicit sample IDs never fall back")
     training_chunk = matches[0]
+    start = training_chunk.window_start_sec if start is None else start
     end = min(training_chunk.window_end_sec, training_chunk.audio.duration_sec) if args.end_sec is None else args.end_sec
-    if not 0 <= args.start_sec < end <= min(training_chunk.window_end_sec, training_chunk.audio.duration_sec):
+    if not training_chunk.window_start_sec <= start < end <= min(training_chunk.window_end_sec, training_chunk.audio.duration_sec):
         raise ValueError("audit crop must fit the retained training chunk and actual audio")
-    sample = training_chunk.with_window(args.start_sec, end)
+    sample = training_chunk.with_window(start, end)
     if args.role == "right-agent":
         if not cfg.swap_roles_after_pass:
             raise ValueError("right-agent is not a trained role in this configuration")
         sample = sample.swapped_roles()
+    write_json(args.output_dir / "sample_selection.json", {
+        "mode": "explicit_sample_id" if args.sample_id is not None else "first_retained_training_chunk",
+        "requested_sample_id": args.sample_id, "requested_start_sec": args.start_sec,
+        "requested_end_sec": args.end_sec, "sample_id": sample.sample_id, "role": args.role,
+        "start_sec": sample.window_start_sec, "end_sec": sample.window_end_sec,
+        "training_chunk_start_sec": training_chunk.window_start_sec,
+        "training_chunk_end_sec": training_chunk.window_end_sec,
+    })
+    print(f"[Audit sample] {sample.sample_id} role={args.role} crop={start}–{end}s", flush=True)
     return cfg, sample, tokenizer
 
 
@@ -395,8 +414,9 @@ def main():
         p = subs.add_parser(name, help="retained train sample audit" if name == "data" else "existing 7B checkpoint audit in sequential workers")
         p.add_argument("--config", type=Path, required=True)
         p.add_argument("--override", action="append", default=[])
-        p.add_argument("--sample-id", required=True)
-        p.add_argument("--start-sec", type=float, default=0)
+        p.add_argument("--sample-id", help="default: first retained training chunk after all filters")
+        p.add_argument("--start-sec", type=float,
+                       help="default: 0 for an explicit sample ID; retained chunk start for automatic selection")
         p.add_argument("--end-sec", type=float)
         p.add_argument("--role", choices=["left-agent", "right-agent"], default="left-agent")
         p.add_argument("--device", default="cuda")
