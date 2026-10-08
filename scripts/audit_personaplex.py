@@ -212,7 +212,7 @@ def encode_data(cfg, sample, tokenizer, reference, out):
 def full_worker(request, phase):
     import torch
     from audit_native import (require_device, output_metrics, save_output, load_output, output_comparison,
-                              generate_observed)
+                              generate_observed, resolve_release_frame)
     from validation_generation import _decode_request
     from validate_one_sample import full_runtime, parity
     from personaplex_finetuning.train import build_example, model_forward_train, seed_everything
@@ -294,19 +294,45 @@ def full_worker(request, phase):
         metadata = json.loads(adapter.with_name("adapter.json").read_text())
         metadata.update(rank=rank, alpha=alpha, scaling=alpha / rank, model_root=str(config.model_root.resolve()))
         write_json(roundtrip / "adapter.json", metadata)
-        generate_observed(config, sample, out / "in_memory", runtime=runtime)
+        reference_text = list(example.input_codes[0][example.prompt_frames:])
+        forced_audio = [list(row[example.prompt_frames:]) for row in example.input_codes[1:9]]
+        release_frame = resolve_release_frame(request, reference_text)
+        generate_observed(config, sample, out / "in_memory", runtime=runtime,
+                          reference_text=reference_text)
         if request.get("forced_agent_audio"):
-            forced_audio = [list(row[example.prompt_frames:]) for row in example.input_codes[1:9]]
             generate_observed(config, sample, out / "forced_agent_audio", runtime=runtime,
-                              forced_agent_audio=forced_audio)
+                              forced_agent_audio=forced_audio, reference_text=reference_text)
         if request["forced_text"]:
-            forced = list(example.input_codes[0][example.prompt_frames:])
-            generate_observed(config, sample, out / "forced_text", runtime=runtime, forced_text=forced)
+            generate_observed(config, sample, out / "forced_text", runtime=runtime, forced_text=reference_text,
+                              reference_text=reference_text)
         if request.get("full_gt"):
-            forced = list(example.input_codes[0][example.prompt_frames:])
-            forced_audio = [list(row[example.prompt_frames:]) for row in example.input_codes[1:9]]
             generate_observed(config, sample, out / "full_gt", runtime=runtime,
-                              forced_text=forced, forced_agent_audio=forced_audio)
+                              forced_text=reference_text, forced_agent_audio=forced_audio,
+                              reference_text=reference_text)
+        if release_frame is not None:
+            first_text = next((i for i, token in enumerate(reference_text) if token not in (0, 3)), None)
+            comparison = {"release_at_frame": release_frame,
+                          "release_time_sec": sample.window_start_sec + release_frame / runtime.codec.frame_rate,
+                          "first_nonpadding_reference_frame": first_text,
+                          "scope": "GT before release; boundary frame is free for selected streams; delayed queued audio is retained",
+                          "conditions": {}}
+            for streams in ("both", "text", "audio"):
+                name = f"release_{streams}"
+                print(f"Running {name}: release at dialogue frame {release_frame}", flush=True)
+                generate_observed(config, sample, out / name, runtime=runtime,
+                                  forced_text=reference_text, forced_agent_audio=forced_audio,
+                                  reference_text=reference_text, release_at_frame=release_frame,
+                                  release_streams=streams)
+            for name in ("in_memory", "forced_agent_audio", "forced_text", "full_gt",
+                         "release_both", "release_text", "release_audio"):
+                path = out / name / "text_logits.json"
+                if path.exists():
+                    trace = json.loads(path.read_text())
+                    comparison["conditions"][name] = {
+                        "completed": trace["completed"], "summary": trace["summary"],
+                        "release_boundary": next((row for row in trace["frames"]
+                                                  if row["reference_dialogue_frame"] == release_frame), None)}
+            write_json(out / "release_comparison.json", comparison)
         if request["parity_frames"]:
             # Restrict only this expensive GT-history parity pass; never silently crop the primary inference.
             bounded = codes[:, :, :min(codes.shape[-1], request["parity_frames"])]
@@ -376,6 +402,11 @@ def main():
         p.add_argument("--device", default="cuda")
         if name == "probe":
             p.add_argument("--adapter", type=Path, required=True)
+            release = p.add_mutually_exclusive_group()
+            release.add_argument("--release-at-first-text", action="store_true",
+                                 help="three GT-prefix release diagnostics at the first nonpadding text frame")
+            release.add_argument("--release-at-frame", type=int,
+                                 help="exclusive GT prefix length in dialogue frames; boundary frame is free")
             p.add_argument("--forced-text", action="store_true", help="GT text/audio diagnostic, never quality evidence")
             p.add_argument("--forced-agent-audio", action="store_true",
                            help="force GT agent audio via native moshi_tokens while text stays free; diagnostic only")
@@ -460,6 +491,8 @@ def main():
                            "forced_agent_audio": args.forced_agent_audio,
                            "match_user_conditioning": args.match_user_conditioning,
                            "full_gt": args.full_gt,
+                           "release_at_first_text": args.release_at_first_text,
+                           "release_at_frame": args.release_at_frame,
                            "reference": str(args.reference.resolve()),
                            "parity_frames": args.parity_frames, "atol": args.atol, "rtol": args.rtol}
                 if args.parity_frames < 0:

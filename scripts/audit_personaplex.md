@@ -98,6 +98,76 @@ The targets are taken from native delayed cache, not inferred from decoded text.
 still exports partial traces marked `completed=false`. Native logits and outputs are never
 modified by observation. Keep `NO_CUDA_GRAPH=1` for the reported graph-capture failure.
 
+## GT prefix release: isolate the beginning of free-running divergence
+
+`probe --release-at-first-text` finds the first dialogue text token outside IDs 0/3.
+`--release-at-frame N` selects an explicit dialogue frame instead (mutually exclusive).
+Both create three additional diagnostic generations. For frames `t < N`, force GT
+text and agent audio. Starting at `t == N`:
+
+| Output | Text | Agent audio |
+|---|---|---|
+| `release_both/` | free | free |
+| `release_text/` | free | GT |
+| `release_audio/` | GT | free |
+
+Prompt handling, user conditioning and model sampling are unchanged. Queued audio
+tokens are not cleared at release: audio codebooks with delay 1 still consume GT
+queued at `N-1` when processing step `N`. `tokens.json` records the actual provided
+mask/targets, so this transition is inspectable. This is a GT-prefix intervention,
+not ordinary generation quality; full-output WER includes the forced prefix.
+
+The in-memory worker now passes a separate, observation-only reference text grid to
+all conditions. `reference_target`/`reference_log_probability` remain available after
+forcing stops; they do not enter model inputs. Native text-delay alignment is explicit
+in `reference_dialogue_frame`. The original provided-GT metrics keep their old semantics.
+
+Inspect `release_comparison.json` for the first nonpadding reference frame, the raw
+prediction at the release boundary in each condition, its PAD/GT probability, the first
+text divergence (including PAD positions), and accuracy/CE on nonpadding reference
+targets after release. `first_post_release_failure` includes PAD reference positions;
+`first_post_release_reference_failure` is restricted to nonpadding reference positions.
+GT probability is `exp(reference_log_probability)`. Individual full traces remain
+in each condition's `text_logits.json`. Check `completed` before comparing results.
+
+To reuse the exact server request from the full-GT experiment, sync
+`scripts/audit_native.py` and `scripts/audit_personaplex.py`, then run:
+
+```sh
+python - <<'PY'
+import json
+from pathlib import Path
+request = json.loads(Path('/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/outputs-full-gt-1/request.json').read_text())
+request.update(output_dir='/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/outputs-release-first-text-1',
+               match_user_conditioning=True, forced_text=True, forced_agent_audio=True,
+               full_gt=True, release_at_first_text=True, release_at_frame=None, parity_frames=0)
+Path('/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/outputs-release-first-text-1').mkdir(exist_ok=False)
+Path('/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/outputs-release-first-text-1/request.json').write_text(json.dumps(request, indent=2) + '\n')
+PY
+
+set -o pipefail
+NO_CUDA_GRAPH=1 NO_TORCH_COMPILE=1 CUDA_LAUNCH_BLOCKING=1 python /home/voice/code/VDT_02/baottn/personaplex-finetune-v10/scripts/audit_personaplex.py _worker --request /home/voice/code/VDT_02/baottn/personaplex-finetune-v10/outputs-release-first-text-1/request.json --phase in_memory 2>&1 | tee /home/voice/code/VDT_02/baottn/personaplex-finetune-v10/outputs-release-first-text-1/debug.log
+```
+
+This reloads the same checkpoint once and runs four controls plus three release
+conditions. It does not train or perform the other reload/standalone/parity phases.
+The previous output directory is preserved. Use a new directory for each run.
+To release after the first word or at a later divergence instead, create another
+request/output directory with `release_at_first_text=False` and `release_at_frame=N`.
+
+```sh
+python - <<'PY'
+import json
+from pathlib import Path
+report = json.loads(Path('/home/voice/code/VDT_02/baottn/personaplex-finetune-v10/outputs-release-first-text-1/release_comparison.json').read_text())
+print('Release frame:', report['release_at_frame'], 'time:', report['release_time_sec'])
+for name, row in report['conditions'].items():
+    print('\n==', name, '== completed:', row['completed'])
+    print('Boundary:', json.dumps(row['release_boundary'], indent=2))
+    print('Summary:', json.dumps(row['summary'], indent=2))
+PY
+```
+
 The in-memory worker already loads a saved checkpoint: it cannot establish equivalence to
 the original historical training process. Capture a live training snapshot using the existing
 `validation_generation.prepare_test3` / `run_test3` path to compare that boundary. Keep

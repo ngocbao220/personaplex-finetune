@@ -149,19 +149,42 @@ def tiny_generation(model, codes):
     return tokens
 
 
+def resolve_release_frame(request, text):
+    """Exclusive dialogue-frame boundary; the boundary frame is not forced."""
+    frame = request.get("release_at_frame")
+    if request.get("release_at_first_text"):
+        if frame is not None:
+            raise ValueError("choose release_at_frame or release_at_first_text, not both")
+        frame = next((i for i, token in enumerate(text) if token not in (0, 3)), None)
+        if frame is None:
+            raise ValueError("release_at_first_text requires a nonpadding text token")
+    if frame is not None and (type(frame) is not int or not 0 <= frame < len(text)):
+        raise ValueError("release frame must be an integer inside the dialogue")
+    return frame
+
+
 @contextmanager
-def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None):
+def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None,
+                       reference_text=None, release_at_frame=None, release_streams="both"):
     """Observe native boundaries; optional GT text/audio are diagnostic-only."""
     import torch
     lm = importlib.import_module("moshi.models.lm")
     original = lm.LMGen
     steps, returned, text_frames = [], [], []
     completed = False
+    if release_streams not in ("both", "text", "audio"):
+        raise ValueError("release_streams must be both, text or audio")
     if forced_agent_audio is not None and (
         len(forced_agent_audio) != 8 or not forced_agent_audio[0]
         or any(len(row) != len(forced_agent_audio[0]) for row in forced_agent_audio)
     ):
         raise ValueError("forced agent audio requires eight equal nonempty streams")
+    if release_at_frame is not None:
+        if forced_text is None or forced_agent_audio is None:
+            raise ValueError("prefix release requires GT text and agent audio")
+        resolve_release_frame({"release_at_frame": release_at_frame}, forced_text)
+        if len(forced_text) != len(forced_agent_audio[0]):
+            raise ValueError("prefix GT text/audio frame counts differ")
 
     class ObservedLMGen(original):
         in_dialogue = False
@@ -195,6 +218,14 @@ def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None)
                 target = int(target_[0, 0, 0]) if provided else None
                 if target is not None and not 0 <= target < logits.numel():
                     raise ValueError(f"provided native text target outside vocabulary: {target}")
+                reference_frame = self.dialogue_index - int(self.lm_model.delays[0])
+                reference_target = None
+                if reference_text is not None and reference_frame >= 0:
+                    if reference_frame >= len(reference_text):
+                        raise ValueError("reference text shorter than user input")
+                    reference_target = int(reference_text[reference_frame])
+                    if not 0 <= reference_target < logits.numel():
+                        raise ValueError("reference text target outside vocabulary")
                 text_frames.append({
                     "dialogue_input_frame": self.dialogue_index,
                     "native_offset": int(self._streaming_state.offset),
@@ -203,19 +234,23 @@ def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None)
                     "pad_probability": float(log_probs[[0, 3]].exp().sum()),
                     "gt_target": target,
                     "target_log_probability": float(log_probs[target]) if target is not None else None,
+                    "reference_dialogue_frame": reference_frame,
+                    "reference_target": reference_target,
+                    "reference_log_probability": float(log_probs[reference_target]) if reference_target is not None else None,
                 })
             return super().process_transformer_output(transformer_out, text_logits, provided_, target_,
                                                        model_input_position, target_position)
 
         def step(self, *args, **kwargs):
-            if self.in_dialogue and forced_agent_audio is not None:
+            release = release_at_frame is not None and self.dialogue_index >= release_at_frame
+            if self.in_dialogue and forced_agent_audio is not None and not (release and release_streams in ("both", "audio")):
                 if self.dialogue_index >= len(forced_agent_audio[0]):
                     raise ValueError("forced agent audio shorter than user input")
                 kwargs["moshi_tokens"] = torch.tensor(
                     [[row[self.dialogue_index] for row in forced_agent_audio]],
                     dtype=torch.long, device=self.lm_model.device,
                 ).unsqueeze(-1)
-            if self.in_dialogue and forced_text is not None:
+            if self.in_dialogue and forced_text is not None and not (release and release_streams in ("both", "text")):
                 if self.dialogue_index >= len(forced_text):
                     raise ValueError("forced text shorter than user input")
                 kwargs["text_token"] = torch.tensor([forced_text[self.dialogue_index]], device=self.lm_model.device)
@@ -235,6 +270,8 @@ def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None)
         lm.LMGen = original
         write_json(Path(output_dir) / "tokens.json", {"diagnostic_forced_text": forced_text is not None,
                                                      "diagnostic_forced_agent_audio": forced_agent_audio is not None,
+                                                     "release_at_frame": release_at_frame,
+                                                     "release_streams": release_streams if release_at_frame is not None else None,
                                                      "steps": steps, "returned": returned,
                                                      "returned_frames": len(returned)})
         real = [r for r in text_frames if r["gt_target"] is not None and r["gt_target"] not in (0, 3)]
@@ -248,17 +285,42 @@ def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None)
             "pad_prediction_on_nonpadding_gt": sum(r["prediction"] in (0, 3) for r in real) / len(real) if real else None,
             "first_nonpadding_gt_failure": next((r for r in real if r["prediction"] != r["gt_target"]), None),
         }
+        reference_real = [r for r in text_frames if r["reference_target"] is not None
+                          and r["reference_target"] not in (0, 3)]
+        after = [r for r in reference_real if release_at_frame is not None
+                 and r["reference_dialogue_frame"] >= release_at_frame]
+        summary.update(
+            nonpadding_reference_frames=len(reference_real),
+            accuracy_on_nonpadding_reference=sum(r["prediction"] == r["reference_target"] for r in reference_real) / len(reference_real) if reference_real else None,
+            ce_on_nonpadding_reference=-sum(r["reference_log_probability"] for r in reference_real) / len(reference_real) if reference_real else None,
+            first_nonpadding_reference=reference_real[0] if reference_real else None,
+            first_nonpadding_reference_failure=next((r for r in reference_real if r["prediction"] != r["reference_target"]), None),
+            post_release_nonpadding_reference_frames=len(after),
+            post_release_accuracy_on_nonpadding_reference=sum(r["prediction"] == r["reference_target"] for r in after) / len(after) if after else None,
+            post_release_ce_on_nonpadding_reference=-sum(r["reference_log_probability"] for r in after) / len(after) if after else None,
+            post_release_pad_on_nonpadding_reference=sum(r["prediction"] in (0, 3) for r in after) / len(after) if after else None,
+            first_post_release_reference_failure=next((r for r in after if r["prediction"] != r["reference_target"]), None),
+            first_reference_failure=next((r for r in text_frames if r["reference_target"] is not None
+                                          and r["prediction"] != r["reference_target"]), None),
+            first_post_release_failure=next((r for r in text_frames if release_at_frame is not None
+                                             and r["reference_target"] is not None
+                                             and r["reference_dialogue_frame"] >= release_at_frame
+                                             and r["prediction"] != r["reference_target"]), None),
+        )
         write_json(Path(output_dir) / "text_logits.json", {
             "completed": completed, "summary": summary, "frames": text_frames,
             "scope": "raw native text prediction before GT forcing; targets come from delayed provided cache",
             "diagnostic_forced_text": forced_text is not None,
             "diagnostic_forced_agent_audio": forced_agent_audio is not None,
+            "release_at_frame": release_at_frame,
+            "release_streams": release_streams if release_at_frame is not None else None,
             "NO_CUDA_GRAPH": os.environ.get("NO_CUDA_GRAPH"),
         })
 
 
 def generate_observed(config, sample, out, *, runtime=None, adapter=None, forced_text=None,
-                      forced_agent_audio=None):
+                      forced_agent_audio=None, reference_text=None, release_at_frame=None,
+                      release_streams="both"):
     """Use actual in-training or standalone production entrypoint, with observation."""
     from personaplex_finetuning.inference import (generate, generate_text_with_runtime, write_generated_text,
                                                  export_original_audio_window, text_error_metrics)
@@ -266,7 +328,9 @@ def generate_observed(config, sample, out, *, runtime=None, adapter=None, forced
     from validation_generation import greedy_settings, verify_argmax
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    with capture_generation(out, forced_text=forced_text, forced_agent_audio=forced_agent_audio), verify_argmax() as checks:
+    with capture_generation(out, forced_text=forced_text, forced_agent_audio=forced_agent_audio,
+                            reference_text=reference_text, release_at_frame=release_at_frame,
+                            release_streams=release_streams), verify_argmax() as checks:
         if runtime is None:
             generate(config, sample, out / "generated.wav", out / "generated.txt", adapter,
                      generation=greedy_settings(), seed=config.seed)
@@ -282,6 +346,8 @@ def generate_observed(config, sample, out, *, runtime=None, adapter=None, forced
     result = {"sample_id": sample.sample_id, "window": [sample.window_start_sec, sample.window_end_sec],
               "diagnostic_forced_text": forced_text is not None, "argmax_checks": checks,
               "diagnostic_forced_agent_audio": forced_agent_audio is not None,
+              "release_at_frame": release_at_frame,
+              "release_streams": release_streams if release_at_frame is not None else None,
               "native_text_predictions": json.loads((out / "text_logits.json").read_text())["summary"],
               "errors": text_error_metrics(reference, text, config.vietnamese_text_mode)}
     write_json(out / "generation.json", result)

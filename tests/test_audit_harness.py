@@ -297,6 +297,62 @@ class AuditNativeTest(unittest.TestCase):
             tokens = json.loads((Path(directory) / "tokens.json").read_text())
             self.assertTrue(all(r["tokens"][0] == 7 for r in tokens["returned"][generator.max_delay:]))
 
+    def test_prefix_release_preserves_delay_and_scores_unforced_predictions(self):
+        import torch
+        from unittest.mock import patch
+        from audit_native import capture_generation
+        from moshi.models import loaders, lm
+        kwargs = loaders._lm_kwargs.copy()
+        kwargs.update(dim=32, text_card=128, card=64, num_heads=2, num_layers=1, hidden_scale=2,
+                      depformer_dim=16, depformer_dim_feedforward=32, depformer_num_heads=2,
+                      depformer_num_layers=1, dep_q=16)
+        model = loaders.LMModel(device="cpu", dtype=torch.float32, **kwargs).eval()
+        native = model.forward_codes
+        def biased(codes):
+            hidden, logits = native(codes)
+            logits = torch.full_like(logits, -10.)
+            logits[..., 3] = 10.
+            return hidden, logits
+        for released in ("both", "text", "audio"):
+            with self.subTest(released=released), tempfile.TemporaryDirectory() as directory:
+                with patch.object(model, "forward_codes", side_effect=biased):
+                    with capture_generation(directory, forced_text=[7] * 6,
+                                            forced_agent_audio=[[10] * 6 for _ in range(8)],
+                                            reference_text=[7] * 6, release_at_frame=2,
+                                            release_streams=released):
+                        generator = lm.LMGen(model, device="cpu", use_sampling=False)
+                        with generator.streaming(1):
+                            for _ in range(generator.max_delay + 2):
+                                generator.step(input_tokens=torch.ones(1, 8, 1, dtype=torch.long))
+                            generator.in_dialogue = True
+                            for _ in range(6):
+                                generator.step(input_tokens=torch.ones(1, 8, 1, dtype=torch.long))
+                tokens = json.loads((Path(directory) / "tokens.json").read_text())
+                rows = [r for r in tokens["steps"] if r["dialogue"]]
+                self.assertTrue(rows[1]["provided"][0])
+                self.assertEqual(rows[2]["provided"][0], released == "audio")
+                self.assertEqual(rows[2]["provided"][1], released == "text")
+                # Delayed audio queued at frame 1 must survive the release at frame 2.
+                self.assertTrue(rows[2]["provided"][2])
+                self.assertEqual(rows[3]["provided"][2], released == "text")
+                report = json.loads((Path(directory) / "text_logits.json").read_text())
+                self.assertTrue(all(r["reference_target"] == 7 for r in report["frames"]))
+                self.assertEqual(report["summary"]["post_release_nonpadding_reference_frames"], 4)
+                self.assertEqual(report["summary"]["post_release_accuracy_on_nonpadding_reference"], 0.)
+                self.assertEqual(report["summary"]["first_post_release_reference_failure"]["dialogue_input_frame"], 2)
+
+    def test_release_frame_selection_is_explicit_and_bounded(self):
+        from audit_native import resolve_release_frame
+        self.assertEqual(resolve_release_frame({"release_at_first_text": True}, [3, 0, 7, 8]), 2)
+        self.assertEqual(resolve_release_frame({"release_at_frame": 0}, [3, 7]), 0)
+        self.assertIsNone(resolve_release_frame({}, [3, 7]))
+        for request, text in (({"release_at_first_text": True}, [3, 0]),
+                              ({"release_at_frame": -1}, [7]),
+                              ({"release_at_frame": 1}, [7]),
+                              ({"release_at_frame": 0, "release_at_first_text": True}, [7])):
+            with self.assertRaises(ValueError):
+                resolve_release_frame(request, text)
+
 
 if __name__ == "__main__":
     unittest.main()

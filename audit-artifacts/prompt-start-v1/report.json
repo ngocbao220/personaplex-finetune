@@ -1,0 +1,128 @@
+{
+  "scope": "synthetic CPU token history; actual native prompt/step/cache methods; stub neural depth and codec",
+  "unprimed": {
+    "primed": false,
+    "prompt_frames": 61,
+    "prompt_temporal_forwards": 60,
+    "batch_temporal_forwards": 99,
+    "native_temporal_forwards": 98,
+    "same_index_input_mismatches": 653,
+    "first_dialogue_input_mismatches": 0,
+    "first_dialogue_input_native": [
+      3,
+      948,
+      243,
+      1178,
+      546,
+      1736,
+      1030,
+      1978,
+      2008,
+      430,
+      1268,
+      381,
+      1611,
+      1095,
+      1495,
+      56,
+      472
+    ],
+    "first_dialogue_input_training": [
+      3,
+      948,
+      243,
+      1178,
+      546,
+      1736,
+      1030,
+      1978,
+      2008,
+      430,
+      1268,
+      381,
+      1611,
+      1095,
+      1495,
+      56,
+      472
+    ],
+    "first_voice_agent_cb0": 0,
+    "voice_agent_cb0_in_native_history": [
+      2048,
+      1,
+      2,
+      948
+    ],
+    "voice_agent_cb0_in_batch_history": [
+      2048,
+      0,
+      1,
+      2
+    ]
+  },
+  "primed_control": {
+    "primed": true,
+    "prompt_frames": 61,
+    "prompt_temporal_forwards": 61,
+    "batch_temporal_forwards": 99,
+    "native_temporal_forwards": 99,
+    "same_index_input_mismatches": 0,
+    "first_dialogue_input_mismatches": 0,
+    "first_dialogue_input_native": [
+      3,
+      948,
+      243,
+      1178,
+      546,
+      1736,
+      1030,
+      1978,
+      2008,
+      430,
+      1268,
+      381,
+      1611,
+      1095,
+      1495,
+      56,
+      472
+    ],
+    "first_dialogue_input_training": [
+      3,
+      948,
+      243,
+      1178,
+      546,
+      1736,
+      1030,
+      1978,
+      2008,
+      430,
+      1268,
+      381,
+      1611,
+      1095,
+      1495,
+      56,
+      472
+    ],
+    "first_voice_agent_cb0": 0,
+    "voice_agent_cb0_in_native_history": [
+      2048,
+      0,
+      1,
+      2
+    ],
+    "voice_agent_cb0_in_batch_history": [
+      2048,
+      0,
+      1,
+      2
+    ]
+  },
+  "source_sha256": {
+    "src/moshi/models/lm.py": "5ca852b0ac101d711268dcac58b10b15d24203e6f9cca8924173054e3a70311d",
+    "src/personaplex_finetuning/inference.py": "6f26110e4960d1a48c2dc32834b6e82745588b3faa557a61acdb082c5106d924",
+    "src/personaplex_finetuning/sequence.py": "fd984a7db77b76013c940fa2273fb376fd19a8caa3dd698dfcbcd583a71491b2"
+  }
+}
