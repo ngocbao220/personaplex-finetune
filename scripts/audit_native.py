@@ -148,12 +148,17 @@ def tiny_generation(model, codes):
 
 
 @contextmanager
-def capture_generation(output_dir, *, forced_text=None):
-    """Observe native LMGen boundaries; optional GT text is diagnostic-only."""
+def capture_generation(output_dir, *, forced_text=None, forced_agent_audio=None):
+    """Observe native boundaries; optional GT text/audio are diagnostic-only."""
     import torch
     lm = importlib.import_module("moshi.models.lm")
     original = lm.LMGen
     steps, returned = [], []
+    if forced_agent_audio is not None and (
+        len(forced_agent_audio) != 8 or not forced_agent_audio[0]
+        or any(len(row) != len(forced_agent_audio[0]) for row in forced_agent_audio)
+    ):
+        raise ValueError("forced agent audio requires eight equal nonempty streams")
 
     class ObservedLMGen(original):
         in_dialogue = False
@@ -174,6 +179,13 @@ def capture_generation(output_dir, *, forced_text=None):
             return value
 
         def step(self, *args, **kwargs):
+            if self.in_dialogue and forced_agent_audio is not None:
+                if self.dialogue_index >= len(forced_agent_audio[0]):
+                    raise ValueError("forced agent audio shorter than user input")
+                kwargs["moshi_tokens"] = torch.tensor(
+                    [[row[self.dialogue_index] for row in forced_agent_audio]],
+                    dtype=torch.long, device=self.lm_model.device,
+                ).unsqueeze(-1)
             if self.in_dialogue and forced_text is not None:
                 if self.dialogue_index >= len(forced_text):
                     raise ValueError("forced text shorter than user input")
@@ -192,11 +204,13 @@ def capture_generation(output_dir, *, forced_text=None):
     finally:
         lm.LMGen = original
         write_json(Path(output_dir) / "tokens.json", {"diagnostic_forced_text": forced_text is not None,
+                                                     "diagnostic_forced_agent_audio": forced_agent_audio is not None,
                                                      "steps": steps, "returned": returned,
                                                      "returned_frames": len(returned)})
 
 
-def generate_observed(config, sample, out, *, runtime=None, adapter=None, forced_text=None):
+def generate_observed(config, sample, out, *, runtime=None, adapter=None, forced_text=None,
+                      forced_agent_audio=None):
     """Use actual in-training or standalone production entrypoint, with observation."""
     from personaplex_finetuning.inference import (generate, generate_text_with_runtime, write_generated_text,
                                                  export_original_audio_window, text_error_metrics)
@@ -204,7 +218,7 @@ def generate_observed(config, sample, out, *, runtime=None, adapter=None, forced
     from validation_generation import greedy_settings, verify_argmax
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    with capture_generation(out, forced_text=forced_text), verify_argmax() as checks:
+    with capture_generation(out, forced_text=forced_text, forced_agent_audio=forced_agent_audio), verify_argmax() as checks:
         if runtime is None:
             generate(config, sample, out / "generated.wav", out / "generated.txt", adapter,
                      generation=greedy_settings(), seed=config.seed)
@@ -219,6 +233,7 @@ def generate_observed(config, sample, out, *, runtime=None, adapter=None, forced
     (out / "reference.txt").write_text(reference)
     result = {"sample_id": sample.sample_id, "window": [sample.window_start_sec, sample.window_end_sec],
               "diagnostic_forced_text": forced_text is not None, "argmax_checks": checks,
+              "diagnostic_forced_agent_audio": forced_agent_audio is not None,
               "errors": text_error_metrics(reference, text, config.vietnamese_text_mode)}
     write_json(out / "generation.json", result)
     return result

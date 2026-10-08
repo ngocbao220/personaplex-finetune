@@ -154,6 +154,49 @@ class AuditNativeTest(unittest.TestCase):
             self.assertIs(lm.LMGen, original)
             self.assertTrue((Path(directory) / "tokens.json").is_file())
 
+    def test_gt_agent_audio_uses_native_forcing_and_keeps_text_free(self):
+        import torch
+        from audit_native import capture_generation
+        from moshi.models import loaders, lm
+        kwargs = loaders._lm_kwargs.copy()
+        kwargs.update(dim=32, text_card=128, card=64, num_heads=2, num_layers=1, hidden_scale=2,
+                      depformer_dim=16, depformer_dim_feedforward=32, depformer_num_heads=2,
+                      depformer_num_layers=1, dep_q=16)
+        model = loaders.LMModel(device="cpu", dtype=torch.float32, **kwargs).eval()
+        gt = [[10 + k] * 6 for k in range(8)]
+        original = lm.LMGen
+        with tempfile.TemporaryDirectory() as directory:
+            with capture_generation(directory, forced_agent_audio=gt):
+                generator = lm.LMGen(model, device="cpu", use_sampling=False, temp=0, temp_text=0)
+                with generator.streaming(1):
+                    for _ in range(generator.max_delay + 2):
+                        generator.step(input_tokens=torch.ones(1, 8, 1, dtype=torch.long))
+                    generator.in_dialogue = True
+                    for _ in range(6):
+                        generator.step(input_tokens=torch.ones(1, 8, 1, dtype=torch.long))
+                    with self.assertRaisesRegex(ValueError, "shorter"):
+                        generator.step(input_tokens=torch.ones(1, 8, 1, dtype=torch.long))
+            self.assertIs(lm.LMGen, original)
+            report = json.loads((Path(directory) / "tokens.json").read_text())
+            prompt = [s for s in report["steps"] if not s["dialogue"]]
+            self.assertTrue(prompt)
+            self.assertFalse(any(any(s["provided"][1:9]) for s in prompt[-1:]))
+            dialogue = [s for s in report["steps"] if s["dialogue"]]
+            self.assertEqual(len(dialogue), 6)
+            self.assertTrue(all(not s["provided"][0] for s in dialogue))
+            self.assertTrue(all(all(s["provided"][1:9]) for s in dialogue[generator.max_delay:]))
+            self.assertTrue(all(s["target"][1:9] == list(range(10, 18))
+                                for s in dialogue[generator.max_delay:]))
+            self.assertTrue(report["diagnostic_forced_agent_audio"])
+
+    def test_gt_agent_audio_requires_eight_equal_nonempty_streams(self):
+        from audit_native import capture_generation
+        for gt in ([], [[] for _ in range(8)], [[1]] * 7, [[1]] * 7 + [[1, 2]]):
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(ValueError, "eight equal nonempty"):
+                    with capture_generation(directory, forced_agent_audio=gt):
+                        pass
+
 
 if __name__ == "__main__":
     unittest.main()

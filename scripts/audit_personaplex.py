@@ -224,6 +224,10 @@ def full_worker(request, phase):
         metadata.update(rank=rank, alpha=alpha, scaling=alpha / rank, model_root=str(config.model_root.resolve()))
         write_json(roundtrip / "adapter.json", metadata)
         generate_observed(config, sample, out / "in_memory", runtime=runtime)
+        if request.get("forced_agent_audio"):
+            forced_audio = [list(row[example.prompt_frames:]) for row in example.input_codes[1:9]]
+            generate_observed(config, sample, out / "forced_agent_audio", runtime=runtime,
+                              forced_agent_audio=forced_audio)
         if request["forced_text"]:
             forced = list(example.input_codes[0][example.prompt_frames:])
             generate_observed(config, sample, out / "forced_text", runtime=runtime, forced_text=forced)
@@ -297,6 +301,8 @@ def main():
         if name == "probe":
             p.add_argument("--adapter", type=Path, required=True)
             p.add_argument("--forced-text", action="store_true", help="GT text/audio diagnostic, never quality evidence")
+            p.add_argument("--forced-agent-audio", action="store_true",
+                           help="force GT agent audio via native moshi_tokens while text stays free; diagnostic only")
             p.add_argument("--parity-frames", type=int, default=0, help="explicit bounded GT-history parity prefix; 0 disables")
             p.add_argument("--atol", type=float, default=.05)
             p.add_argument("--rtol", type=float, default=.005)
@@ -371,6 +377,7 @@ def main():
                     raise ValueError("adapter base path differs from config; explicit matching base identity required")
                 request = {"config": asdict(cfg), "sample": asdict(sample), "adapter": str(adapter.resolve()),
                            "output_dir": str(args.output_dir), "forced_text": args.forced_text,
+                           "forced_agent_audio": args.forced_agent_audio,
                            "reference": str(args.reference.resolve()),
                            "parity_frames": args.parity_frames, "atol": args.atol, "rtol": args.rtol}
                 if args.parity_frames < 0:
@@ -391,6 +398,9 @@ def main():
                           "reload": json.loads((args.output_dir / "reload_comparison.json").read_text()),
                           "production_entrypoints": compare_outputs(args.output_dir / "in_memory", args.output_dir / "standalone"),
                           "raw_tokens_equal": tokens_a["returned"] == tokens_b["returned"]}
+                if args.forced_agent_audio:
+                    result["forced_agent_audio"] = json.loads(
+                        (args.output_dir / "forced_agent_audio/generation.json").read_text())
                 identities = [json.loads((args.output_dir / f"identity_{p}.json").read_text())
                               for p in ("in_memory", "reload")]
                 result["fresh_worker_identity_equal"] = {

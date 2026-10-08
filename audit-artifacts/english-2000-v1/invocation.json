@@ -1,0 +1,17 @@
+{
+  "argv": [
+    "scripts/audit_personaplex.py",
+    "logs",
+    "--run",
+    "bug-eng",
+    "--output-dir",
+    "audit-artifacts/english-2000-v1"
+  ],
+  "python": "/opt/anaconda3/envs/personaplex/bin/python",
+  "git": {
+    "root": "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning",
+    "commit": "9ad474f52c724469c46d3d5a79e78daa0bdec9ce",
+    "status": "?? bug-eng.zip\n?? bug-eng/",
+    "diff": ""
+  }
+}

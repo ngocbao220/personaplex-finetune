@@ -1,0 +1,742 @@
+{
+  "path": "/Users/ngocbao/Documents/Document/research/main/speech/exps/finetune-personalplex/personaplex-finetuning/bug-eng",
+  "metric_rows": 2000,
+  "role_loss_means": {
+    "left-agent": {
+      "loss/total": 2.5398282112777233,
+      "loss/text_nonpadding": 0.880372800930636,
+      "loss/audio_cb0": 1.3607623917609453,
+      "accuracy/text_nonpad": 0.8093593460470438,
+      "accuracy/audio_cb0": 0.627325861170888
+    }
+  },
+  "epoch_loss_means": [
+    {
+      "epoch": 0,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 4.129009024302165,
+      "loss/text_nonpadding": 2.5831356922785442,
+      "loss/audio_cb0": 1.5535163852903577,
+      "accuracy/text_nonpad": 0.44772272838486565,
+      "accuracy/audio_cb0": 0.5970913959874047
+    },
+    {
+      "epoch": 1,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 4.258428407751995,
+      "loss/text_nonpadding": 2.541502032590949,
+      "loss/audio_cb0": 1.5387299268142036,
+      "accuracy/text_nonpad": 0.4530296409907548,
+      "accuracy/audio_cb0": 0.5998344512089439
+    },
+    {
+      "epoch": 2,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 3.9548529571957056,
+      "loss/text_nonpadding": 2.4798697921964856,
+      "loss/audio_cb0": 1.4840926143858169,
+      "accuracy/text_nonpad": 0.4714982959959242,
+      "accuracy/audio_cb0": 0.6079391585456
+    },
+    {
+      "epoch": 3,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 3.838832720466282,
+      "loss/text_nonpadding": 2.319221493990525,
+      "loss/audio_cb0": 1.4500907633615576,
+      "accuracy/text_nonpad": 0.5080785395010657,
+      "accuracy/audio_cb0": 0.6126611323460288
+    },
+    {
+      "epoch": 4,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 3.7101871490478517,
+      "loss/text_nonpadding": 2.1977982494566177,
+      "loss/audio_cb0": 1.4318410264121162,
+      "accuracy/text_nonpad": 0.5328507165114085,
+      "accuracy/audio_cb0": 0.6155676007270813
+    },
+    {
+      "epoch": 5,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 3.6430262845495474,
+      "loss/text_nonpadding": 2.0880071831786116,
+      "loss/audio_cb0": 1.3993693888187408,
+      "accuracy/text_nonpad": 0.5505644439355187,
+      "accuracy/audio_cb0": 0.6223995808673941
+    },
+    {
+      "epoch": 6,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 3.569123543633355,
+      "loss/text_nonpadding": 1.999289459652371,
+      "loss/audio_cb0": 1.3844749728838603,
+      "accuracy/text_nonpad": 0.5638248589303758,
+      "accuracy/audio_cb0": 0.6249253220028348
+    },
+    {
+      "epoch": 7,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 3.450819860333982,
+      "loss/text_nonpadding": 1.9209077332330786,
+      "loss/audio_cb0": 1.3875118234883184,
+      "accuracy/text_nonpad": 0.5752676913271779,
+      "accuracy/audio_cb0": 0.6230895208275836
+    },
+    {
+      "epoch": 8,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 3.3608462810516357,
+      "loss/text_nonpadding": 1.8512163665559558,
+      "loss/audio_cb0": 1.3766445676485697,
+      "accuracy/text_nonpad": 0.587909107738071,
+      "accuracy/audio_cb0": 0.6249585184786055
+    },
+    {
+      "epoch": 9,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 3.2584336581437485,
+      "loss/text_nonpadding": 1.7421233032060706,
+      "loss/audio_cb0": 1.368697595337163,
+      "accuracy/text_nonpad": 0.608407600418381,
+      "accuracy/audio_cb0": 0.6266122162342072
+    },
+    {
+      "epoch": 10,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 3.140576738781399,
+      "loss/text_nonpadding": 1.6715271525912814,
+      "loss/audio_cb0": 1.3696529547373453,
+      "accuracy/text_nonpad": 0.6219505614704556,
+      "accuracy/audio_cb0": 0.6263221330112881
+    },
+    {
+      "epoch": 11,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 3.178201499192611,
+      "loss/text_nonpadding": 1.6027994052223538,
+      "loss/audio_cb0": 1.3810608257418093,
+      "accuracy/text_nonpad": 0.6331794184187184,
+      "accuracy/audio_cb0": 0.6236685423747353
+    },
+    {
+      "epoch": 12,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 3.036056039068434,
+      "loss/text_nonpadding": 1.4706269436412387,
+      "loss/audio_cb0": 1.3505315846867032,
+      "accuracy/text_nonpad": 0.6593241532643636,
+      "accuracy/audio_cb0": 0.6298889093928867
+    },
+    {
+      "epoch": 13,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 2.953688683717147,
+      "loss/text_nonpadding": 1.3772754358208699,
+      "loss/audio_cb0": 1.363864566968835,
+      "accuracy/text_nonpad": 0.6818869787713756,
+      "accuracy/audio_cb0": 0.6267450983109681
+    },
+    {
+      "epoch": 14,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 2.8665001339382594,
+      "loss/text_nonpadding": 1.2611517681015862,
+      "loss/audio_cb0": 1.350917649269104,
+      "accuracy/text_nonpad": 0.7061016612582737,
+      "accuracy/audio_cb0": 0.6297493802176581
+    },
+    {
+      "epoch": 15,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 2.758007254289544,
+      "loss/text_nonpadding": 1.142113257361495,
+      "loss/audio_cb0": 1.3567670052466185,
+      "accuracy/text_nonpad": 0.7345838365347489,
+      "accuracy/audio_cb0": 0.6270108631123668
+    },
+    {
+      "epoch": 16,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 2.5917652368545534,
+      "loss/text_nonpadding": 1.049652859237459,
+      "loss/audio_cb0": 1.3644932521714104,
+      "accuracy/text_nonpad": 0.7629812770419651,
+      "accuracy/audio_cb0": 0.6256312145127191
+    },
+    {
+      "epoch": 17,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 2.494717214418494,
+      "loss/text_nonpadding": 0.9305829256772995,
+      "loss/audio_cb0": 1.3498397352902785,
+      "accuracy/text_nonpad": 0.7921361586321956,
+      "accuracy/audio_cb0": 0.6291801501875338
+    },
+    {
+      "epoch": 18,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 2.4609474235110813,
+      "loss/text_nonpadding": 0.8072700119680829,
+      "loss/audio_cb0": 1.3454454408751593,
+      "accuracy/text_nonpad": 0.8189721054501004,
+      "accuracy/audio_cb0": 0.630647607644399
+    },
+    {
+      "epoch": 19,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 2.407972973325978,
+      "loss/text_nonpadding": 0.7328465406823418,
+      "loss/audio_cb0": 1.3634316156739774,
+      "accuracy/text_nonpad": 0.8398468559202941,
+      "accuracy/audio_cb0": 0.6258602932743405
+    },
+    {
+      "epoch": 20,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 2.3278383175532023,
+      "loss/text_nonpadding": 0.6457744146386782,
+      "loss/audio_cb0": 1.3611628558900621,
+      "accuracy/text_nonpad": 0.8592508991559347,
+      "accuracy/audio_cb0": 0.6268613172902001
+    },
+    {
+      "epoch": 21,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 2.2732482163802437,
+      "loss/text_nonpadding": 0.5734503446146846,
+      "loss/audio_cb0": 1.351617736660916,
+      "accuracy/text_nonpad": 0.879225694614908,
+      "accuracy/audio_cb0": 0.6275801393000976
+    },
+    {
+      "epoch": 22,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 2.1393021768993803,
+      "loss/text_nonpadding": 0.4647864004804028,
+      "loss/audio_cb0": 1.359840620888604,
+      "accuracy/text_nonpad": 0.9036870029237535,
+      "accuracy/audio_cb0": 0.6259897748629252
+    },
+    {
+      "epoch": 23,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 2.200329005718231,
+      "loss/text_nonpadding": 0.3991607948327842,
+      "loss/audio_cb0": 1.3518572877282682,
+      "accuracy/text_nonpad": 0.9191620155521061,
+      "accuracy/audio_cb0": 0.6290993444297625
+    },
+    {
+      "epoch": 24,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 2.124702665540907,
+      "loss/text_nonpadding": 0.35517281736764644,
+      "loss/audio_cb0": 1.3448936581611632,
+      "accuracy/text_nonpad": 0.9297667437129551,
+      "accuracy/audio_cb0": 0.6294280866781871
+    },
+    {
+      "epoch": 25,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 2.051722306272258,
+      "loss/text_nonpadding": 0.2848033807442888,
+      "loss/audio_cb0": 1.341206580400467,
+      "accuracy/text_nonpad": 0.9445695138495901,
+      "accuracy/audio_cb0": 0.6308383358561475
+    },
+    {
+      "epoch": 26,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 1.9712007681528727,
+      "loss/text_nonpadding": 0.2616599284319414,
+      "loss/audio_cb0": 1.3527350690629747,
+      "accuracy/text_nonpad": 0.9509313212500679,
+      "accuracy/audio_cb0": 0.6272812485694885
+    },
+    {
+      "epoch": 27,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 1.952620187531347,
+      "loss/text_nonpadding": 0.21436870986919687,
+      "loss/audio_cb0": 1.3309359498645947,
+      "accuracy/text_nonpad": 0.9601582249869471,
+      "accuracy/audio_cb0": 0.6328835966794387
+    },
+    {
+      "epoch": 28,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 1.9806517203648886,
+      "loss/text_nonpadding": 0.18894383443726434,
+      "loss/audio_cb0": 1.3369868755340577,
+      "accuracy/text_nonpad": 0.9654298451211717,
+      "accuracy/audio_cb0": 0.630490956041548
+    },
+    {
+      "epoch": 29,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 1.9140860567922178,
+      "loss/text_nonpadding": 0.16958383300706095,
+      "loss/audio_cb0": 1.3278578740099203,
+      "accuracy/text_nonpad": 0.9704443682794985,
+      "accuracy/audio_cb0": 0.6333034893740779
+    },
+    {
+      "epoch": 30,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 1.9029750559065077,
+      "loss/text_nonpadding": 0.14514657753623195,
+      "loss/audio_cb0": 1.342462518480089,
+      "accuracy/text_nonpad": 0.9761346035533481,
+      "accuracy/audio_cb0": 0.6290412810113695
+    },
+    {
+      "epoch": 31,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 1.9137579098991726,
+      "loss/text_nonpadding": 0.130336966254222,
+      "loss/audio_cb0": 1.3218842952147773,
+      "accuracy/text_nonpad": 0.9785133405872013,
+      "accuracy/audio_cb0": 0.6341562394214713
+    },
+    {
+      "epoch": 32,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 1.8445834769143,
+      "loss/text_nonpadding": 0.11507640211946435,
+      "loss/audio_cb0": 1.3204017493459914,
+      "accuracy/text_nonpad": 0.9816129949357775,
+      "accuracy/audio_cb0": 0.6341746581925286
+    },
+    {
+      "epoch": 33,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 1.8586461466291677,
+      "loss/text_nonpadding": 0.11668227363944701,
+      "loss/audio_cb0": 1.3246177447878795,
+      "accuracy/text_nonpad": 0.9816775568153547,
+      "accuracy/audio_cb0": 0.6323323735724324
+    },
+    {
+      "epoch": 34,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 1.8967294878429837,
+      "loss/text_nonpadding": 0.10313220470108919,
+      "loss/audio_cb0": 1.320032807191213,
+      "accuracy/text_nonpad": 0.9839471565352546,
+      "accuracy/audio_cb0": 0.6324979053603278
+    },
+    {
+      "epoch": 35,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 1.8847543143707772,
+      "loss/text_nonpadding": 0.09341459199988647,
+      "loss/audio_cb0": 1.3108985605447188,
+      "accuracy/text_nonpad": 0.9855693436187246,
+      "accuracy/audio_cb0": 0.6361194525075995
+    },
+    {
+      "epoch": 36,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 1.8113411241107518,
+      "loss/text_nonpadding": 0.09013312181664837,
+      "loss/audio_cb0": 1.3040349046389261,
+      "accuracy/text_nonpad": 0.9861388272709317,
+      "accuracy/audio_cb0": 0.6368930902745988
+    },
+    {
+      "epoch": 37,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 1.8433815836906433,
+      "loss/text_nonpadding": 0.0939706293663577,
+      "loss/audio_cb0": 1.331428772729376,
+      "accuracy/text_nonpad": 0.9856684907622959,
+      "accuracy/audio_cb0": 0.6306799105975939
+    },
+    {
+      "epoch": 38,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 1.8219768749343024,
+      "loss/text_nonpadding": 0.08686066032904717,
+      "loss/audio_cb0": 1.3067750480439928,
+      "accuracy/text_nonpad": 0.9866568711068895,
+      "accuracy/audio_cb0": 0.6368904776043363
+    },
+    {
+      "epoch": 39,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 1.7934398210566977,
+      "loss/text_nonpadding": 0.08411831399628325,
+      "loss/audio_cb0": 1.3219503047673598,
+      "accuracy/text_nonpad": 0.9872890179571898,
+      "accuracy/audio_cb0": 0.6326304998086847
+    },
+    {
+      "epoch": 40,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 1.8138568374845716,
+      "loss/text_nonpadding": 0.08526583570573065,
+      "loss/audio_cb0": 1.3076538589265612,
+      "accuracy/text_nonpad": 0.9869477060106066,
+      "accuracy/audio_cb0": 0.6363712814119127
+    },
+    {
+      "epoch": 41,
+      "role": "left-agent",
+      "rows": 46,
+      "loss/total": 1.7538476664087046,
+      "loss/text_nonpadding": 0.0823386318212294,
+      "loss/audio_cb0": 1.3128458585428155,
+      "accuracy/text_nonpad": 0.987711322048436,
+      "accuracy/audio_cb0": 0.6347496379976687
+    },
+    {
+      "epoch": 42,
+      "role": "left-agent",
+      "rows": 45,
+      "loss/total": 1.7856307281388177,
+      "loss/text_nonpadding": 0.07837375854659412,
+      "loss/audio_cb0": 1.2994248098797267,
+      "accuracy/text_nonpad": 0.9884698987007141,
+      "accuracy/audio_cb0": 0.6385540982087453
+    },
+    {
+      "epoch": 43,
+      "role": "left-agent",
+      "rows": 44,
+      "loss/total": 1.8058354962955823,
+      "loss/text_nonpadding": 0.08385801362932067,
+      "loss/audio_cb0": 1.3178805607286366,
+      "accuracy/text_nonpad": 0.987571579488841,
+      "accuracy/audio_cb0": 0.6339073790745302
+    }
+  ],
+  "step_blocks": [
+    {
+      "first_step": 1,
+      "last_step": 100,
+      "loss/total": 4.1723777461051945,
+      "loss/text_nonpadding": 2.553329734802246,
+      "loss/audio_cb0": 1.5330320858955384,
+      "accuracy/text_nonpad": 0.45148217648267747,
+      "accuracy/audio_cb0": 0.6022683528065681
+    },
+    {
+      "first_step": 101,
+      "last_step": 200,
+      "loss/total": 3.874535632133484,
+      "loss/text_nonpadding": 2.3557522785663605,
+      "loss/audio_cb0": 1.4737650597095489,
+      "accuracy/text_nonpad": 0.4988131582736969,
+      "accuracy/audio_cb0": 0.6063655799627304
+    },
+    {
+      "first_step": 201,
+      "last_step": 300,
+      "loss/total": 3.6366543054580687,
+      "loss/text_nonpadding": 2.114496113061905,
+      "loss/audio_cb0": 1.4053371882438659,
+      "accuracy/text_nonpad": 0.5466889131069184,
+      "accuracy/audio_cb0": 0.6218057557940483
+    },
+    {
+      "first_step": 301,
+      "last_step": 400,
+      "loss/total": 3.437772569656372,
+      "loss/text_nonpadding": 1.9041939747333527,
+      "loss/audio_cb0": 1.368740583062172,
+      "accuracy/text_nonpad": 0.5792890205979347,
+      "accuracy/audio_cb0": 0.6271285781264305
+    },
+    {
+      "first_step": 401,
+      "last_step": 500,
+      "loss/total": 3.2045166373252867,
+      "loss/text_nonpadding": 1.7059148228168488,
+      "loss/audio_cb0": 1.375648986697197,
+      "accuracy/text_nonpad": 0.6151770940423011,
+      "accuracy/audio_cb0": 0.6249081659317016
+    },
+    {
+      "first_step": 501,
+      "last_step": 600,
+      "loss/total": 3.124764007329941,
+      "loss/text_nonpadding": 1.5340068286657333,
+      "loss/audio_cb0": 1.3774492794275284,
+      "accuracy/text_nonpad": 0.6474973225593567,
+      "accuracy/audio_cb0": 0.624079995751381
+    },
+    {
+      "first_step": 601,
+      "last_step": 700,
+      "loss/total": 2.876104917526245,
+      "loss/text_nonpadding": 1.270986571609974,
+      "loss/audio_cb0": 1.3449209558963775,
+      "accuracy/text_nonpad": 0.7044007259607316,
+      "accuracy/audio_cb0": 0.6315718978643418
+    },
+    {
+      "first_step": 701,
+      "last_step": 800,
+      "loss/total": 2.589337011575699,
+      "loss/text_nonpadding": 1.0352080184221268,
+      "loss/audio_cb0": 1.363469780087471,
+      "accuracy/text_nonpad": 0.7650095337629318,
+      "accuracy/audio_cb0": 0.6253710344433785
+    },
+    {
+      "first_step": 801,
+      "last_step": 900,
+      "loss/total": 2.461064305305481,
+      "loss/text_nonpadding": 0.8246933828294277,
+      "loss/audio_cb0": 1.351142454147339,
+      "accuracy/text_nonpad": 0.8164283865690232,
+      "accuracy/audio_cb0": 0.6288044130802155
+    },
+    {
+      "first_step": 901,
+      "last_step": 1000,
+      "loss/total": 2.296876472234726,
+      "loss/text_nonpadding": 0.614928293954581,
+      "loss/audio_cb0": 1.3557826584577561,
+      "accuracy/text_nonpad": 0.8677340126037598,
+      "accuracy/audio_cb0": 0.627128798365593
+    },
+    {
+      "first_step": 1001,
+      "last_step": 1100,
+      "loss/total": 2.1638159883022308,
+      "loss/text_nonpadding": 0.4201868143863976,
+      "loss/audio_cb0": 1.3554229158163071,
+      "accuracy/text_nonpad": 0.9141274780035019,
+      "accuracy/audio_cb0": 0.627342501282692
+    },
+    {
+      "first_step": 1101,
+      "last_step": 1200,
+      "loss/total": 2.073588696718216,
+      "loss/text_nonpadding": 0.3092665497586131,
+      "loss/audio_cb0": 1.3568956887722015,
+      "accuracy/text_nonpad": 0.9398979365825653,
+      "accuracy/audio_cb0": 0.6268148651719093
+    },
+    {
+      "first_step": 1201,
+      "last_step": 1300,
+      "loss/total": 1.9636027991771698,
+      "loss/text_nonpadding": 0.22197340670973062,
+      "loss/audio_cb0": 1.3304575860500336,
+      "accuracy/text_nonpad": 0.9587112230062484,
+      "accuracy/audio_cb0": 0.6328086012601852
+    },
+    {
+      "first_step": 1301,
+      "last_step": 1400,
+      "loss/total": 1.9110190868377686,
+      "loss/text_nonpadding": 0.15796240573748946,
+      "loss/audio_cb0": 1.325306757092476,
+      "accuracy/text_nonpad": 0.9725310564041137,
+      "accuracy/audio_cb0": 0.6345344519615174
+    },
+    {
+      "first_step": 1401,
+      "last_step": 1500,
+      "loss/total": 1.8892764627933503,
+      "loss/text_nonpadding": 0.13032632510643452,
+      "loss/audio_cb0": 1.327228599190712,
+      "accuracy/text_nonpad": 0.9786698865890503,
+      "accuracy/audio_cb0": 0.6320224389433861
+    },
+    {
+      "first_step": 1501,
+      "last_step": 1600,
+      "loss/total": 1.8661264258623123,
+      "loss/text_nonpadding": 0.1121982552530244,
+      "loss/audio_cb0": 1.3161882638931275,
+      "accuracy/text_nonpad": 0.9825956547260284,
+      "accuracy/audio_cb0": 0.6338741740584374
+    },
+    {
+      "first_step": 1601,
+      "last_step": 1700,
+      "loss/total": 1.854671572446823,
+      "loss/text_nonpadding": 0.08527675331104546,
+      "loss/audio_cb0": 1.3165296500921249,
+      "accuracy/text_nonpad": 0.9867888724803925,
+      "accuracy/audio_cb0": 0.6340458038449287
+    },
+    {
+      "first_step": 1701,
+      "last_step": 1800,
+      "loss/total": 1.815531502366066,
+      "loss/text_nonpadding": 0.08852615525946021,
+      "loss/audio_cb0": 1.3180383282899857,
+      "accuracy/text_nonpad": 0.9867662417888642,
+      "accuracy/audio_cb0": 0.6346611517667771
+    },
+    {
+      "first_step": 1801,
+      "last_step": 1900,
+      "loss/total": 1.7979475367069244,
+      "loss/text_nonpadding": 0.08664781455881894,
+      "loss/audio_cb0": 1.3093001407384872,
+      "accuracy/text_nonpad": 0.9866148954629899,
+      "accuracy/audio_cb0": 0.6346292209625244
+    },
+    {
+      "first_step": 1901,
+      "last_step": 2000,
+      "loss/total": 1.7869805496931077,
+      "loss/text_nonpadding": 0.0815815190691501,
+      "loss/audio_cb0": 1.3105908736586571,
+      "accuracy/text_nonpad": 0.98796333193779,
+      "accuracy/audio_cb0": 0.636351442039013
+    }
+  ],
+  "generation": [
+    {
+      "step": 0,
+      "cer": 0.8496667923269031,
+      "wer": 0.9236838956688204,
+      "samples": 3,
+      "empty_samples": 0
+    },
+    {
+      "step": 1000,
+      "cer": 0.974124809741248,
+      "wer": 0.9791666666666666,
+      "samples": 3,
+      "empty_samples": 2
+    },
+    {
+      "step": 2000,
+      "cer": 1.0,
+      "wer": 1.0,
+      "samples": 3,
+      "empty_samples": 3
+    }
+  ],
+  "evaluated_windows": [
+    {
+      "step": 0,
+      "sample_id": "conv_0001",
+      "start": 0.0,
+      "end": 100.0,
+      "cer": 0.8193548387096774,
+      "wer": 0.9246231155778895
+    },
+    {
+      "step": 0,
+      "sample_id": "conv_0002",
+      "start": 0.0,
+      "end": 100.0,
+      "cer": 0.776255707762557,
+      "wer": 0.875
+    },
+    {
+      "step": 0,
+      "sample_id": "conv_0003",
+      "start": 0.0,
+      "end": 100.0,
+      "cer": 0.9533898305084746,
+      "wer": 0.9714285714285714
+    },
+    {
+      "step": 1000,
+      "sample_id": "conv_0001",
+      "start": 0.0,
+      "end": 100.0,
+      "cer": 1.0,
+      "wer": 1.0
+    },
+    {
+      "step": 1000,
+      "sample_id": "conv_0002",
+      "start": 0.0,
+      "end": 100.0,
+      "cer": 0.9223744292237442,
+      "wer": 0.9375
+    },
+    {
+      "step": 1000,
+      "sample_id": "conv_0003",
+      "start": 0.0,
+      "end": 100.0,
+      "cer": 1.0,
+      "wer": 1.0
+    },
+    {
+      "step": 2000,
+      "sample_id": "conv_0001",
+      "start": 0.0,
+      "end": 100.0,
+      "cer": 1.0,
+      "wer": 1.0
+    },
+    {
+      "step": 2000,
+      "sample_id": "conv_0002",
+      "start": 0.0,
+      "end": 100.0,
+      "cer": 1.0,
+      "wer": 1.0
+    },
+    {
+      "step": 2000,
+      "sample_id": "conv_0003",
+      "start": 0.0,
+      "end": 100.0,
+      "cer": 1.0,
+      "wer": 1.0
+    }
+  ],
+  "checkpoint_reload": "not_recorded",
+  "same_sample_teacher_forced_verified": false,
+  "exact_per_chunk_updates": "unavailable_without_step_identities",
+  "limitations": [
+    "Step loss may describe another sample or the opposite role from generation.",
+    "A decreasing aggregate loss is not evidence of autoregressive memorization.",
+    "Current YAML and source do not establish historical server provenance."
+  ]
+}

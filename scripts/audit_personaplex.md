@@ -53,6 +53,14 @@ Multi-example training uses the batch maximum prompt length. The bounded parity 
 explicit and does not shorten primary inference. `--forced-text` adds a GT-text diagnostic,
 not evidence of free-running quality. Logs include peak CUDA allocation for TF workers.
 
+`--forced-agent-audio` adds `forced_agent_audio/`: the exact eight agent codebooks
+from the requested training crop are supplied via native `LMGen.step(moshi_tokens=...)`,
+while text remains free-running. System prompts are unchanged. Compare its `generated.txt`
+and `tokens.json` with `in_memory/`. Recovered text supports a dependency on generated
+agent audio/history, but does not prove a specific implementation defect. Its WAV is
+GT-conditioned and cannot be used as evidence of generated audio quality. The independent
+`--forced-text` condition does not also force audio. These probes do not retrain.
+
 The in-memory worker already loads a saved checkpoint: it cannot establish equivalence to
 the original historical training process. Capture a live training snapshot using the existing
 `validation_generation.prepare_test3` / `run_test3` path to compare that boundary. Keep
