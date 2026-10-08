@@ -52,6 +52,16 @@ is configured; the report records that directory. Do not disable the assertion o
 infer causality merely from nonidentical quantized codes. Small numeric differences
 between batch sizes and larger layout/window differences require separate diagnosis.
 
+For an explicitly controlled checkpoint experiment, `probe --match-user-conditioning`
+preserves the original mismatch in `user_encoding.json`, then substitutes stable
+single-item inference user codes in the audit TF input and labels. The eight agent
+streams, text, prompts and masks are retained. `sequence.json` is the original;
+`sequence_matched.json` is the intervention. Reload reuses the saved user codes.
+Reports label this as an inference-matched diagnostic, not historical training loss
+or a trainer correction. Shape mismatch and unstable repeated mono encoding still
+stop the probe. This option allows `--forced-agent-audio` analysis to proceed despite
+a documented stereo/mono difference; default probes remain strict.
+
 `probe` sequentially loads the existing adapter in memory, saves a roundtrip adapter, reloads
 in a fresh process, runs the production standalone adapter inference, then base inference.
 It compares masked TF logits, per-stream loss/count/accuracy, raw generated tokens, PCM/text,

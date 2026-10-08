@@ -108,7 +108,7 @@ def source_identity():
             if (module := importlib.import_module(name))}
 
 
-def audit_user_encoding(sample, runtime, example, out):
+def audit_user_encoding(sample, runtime, example, out, *, match_inference=False):
     """Persist the actual mismatch before stopping; repeat paths only on failure."""
     codec = runtime.codec
     training = tuple(tuple(row[example.prompt_frames:]) for row in example.input_codes[9:])
@@ -137,10 +137,11 @@ def audit_user_encoding(sample, runtime, example, out):
               "channels": {"agent": sample.agent_channel, "user": sample.user_channel},
               "codec_device": str(codec.device),
               "codec_cache_dir": str(codec._cache_dir) if getattr(codec, "_cache_dir", None) else None,
+              "continued_with_matched_user_conditioning": False,
               "scope": "production training stereo-batch user codes versus inference single-channel codes"}
     write_json(path, report)
     if comparison["equal"]:
-        return
+        return inference
     try:
         repeated_mono = codec.encode_conversation(sample.conversation_wav, sample.user_channel,
                                                   sample.window_start_sec, sample.window_end_sec)
@@ -153,10 +154,27 @@ def audit_user_encoding(sample, runtime, example, out):
                       repeated_training_user_tokens=repeated_stereo)
     except Exception:
         report["repeat_error"] = traceback.format_exc()
+    matched = (match_inference and comparison["training_shape"] == comparison["inference_shape"]
+               and report.get("inference_repeat", {}).get("equal", False))
+    report["continued_with_matched_user_conditioning"] = bool(matched)
     write_json(path, report)
+    if matched:
+        return inference
     raise AssertionError("training and inference user codes differ: "
         f"{comparison['mismatched_overlap_tokens']}/{comparison['overlap_tokens']} overlapping tokens; "
         f"unmatched={comparison['unmatched_tokens']}; inspect {path}")
+
+
+def match_user_conditioning(example, inference_user):
+    """Audit-only intervention; preserve all agent streams and prompt/mask positions."""
+    if len(inference_user) != 8 or any(len(row) != example.dialogue_frames for row in inference_user):
+        raise ValueError("inference user shape differs from the dialogue shape")
+    user = tuple(tuple(row) for row in inference_user)
+    inputs = example.input_codes[:9] + tuple(
+        row[:example.prompt_frames] + tokens for row, tokens in zip(example.input_codes[9:], user))
+    labels = example.labels[:9] + tuple(
+        row[:example.prompt_frames] + tokens for row, tokens in zip(example.labels[9:], user))
+    return replace(example, input_codes=inputs, labels=labels)
 
 
 def encode_data(cfg, sample, tokenizer, reference, out):
@@ -221,7 +239,15 @@ def full_worker(request, phase):
     example = build_example(config, sample, runtime)
     if phase == "in_memory":
         write_json(out / "sequence.json", asdict(example))
-        audit_user_encoding(sample, runtime, example, out)
+        inference_user = audit_user_encoding(sample, runtime, example, out,
+                                            match_inference=request.get("match_user_conditioning", False))
+        if request.get("match_user_conditioning"):
+            example = match_user_conditioning(example, inference_user)
+            write_json(out / "sequence_matched.json", asdict(example))
+    elif phase == "reload" and request.get("match_user_conditioning"):
+        # Reuse the actual saved intervention, not another possibly different encode.
+        evidence = json.loads((out / "user_encoding.json").read_text())
+        example = match_user_conditioning(example, evidence["inference_user_tokens"])
     if any(any(row[:example.prompt_frames]) for row in example.loss_mask):
         raise AssertionError("conditioning prompt is supervised")
     codes = torch.tensor(example.input_codes, device=config.device).unsqueeze(0)
@@ -230,6 +256,7 @@ def full_worker(request, phase):
         metrics = output_metrics(config, runtime, example, output)
     save_output(out / f"{phase}_logits.safetensors", output)
     metrics["scope"] = "exact requested crop; not historical training step loss"
+    metrics["user_conditioning_mode"] = "inference-matched diagnostic" if request.get("match_user_conditioning") else "production"
     metrics["frames"] = example.total_frames
     write_json(out / f"{phase}_metrics.json", metrics)
     del output
@@ -245,7 +272,7 @@ def full_worker(request, phase):
             torch.tensor(padded.input_codes, device=config.device).unsqueeze(0))
         padded_metrics = output_metrics(config, runtime, padded, padded_output)
     padded_metrics.update(scope="production padding for single-example batch; not historical step loss",
-                          frames=padded.total_frames)
+                          frames=padded.total_frames, user_conditioning_mode=metrics["user_conditioning_mode"])
     write_json(out / f"{phase}_padded_metrics.json", padded_metrics)
     del padded_output
     if phase == "in_memory":
@@ -348,6 +375,8 @@ def main():
             p.add_argument("--forced-text", action="store_true", help="GT text/audio diagnostic, never quality evidence")
             p.add_argument("--forced-agent-audio", action="store_true",
                            help="force GT agent audio via native moshi_tokens while text stays free; diagnostic only")
+            p.add_argument("--match-user-conditioning", action="store_true",
+                           help="audit-only: preserve mismatch evidence, use stable inference user codes in TF tensor")
             p.add_argument("--parity-frames", type=int, default=0, help="explicit bounded GT-history parity prefix; 0 disables")
             p.add_argument("--atol", type=float, default=.05)
             p.add_argument("--rtol", type=float, default=.005)
@@ -423,6 +452,7 @@ def main():
                 request = {"config": asdict(cfg), "sample": asdict(sample), "adapter": str(adapter.resolve()),
                            "output_dir": str(args.output_dir), "forced_text": args.forced_text,
                            "forced_agent_audio": args.forced_agent_audio,
+                           "match_user_conditioning": args.match_user_conditioning,
                            "reference": str(args.reference.resolve()),
                            "parity_frames": args.parity_frames, "atol": args.atol, "rtol": args.rtol}
                 if args.parity_frames < 0:
@@ -440,6 +470,7 @@ def main():
                 tokens_a = json.loads((args.output_dir / "in_memory/tokens.json").read_text())
                 tokens_b = json.loads((args.output_dir / "standalone/tokens.json").read_text())
                 result = {"scope": "reloaded existing checkpoint; not historical training in-memory snapshot",
+                          "user_conditioning_mode": "inference-matched diagnostic" if args.match_user_conditioning else "production",
                           "reload": json.loads((args.output_dir / "reload_comparison.json").read_text()),
                           "production_entrypoints": compare_outputs(args.output_dir / "in_memory", args.output_dir / "standalone"),
                           "raw_tokens_equal": tokens_a["returned"] == tokens_b["returned"]}

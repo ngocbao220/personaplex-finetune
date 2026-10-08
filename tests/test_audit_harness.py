@@ -133,6 +133,50 @@ class AuditNativeTest(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertEqual(result["first_failure_b_stream_frame"], [0, 0, 1])
 
+    def test_matched_user_conditioning_preserves_agent_prompt_masks_and_original(self):
+        from audit_personaplex import match_user_conditioning
+        from personaplex_finetuning.sequence import TrainingExample
+        codes = tuple((3, 1, 2) for _ in range(17))
+        masks = tuple((False, True, True) for _ in range(17))
+        example = TrainingExample(codes, codes, masks, tuple(str(k) for k in range(17)), 1, 2)
+        mono = tuple((4, 5) for _ in range(8))
+        matched = match_user_conditioning(example, mono)
+        self.assertEqual(matched.input_codes[:9], example.input_codes[:9])
+        self.assertEqual(matched.labels[:9], example.labels[:9])
+        self.assertEqual(matched.loss_mask, example.loss_mask)
+        self.assertEqual(matched.input_codes[9:], ((3, 4, 5),) * 8)
+        self.assertEqual(matched.labels[9:], matched.input_codes[9:])
+        self.assertEqual(example.input_codes, codes)
+        for bad in (mono[:7], tuple((4,) for _ in range(8))):
+            with self.assertRaisesRegex(ValueError, "shape"):
+                match_user_conditioning(example, bad)
+
+    def test_matched_user_mode_records_original_mismatch_and_requires_stable_mono(self):
+        from types import SimpleNamespace
+        from audit_personaplex import audit_user_encoding
+        train = ((1, 2),) * 8
+        mono = ((1, 3),) * 8
+        sample = SimpleNamespace(conversation_wav=Path("test.wav"), agent_channel=0, user_channel=1,
+                                 window_start_sec=0, window_end_sec=1)
+        example = SimpleNamespace(prompt_frames=1, input_codes=((0, 0, 0),) * 9 +
+                                  tuple((0,) + row for row in train))
+        for stable in (True, False):
+            values = iter([mono, mono if stable else train])
+            codec = SimpleNamespace(device="cpu", _cache_dir=None,
+                encode_conversation=lambda *a: next(values),
+                encode_conversation_stereo=lambda *a: (train, train))
+            with tempfile.TemporaryDirectory() as directory:
+                if stable:
+                    self.assertEqual(audit_user_encoding(sample, SimpleNamespace(codec=codec), example,
+                        Path(directory), match_inference=True), mono)
+                else:
+                    with self.assertRaises(AssertionError):
+                        audit_user_encoding(sample, SimpleNamespace(codec=codec), example,
+                            Path(directory), match_inference=True)
+                report = json.loads((Path(directory) / "user_encoding.json").read_text())
+                self.assertFalse(report["training_vs_inference"]["equal"])
+                self.assertEqual(report["continued_with_matched_user_conditioning"], stable)
+
     def test_missing_adapter_is_never_base_fallback(self):
         from personaplex_finetuning.inference import resolve_adapter_checkpoint
         with tempfile.TemporaryDirectory() as directory:
