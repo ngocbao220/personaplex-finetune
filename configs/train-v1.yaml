@@ -22,12 +22,11 @@ model:
 
 data:
   prepared_dir: ../data
+  codec_cache_dir: ../data/.mimi-cache  # Fill once with --precompute-codec-cache; null disables.
   window_seconds: null
   shuffle: true
-  randomize_train: false
   prompt_aug_prob: 0.0
   vietnamese_text_mode: diacritics
-  static_chunking: false
   swap_roles_after_pass: true
   val_ratio: 0.05
   val_manifest: null
@@ -40,7 +39,6 @@ lora:
   scaling: 2.0
   qlora: false
   quant_type: nf4
-  ft_embed: false
 
 optim:
   lr: 2.0e-6

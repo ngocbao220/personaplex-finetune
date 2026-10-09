@@ -63,7 +63,7 @@ class RuntimePathsTest(unittest.TestCase):
             path.touch()
             model = MonoMimi()
             codec = MimiCodec(model, 24_000, 12.5, "cpu", object(), cache_dir=root / "cache")
-            identity, _ = codec._conversation_cache_info(path, 0, 1, 0, 16 / 24_000)
+            identity, _ = codec._conversation_cache_info(path, 0, 16 / 24_000)
             legacy = json.loads(identity)
             legacy["format_version"] = 1
             legacy.pop("encoding_contract", None)
@@ -80,6 +80,36 @@ class RuntimePathsTest(unittest.TestCase):
                 self.assertEqual(codec.encode_conversation_stereo_cached(path, 0, 1, 0, 16 / 24_000), pair)
             self.assertEqual(model.calls, 2)
             self.assertTrue(old_file.exists())
+
+    def test_cache_is_shared_across_role_swap_and_ddp_ranks(self) -> None:
+        import torch
+
+        class ChannelMimi:
+            def __init__(self): self.calls = 0
+            def encode(self, audio):
+                self.calls += 1
+                # Code value identifies the physical channel (LEFT=1, RIGHT=2).
+                return torch.full((audio.shape[0], 8, 2), int(audio.mean().item()), dtype=torch.long)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "audio.wav"
+            path.touch()
+            stereo = np.vstack((np.ones(16, dtype=np.float32), np.full(16, 2, dtype=np.float32)))
+            fake_sphn = types.SimpleNamespace(read=lambda *_args, **_kwargs: (stereo, 24_000))
+            left, right = tuple((1, 1) for _ in range(8)), tuple((2, 2) for _ in range(8))
+            model = ChannelMimi()
+            first = MimiCodec(model, 24_000, 12.5, "cpu", object(), cache_dir=root / "cache")
+            with patch.dict("sys.modules", {"sphn": fake_sphn}):
+                self.assertEqual(first.encode_conversation_stereo_cached(path, 0, 1, 0, 16 / 24_000), (left, right))
+                self.assertEqual(model.calls, 2)
+                # Second role pass swaps agent/user: same physical channels, no re-encode.
+                self.assertEqual(first.encode_conversation_stereo_cached(path, 1, 0, 0, 16 / 24_000), (right, left))
+                self.assertEqual(model.calls, 2)
+            rank0 = MimiCodec(model, 24_000, 12.5, "cuda:0", object(), cache_dir=root / "cache")
+            rank1 = MimiCodec(model, 24_000, 12.5, "cuda:1", object(), cache_dir=root / "cache")
+            self.assertEqual(rank0._conversation_cache_info(path, 0, 1), rank1._conversation_cache_info(path, 0, 1))
+            self.assertNotEqual(rank0._conversation_cache_info(path, 0, 1), first._conversation_cache_info(path, 0, 1))
 
     def test_inference_encodes_mono_channel_zero_and_preserves_stereo_channel_selection(self) -> None:
         import torch  # Load before patch.dict(sys.modules) restores the module table.

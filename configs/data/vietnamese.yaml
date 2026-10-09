@@ -1,10 +1,10 @@
 # Vietnamese Fine tuning
 prepared_dir: ../data
+# Mimi code cache (fill once: train.py ... --precompute-codec-cache). null disables caching.
+codec_cache_dir: ../data/.mimi-cache
 window_seconds: null # null loads the full conversation; duration_sec chunks it during training.
 shuffle: true
-randomize_train: false
 prompt_aug_prob: 0.0
 vietnamese_text_mode: diacritics # diacritics, no_diacritics, or telex.
-static_chunking: false
 swap_roles_after_pass: true
 val_ratio: 0.05

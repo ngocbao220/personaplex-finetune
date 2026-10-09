@@ -442,7 +442,7 @@ class ValidChunkSelectionTest(unittest.TestCase):
         from personaplex_finetuning.data import DatasetLoadReport
         from personaplex_finetuning.train import run
         from audit_personaplex import selected_sample
-        from test_chunk_filter import FakeTokenizer
+        from tests.test_chunk_filter import FakeTokenizer
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

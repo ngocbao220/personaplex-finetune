@@ -73,7 +73,7 @@ class NativeTrainContractTest(unittest.TestCase):
         labels = torch.zeros((1, 17, 2), dtype=torch.long)
         mask = torch.ones_like(labels, dtype=torch.bool)
         mask[:, :, 0] = False  # prompt conditioning only
-        weights = stream_weights_torch(labels, mask, (3, 0), text_padding_weight=0.5)
+        weights = stream_weights_torch(labels, mask, (3, 0), text_padding_weight=0.5, user_loss=True)
         self.assertEqual(float(weights[0, 1, 1]), 1.0)
         self.assertEqual(float(weights[0, 9, 1]), 1.0)
         self.assertAlmostEqual(float(weights[0, 2, 1]), 0.02)
@@ -112,7 +112,7 @@ class NativeTrainContractTest(unittest.TestCase):
         metadata = json.loads((sample_root / "metadata.json").read_text())
         sample = PreparedSample(
             "conv_0001_window", sample_root / "conversation.wav", sample_root / "voice_prompt.wav",
-            (Word("agent", "And", 1.3, 1.46),), metadata["text_prompt"], metadata,
+            (Word("agent", "And", 1.3, 1.46),), metadata["text_prompt_left"], metadata,
             AudioInfo(24000, 2, metadata["duration_sec"]), 0.0, 3.04,
         )
         self.assertEqual((sample.agent_channel, sample.user_channel), (0, 1))

@@ -19,7 +19,6 @@ lora:
   enable: true
   rank: 128
   scaling: 2.0
-  ft_embed: false
 
 # Dual Learning Rates
 optim:

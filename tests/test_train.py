@@ -50,8 +50,8 @@ from personaplex_finetuning.train import (
 class TrainTest(unittest.TestCase):
     def test_training_disables_moshi_cuda_graphs_before_runtime_setup(self) -> None:
         config = SimpleNamespace(
-            train_method="lora", ft_embed=False, qlora=False, train_stage="joint",
-            randomize_train=False, mixed_precision="bf16", shuffle=True,
+            train_method="lora", qlora=False, train_stage="joint",
+            mixed_precision="bf16", shuffle=True,
         )
         with patch.dict("os.environ"):
             os.environ.pop("NO_CUDA_GRAPH", None)

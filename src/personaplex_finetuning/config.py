@@ -23,7 +23,6 @@ class Config:
     seed: int = 42
     window_seconds: float | None = None
     shuffle: bool = False
-    randomize_train: bool = False
     max_steps: int = 300
     learning_rate: float = 2e-5
     depformer_learning_rate: float | None = None
@@ -43,11 +42,9 @@ class Config:
     persistent_workers: bool = True
     warmup_steps: int = 0
     eval_every_steps: int = 0
-    save_every_steps: int = 50
     val_ratio: float = 0.05
     prompt_aug_prob: float = 0.0
     vietnamese_text_mode: str = "diacritics"
-    static_chunking: bool = False
     swap_roles_after_pass: bool = False
     val_manifest_path: Path | None = None
     test_manifest_path: Path | None = None
@@ -64,7 +61,6 @@ class Config:
     validation_max_samples: int = 32
     lora_enabled: bool = True
     lora_scaling: float = 2.0
-    ft_embed: bool = False
     weight_decay: float = 0.1
     pct_start: float = 0.05
     first_codebook_weight_multiplier: float = 1.0
@@ -200,6 +196,12 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         raise ValueError("model and data config sections must be mappings")
     if not isinstance(train, dict) or not isinstance(lora, dict) or not isinstance(optim, dict):
         raise ValueError("train, lora, and optim config sections must be mappings")
+    removed = [f"{section}.{key}" for section, values, keys in (
+        ("data", data, ("static_chunking", "randomize_train")), ("lora", lora, ("ft_embed",)),
+    ) for key in keys if key in values]
+    if removed:
+        # These flags never changed training; fail instead of silently ignoring them.
+        raise ValueError(f"removed config keys have no effect; delete them: {', '.join(removed)}")
     train_method = str(train.get("method", "lora")).lower()
     if train_method not in {"lora", "full"}:
         raise ValueError("train.method must be lora or full")
@@ -310,7 +312,6 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
             else None
         ),
         shuffle=bool(data.get("shuffle", False)),
-        randomize_train=bool(data.get("randomize_train", False)),
         max_steps=max_steps,
         learning_rate=float(optim.get("lr", train.get("learning_rate", 2e-5))),
         depformer_learning_rate=float(train["depformer_learning_rate"]) if (isinstance(train, dict) and train.get("depformer_learning_rate") is not None) else None,
@@ -330,11 +331,9 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         persistent_workers=bool(train.get("persistent_workers", True)) if isinstance(train, dict) else True,
         warmup_steps=warmup_steps,
         eval_every_steps=max(0, int(train.get("eval_every_steps", 0))) if isinstance(train, dict) else 0,
-        save_every_steps=max(1, int(train.get("save_every_steps", 50))) if isinstance(train, dict) else 50,
         val_ratio=float(data.get("val_ratio", 0.05)),
         prompt_aug_prob=float(data.get("prompt_aug_prob", 0.0)),
         vietnamese_text_mode=vietnamese_text_mode,
-        static_chunking=bool(data.get("static_chunking", False)),
         swap_roles_after_pass=bool(data.get("swap_roles_after_pass", False)),
         val_manifest_path=val_manifest_path,
         test_manifest_path=test_manifest_path,
@@ -351,7 +350,6 @@ gradient_checkpointing=bool(raw.get("gradient_checkpointing", train.get("gradien
         validation_max_samples=max(1, int(raw.get("validation_max_samples", 32))),
         lora_enabled=bool(lora.get("enable", True)),
         lora_scaling=lora_scaling,
-        ft_embed=bool(lora.get("ft_embed", False)),
         weight_decay=float(optim.get("weight_decay", train.get("weight_decay", 0.1))),
         pct_start=pct_start,
         first_codebook_weight_multiplier=first_codebook_weight_multiplier,

@@ -36,7 +36,7 @@ class FullFinetuningTest(unittest.TestCase):
                 "--input-file", str(root / "user.wav"), "--voice-prompt", str(root / "voice.wav"),
                 "--text-prompt", "Trò chuyện", "--output-dir", str(root / "outputs"),
             ]), patch.object(inference_smoke, "load_config", return_value=SimpleNamespace(
-                window_seconds=30.0,
+                window_seconds=30.0, vietnamese_text_mode="diacritics",
             )), patch.object(inference_smoke, "PreparedDataset") as dataset, \
                  patch.object(inference_smoke, "smoke", autospec=True) as smoke:
                 smoke.return_value = "reference_unavailable"

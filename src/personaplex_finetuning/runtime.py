@@ -91,6 +91,11 @@ class SentencePieceTokenizer:
         return str(self._processor.decode(tokens))
 
 
+def torch_device_type(device) -> str:
+    """``cuda:1`` -> ``cuda``; Mimi codes do not depend on which GPU encoded them."""
+    return str(device).split(":", 1)[0]
+
+
 class MimiCodec:
     """Mimi adapter using the same source helpers as PersonaPlex inference."""
 
@@ -136,14 +141,16 @@ class MimiCodec:
             duration_sec = end_sec - start_sec
             if duration_sec <= 0:
                 raise ValueError(f"invalid conversation window {start_sec}:{end_sec} for {path}")
-            info = self._conversation_cache_info(path, agent_channel, user_channel, start_sec, end_sec)
+            info = self._conversation_cache_info(path, start_sec, end_sec)
             cache_info[index] = info
             if info is not None and info[1].is_file():
                 identity, cache_file = info
                 data = torch.load(str(cache_file), map_location="cpu", weights_only=True)
                 if data.get("identity") != identity:
                     raise ValueError(f"Mimi cache identity mismatch: {cache_file}")
-                agent, user = data.get("agent"), data.get("user")
+                # Stored by physical LEFT/RIGHT channel, so role-swapped passes hit too.
+                channels = (data.get("left"), data.get("right"))
+                agent, user = channels[agent_channel], channels[user_channel]
                 self._validate_cached_codes(agent, user, cache_file)
                 results[index] = (agent, user)
             else:
@@ -192,7 +199,9 @@ class MimiCodec:
                 results[result_index] = (agent_codes, user_codes)
                 info = cache_info[result_index]
                 if info is not None:
-                    self._write_conversation_cache(info[0], info[1], agent_codes, user_codes)
+                    agent_channel = pending[pending_index][2]
+                    left, right = (agent_codes, user_codes) if agent_channel == 0 else (user_codes, agent_codes)
+                    self._write_conversation_cache(info[0], info[1], left, right)
 
         if any(result is None for result in results):
             raise RuntimeError("Mimi batch encoding did not produce codes for every conversation")
@@ -221,20 +230,19 @@ class MimiCodec:
             (path, agent_channel, user_channel, start_sec, end_sec),
         ])[0]
 
-    def _conversation_cache_info(self, path, agent_channel, user_channel, start_sec, end_sec):
+    def _conversation_cache_info(self, path, start_sec, end_sec):
         if self._cache_dir is None:
             return None
         path = Path(path).expanduser().resolve()
         stat = path.stat()
         identity = json.dumps({
-            "format_version": 2,
+            "format_version": 3,
             "encoding_contract": self.conversation_encoding_contract,
-            "encoding_device": str(self.device),
+            # Device type only: DDP ranks (cuda:0/cuda:1) share one cache across reshuffles.
+            "encoding_device": torch_device_type(self.device),
             "source_path": str(path),
             "source_size": stat.st_size,
             "source_mtime_ns": stat.st_mtime_ns,
-            "agent_channel": agent_channel,
-            "user_channel": user_channel,
             "start_sec": start_sec,
             "end_sec": end_sec,
             "sample_rate": self.sample_rate,
@@ -243,13 +251,13 @@ class MimiCodec:
         key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         return identity, self._cache_dir / (key + ".pt")
 
-    def _write_conversation_cache(self, identity, cache_file, agent_codes, user_codes):
+    def _write_conversation_cache(self, identity, cache_file, left_codes, right_codes):
         import torch
 
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         temporary = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         try:
-            torch.save({"identity": identity, "agent": agent_codes, "user": user_codes}, str(temporary))
+            torch.save({"identity": identity, "left": left_codes, "right": right_codes}, str(temporary))
             os.replace(temporary, cache_file)
         finally:
             temporary.unlink(missing_ok=True)
@@ -335,6 +343,39 @@ class PersonaPlexRuntime:
     delays: tuple[int, ...]
 
 
+def _load_mimi_codec(resolved, device: str, codec_cache_dir: Path | None) -> MimiCodec:
+    """Frozen Mimi codec; the cache namespace is shared by training and precompute."""
+    loaders = importlib.import_module("moshi.models.loaders")
+    lm_helpers = importlib.import_module("moshi.models.lm")
+    mimi = loaders.get_mimi(resolved.mimi_weight, device=device)
+    mimi.eval()
+    mimi.requires_grad_(False)
+    mimi_stat = resolved.mimi_weight.stat()
+    mimi_cache_identity = json.dumps(
+        {
+            "path": str(resolved.mimi_weight),
+            "size": mimi_stat.st_size,
+            "mtime_ns": mimi_stat.st_mtime_ns,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return MimiCodec(
+        mimi, mimi.sample_rate, mimi.frame_rate, device, lm_helpers,
+        cache_dir=codec_cache_dir,
+        cache_namespace=mimi_cache_identity,
+    )
+
+
+def load_mimi_codec(paths: RuntimePaths, device: str, codec_cache_dir: Path | None) -> MimiCodec:
+    """Load only Mimi from explicit local assets, without the 7B language model."""
+    resolved = paths.validate(require_model=False)
+    source = str(resolved.source)
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    return _load_mimi_codec(resolved, device, codec_cache_dir)
+
+
 def load_runtime(
     paths: RuntimePaths,
     device: str = "cuda",
@@ -353,7 +394,6 @@ def load_runtime(
         sys.path.insert(0, source)
     torch = importlib.import_module("torch")
     loaders = importlib.import_module("moshi.models.loaders")
-    lm_helpers = importlib.import_module("moshi.models.lm")
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is false")
     if torch.cuda.is_available():
@@ -361,19 +401,7 @@ def load_runtime(
             torch.backends.cuda.enable_flash_sdp(True)
         if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
             torch.backends.cuda.enable_mem_efficient_sdp(True)
-    mimi = loaders.get_mimi(resolved.mimi_weight, device=device)
-    mimi.eval()
-    mimi.requires_grad_(False)
-    mimi_stat = resolved.mimi_weight.stat()
-    mimi_cache_identity = json.dumps(
-        {
-            "path": str(resolved.mimi_weight),
-            "size": mimi_stat.st_size,
-            "mtime_ns": mimi_stat.st_mtime_ns,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    codec = _load_mimi_codec(resolved, device, codec_cache_dir)
     lm_dtype = torch.float32 if full_precision_model else torch.bfloat16
     dev_type = getattr(device, "type", str(device))
     if dev_type == "mps":
@@ -404,11 +432,7 @@ def load_runtime(
         raise RuntimeError("loaded checkpoint is not the expected 17-stream PersonaPlex model")
     return PersonaPlexRuntime(
         model=model,
-        codec=MimiCodec(
-            mimi, mimi.sample_rate, mimi.frame_rate, device, lm_helpers,
-            cache_dir=codec_cache_dir,
-            cache_namespace=mimi_cache_identity,
-        ),
+        codec=codec,
         tokenizer=SentencePieceTokenizer(resolved.tokenizer),
         initial_tokens=initial,
         zero_token=int(model.zero_token_id),

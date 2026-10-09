@@ -51,7 +51,9 @@ from .objective import (
     text_padding_mask_torch,
     torch_weighted_cross_entropy_stats,
 )
-from .runtime import PERSONAPLEX_MIMI_FRAME_RATE, MimiCodec, RuntimePaths, SentencePieceTokenizer, load_runtime
+from .runtime import (
+    PERSONAPLEX_MIMI_FRAME_RATE, MimiCodec, RuntimePaths, SentencePieceTokenizer, load_mimi_codec, load_runtime,
+)
 from .sequence import PersonaPlexTrainingExampleBuilder, pad_training_example
 from .text_normalization import normalize_vietnamese_text
 
@@ -530,6 +532,54 @@ def codebook_diagnostic_stats(batch, model_output, padding_id: int):
             t_correct, t_count, t_loss,
             torch.stack(cb_correct), torch.stack(cb_count), torch.stack(cb_loss)
         )
+
+
+def fused_training_diagnostics(batch, model_output, padding_id) -> dict:
+    """One no-grad pass computing every per-micro-step diagnostic.
+
+    Equivalent to text_supervision_counts, text_target_token_loss_stats,
+    text_prediction_diagnostic_counts and codebook_diagnostic_stats, but shares
+    one text argmax/CE and uses masks with ignore_index instead of boolean
+    indexing/``.any()``, so it never forces a host-device synchronization.
+    """
+    with torch.no_grad():
+        labels = batch["labels"][:, 0, :]
+        valid = batch["loss_mask"][:, 0, :] & model_output.text_mask[:, 0]
+        is_padding = text_padding_mask_torch(labels, padding_id)
+        nonpad = valid & ~is_padding
+        padding = valid & is_padding
+
+        text_logits = model_output.text_logits[:, 0]
+        predictions = text_logits.argmax(dim=-1)
+        is_padding_prediction = text_padding_mask_torch(predictions, padding_id)
+        text_ce_sum = torch.nn.functional.cross_entropy(
+            text_logits.float().flatten(0, 1), labels.masked_fill(~nonpad, -100).flatten(),
+            ignore_index=-100, reduction="sum",
+        )
+
+        audio_labels = batch["labels"][:, 1:17, :]
+        audio_mask = batch["loss_mask"][:, 1:17, :] & model_output.mask
+        audio_logits = model_output.logits  # [B, 16, T, card]
+        audio_ce = torch.nn.functional.cross_entropy(
+            audio_logits.float().permute(0, 3, 1, 2), audio_labels.masked_fill(~audio_mask, -100),
+            ignore_index=-100, reduction="none",
+        )  # [B, 16, T]; zero at ignored positions
+        audio_correct = (audio_logits.argmax(dim=-1) == audio_labels) & audio_mask
+
+        return {
+            "text_target_tokens": nonpad.sum(),
+            "text_padding_positions": padding.sum(),
+            "text_target_ce_sum": text_ce_sum,
+            "text_target_correct": ((predictions == labels) & nonpad).sum(),
+            "text_prediction_counts": torch.stack((
+                ((predictions == labels) & padding).sum(),
+                (is_padding_prediction & valid).sum(),
+                (is_padding_prediction & nonpad).sum(),
+            )),
+            "audio_correct": audio_correct.sum(dim=(0, 2)),
+            "audio_count": audio_mask.sum(dim=(0, 2)),
+            "audio_loss_sum": audio_ce.sum(dim=(0, 2)),
+        }
 
 
 def step_optimizer_if_ready(sync_state, optimizer, scheduler, trainable, model=None, max_norm=1.0) -> float:
@@ -1535,21 +1585,50 @@ def verify_reloaded_full(config: Config, sample, checkpoint: Path, runtime) -> f
         parallel_model.train(was_training)
 
 
+def precompute_codec_cache(config: Config, chunks: list, device, rank: int, world_size: int) -> dict[str, int]:
+    """Encode every kept training chunk into the Mimi disk cache, then stop.
+
+    Uses the exact chunk list ``run`` trains on and the codec namespace of
+    ``load_runtime``, so training reads every window from cache. Role-swapped
+    passes share entries (cache is keyed by physical LEFT/RIGHT channel).
+    """
+    if config.codec_cache_dir is None:
+        raise ValueError("--precompute-codec-cache requires data.codec_cache_dir")
+    codec = load_mimi_codec(
+        RuntimePaths(config.model_root, config.personaplex_source), str(device), config.codec_cache_dir,
+    )
+    local = chunks[rank::world_size]
+    encoded = cached = 0
+    started = time.monotonic()
+    for index, sample in enumerate(local, 1):
+        window = (sample.conversation_wav, sample.agent_channel, sample.user_channel,
+                  sample.window_start_sec, sample.window_end_sec)
+        if codec._conversation_cache_info(window[0], window[3], window[4])[1].is_file():
+            cached += 1
+        else:
+            encoded += 1
+        codec.encode_conversation_stereo_batch([window])
+        if index % 100 == 0 or index == len(local):
+            print(json.dumps({
+                "event": "codec_cache_precompute", "rank": rank, "done": index, "total": len(local),
+                "encoded": encoded, "already_cached": cached,
+                "elapsed_sec": round(time.monotonic() - started, 1),
+            }), flush=True)
+    return {"encoded": encoded, "already_cached": cached}
+
+
 def run(
     config: Config,
     smoke: bool = False,
     resume_from: str | None = None,
     force_filter: bool = False,
+    precompute_codec_cache_only: bool = False,
 ) -> Path | None:
-    if config.train_method == "lora" and config.ft_embed:
-        raise ValueError("lora.ft_embed=true is not implemented by this LoRA-only trainer")
     if config.train_method == "full":
         if config.qlora:
             raise ValueError("train.method=full cannot use lora.qlora=true")
         if config.train_stage != "joint":
             raise ValueError("train.method=full requires train.stage=joint")
-    if config.randomize_train:
-        raise ValueError("data.randomize_train=true is not implemented; fixed chunks may be shuffled with data.shuffle")
     if config.mixed_precision.lower() != "bf16":
         raise ValueError("train.mixed_precision must be bf16; this trainer uses BF16 CUDA autocast")
     # Moshi's lazy compile wrappers can trigger graph/compile shape issues on
@@ -1784,6 +1863,13 @@ def run(
             f"are required for world_size={world_size}, batch_size_per_gpu={config.per_device_batch_size}"
         )
 
+    if precompute_codec_cache_only:
+        precompute_codec_cache(config, train_samples, device, rank, world_size)
+        barrier()
+        if main_process:
+            print(f"[Codec cache] {len(train_samples)} train chunks ready in {config.codec_cache_dir}", flush=True)
+        return None
+
     resume_adapter_file = None
     adapter_resume_step = 0
     if resume_from:
@@ -1829,7 +1915,6 @@ def run(
             "lora_scaling": config.lora_scaling,
             "lora_enabled": config.lora_enabled,
             "train_method": config.train_method,
-            "ft_embed": config.ft_embed,
             "weight_decay": config.weight_decay,
             "pct_start": config.pct_start,
             "first_codebook_weight_multiplier": config.first_codebook_weight_multiplier,
@@ -1862,11 +1947,8 @@ def run(
             "free_running_eval_window_seconds": config.free_running_eval_window_seconds,
             "validation_max_samples": config.validation_max_samples,
             "validation_generation_settings": config.generation_settings.as_dict(),
-            "save_every_steps": config.save_every_steps,
-            "randomize_train": config.randomize_train,
             "prompt_aug_prob": config.prompt_aug_prob,
             "vietnamese_text_mode": config.vietnamese_text_mode,
-            "static_chunking": config.static_chunking,
             "swap_roles_after_pass": config.swap_roles_after_pass,
             "gradient_checkpointing": config.gradient_checkpointing,
             "mixed_precision": config.mixed_precision,
@@ -2153,6 +2235,8 @@ def run(
         samples_seen = 0
         audio_seconds_seen = 0.0
         audio_frames_seen = 0
+        pending_audio_seconds = 0.0
+        pending_audio_frames = 0
         text_target_tokens_seen = 0
         text_padding_positions_seen = 0
         pending_text_target_tokens = torch.zeros((), dtype=torch.int64, device=device)
@@ -2188,15 +2272,9 @@ def run(
                 pending_profile_times[0] += time.monotonic() - data_started
             codes = batch["codes"]
             samples_seen += local_samples * world_size
-            if distributed and micro_step == start_micro_step:
-                log_batch_phase(rank, "audio_stats_allreduce", "start")
-            global_audio_seconds = all_reduce_sum(
-                torch.tensor([local_audio_seconds, local_audio_frames], dtype=torch.float32, device=device)
-            )
-            if distributed and micro_step == start_micro_step:
-                log_batch_phase(rank, "audio_stats_allreduce", "complete")
-            audio_seconds_seen += float(global_audio_seconds[0])
-            audio_frames_seen += int(global_audio_seconds[1])
+            # Host-side counters; reduced across ranks once per optimizer update.
+            pending_audio_seconds += local_audio_seconds
+            pending_audio_frames += local_audio_frames
 
             sync_gradients = (micro_step + 1 - start_micro_step) % accum_steps == 0 or micro_step + 1 == max_micro_steps
             sync_context = runtime.model.no_sync() if distributed and not sync_gradients else nullcontext()
@@ -2204,26 +2282,18 @@ def run(
                 profile_sync()
                 forward_started = time.monotonic() if config.profile_steps else 0.0
                 output = model_forward_train(runtime.model, codes)
-                text_targets, text_padding = text_supervision_counts(
+                diagnostics = fused_training_diagnostics(
                     batch, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding)
                 )
-                pending_text_target_tokens += text_targets.detach()
-                pending_text_padding_positions += text_padding.detach()
-                target_ce_sum, target_ce_count = text_target_token_loss_stats(
-                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding)
-                )
-                pending_text_target_ce_sum += target_ce_sum
-                pending_text_target_ce_count += target_ce_count.detach()
-                diag_t_corr, diag_t_cnt, diag_t_loss, diag_cb_corr, diag_cb_cnt, diag_cb_loss = codebook_diagnostic_stats(
-                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding)
-                )
-                pending_text_target_correct += diag_t_corr
-                pending_text_prediction_counts += text_prediction_diagnostic_counts(
-                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding)
-                )
-                pending_audio_cb_correct += diag_cb_corr
-                pending_audio_cb_count += diag_cb_cnt
-                pending_audio_cb_loss_sum += diag_cb_loss
+                pending_text_target_tokens += diagnostics["text_target_tokens"]
+                pending_text_padding_positions += diagnostics["text_padding_positions"]
+                pending_text_target_ce_sum += diagnostics["text_target_ce_sum"]
+                pending_text_target_ce_count += diagnostics["text_target_tokens"]
+                pending_text_target_correct += diagnostics["text_target_correct"]
+                pending_text_prediction_counts += diagnostics["text_prediction_counts"]
+                pending_audio_cb_correct += diagnostics["audio_correct"]
+                pending_audio_cb_count += diagnostics["audio_count"]
+                pending_audio_cb_loss_sum += diagnostics["audio_loss_sum"]
 
                 loss_result = loss_components(
                     output, codes, batch, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding), torch,
@@ -2266,6 +2336,18 @@ def run(
 
             if not sync_gradients:
                 continue
+
+            if distributed and optimizer_step == start_step:
+                log_batch_phase(rank, "audio_stats_allreduce", "start")
+            global_audio_seconds = all_reduce_sum(
+                torch.tensor([pending_audio_seconds, pending_audio_frames], dtype=torch.float64, device=device)
+            )
+            if distributed and optimizer_step == start_step:
+                log_batch_phase(rank, "audio_stats_allreduce", "complete")
+            audio_seconds_seen += float(global_audio_seconds[0])
+            audio_frames_seen += int(global_audio_seconds[1])
+            pending_audio_seconds = 0.0
+            pending_audio_frames = 0
 
             global_text_stats = all_reduce_sum(pack_text_training_stats(
                 pending_text_target_tokens,
@@ -2686,6 +2768,8 @@ def main() -> int:
     parser.add_argument("--no-user-loss", dest="user_loss", action="store_false", help="Disable user audio supervision")
     parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint directory to resume from")
     parser.add_argument("--force-filter", action="store_true", help="Revalidate prepared samples and rebuild chunk-filter caches")
+    parser.add_argument("--precompute-codec-cache", action="store_true",
+                        help="Encode all kept training chunks into data.codec_cache_dir with Mimi only, then exit")
 
     args, unknown = parser.parse_known_args()
     overrides = [arg for arg in unknown if "=" in arg]
@@ -2710,6 +2794,7 @@ def main() -> int:
         smoke=args.smoke,
         resume_from=args.resume_from,
         force_filter=args.force_filter,
+        precompute_codec_cache_only=args.precompute_codec_cache,
     )
     return 0
 

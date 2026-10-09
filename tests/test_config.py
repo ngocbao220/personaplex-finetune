@@ -64,7 +64,7 @@ class ConfigTest(unittest.TestCase):
                 '{"model":{"root":"/models/base","source":"/source"},'
                 '"data":{"prepared_dir":"/data"},"duration_sec":100,'
                 '"sample_number":10,"batch_size":16,"max_steps":2000,'
-                '"lora":{"enable":true,"rank":128,"scaling":2.0,"ft_embed":false},'
+                '"lora":{"enable":true,"rank":128,"scaling":2.0},'
                 '"optim":{"lr":2e-6,"weight_decay":0.1,"pct_start":0.05}}'
             )
 
@@ -77,7 +77,6 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(loaded.lora_rank, 128)
             self.assertEqual(loaded.lora_alpha, 256)
             self.assertEqual(loaded.lora_scaling, 2.0)
-            self.assertFalse(loaded.ft_embed)
             self.assertAlmostEqual(loaded.learning_rate, 2e-6)
             self.assertEqual(loaded.weight_decay, 0.1)
             self.assertEqual(loaded.pct_start, 0.05)
@@ -225,8 +224,11 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(loaded.prefetch_factor, 2)
         self.assertTrue(loaded.pin_memory)
         self.assertTrue(loaded.persistent_workers)
-        inference_config = load_config(Path(__file__).resolve().parents[1] / "configs" / "infer.yaml")
-        self.assertEqual(loaded.generation_settings, inference_config.generation_settings)
+        # infer.yaml is intentionally greedy for benchmarks; evaluating a trained run
+        # must reuse the run's own settings, which inference_config.json carries.
+        from personaplex_finetuning.train import inference_config_snapshot
+        snapshot = inference_config_snapshot(loaded, Path("adapter"), Path("outputs"))
+        self.assertEqual(snapshot["generation"], loaded.generation_settings.as_dict())
 
     def test_ten_sample_overfit_is_deterministic_and_monitors_generation_on_train_set(self) -> None:
         config = Path(__file__).resolve().parents[1] / "configs" / "overfit.yaml"
@@ -276,7 +278,6 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNone(loaded.window_seconds)
         self.assertEqual(loaded.per_device_batch_size, 2)
         self.assertEqual(loaded.num_workers, 4)
-        self.assertFalse(loaded.randomize_train)
         self.assertTrue(loaded.persistent_workers)
         self.assertEqual(loaded.max_steps, 10_000)
 
@@ -291,7 +292,6 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(loaded.gradient_accumulation_steps, 8)
         self.assertTrue(loaded.gradient_checkpointing)
         self.assertEqual(loaded.prompt_aug_prob, 0.0)
-        self.assertFalse(loaded.static_chunking)
         self.assertTrue(loaded.swap_roles_after_pass)
         self.assertEqual(loaded.per_device_batch_size, 2)
 
@@ -337,19 +337,24 @@ class ConfigTest(unittest.TestCase):
             self.assertTrue(loaded.qlora)
             self.assertEqual(loaded.quant_type, "nf4")
 
-    def test_reads_static_chunking_and_role_swap_settings(self) -> None:
+    def test_reads_role_swap_and_rejects_removed_noop_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp) / "static_chunks.yaml"
+            config = Path(tmp) / "role_swap.yaml"
             config.write_text(
                 '{"model": {"root": "/models/personaplex", "source": "/source"}, '
-                '"data": {"prepared_dir": "/prepared", "static_chunking": true, '
-                '"swap_roles_after_pass": true}}'
+                '"data": {"prepared_dir": "/prepared", "swap_roles_after_pass": true}}'
             )
-
-            loaded = load_config(config)
-
-            self.assertTrue(loaded.static_chunking)
-            self.assertTrue(loaded.swap_roles_after_pass)
+            self.assertTrue(load_config(config).swap_roles_after_pass)
+            for section, key in (("data", "static_chunking"), ("data", "randomize_train"), ("lora", "ft_embed")):
+                with self.subTest(key=key):
+                    extra = '"lora": {"ft_embed": false}' if section == "lora" else ''
+                    data = '"prepared_dir": "/prepared"' + (f', "{key}": false' if section == "data" else '')
+                    config.write_text(
+                        '{"model": {"root": "/models/personaplex", "source": "/source"}, '
+                        f'"data": {{{data}}}' + (f', {extra}' if extra else '') + '}'
+                    )
+                    with self.assertRaisesRegex(ValueError, f"{section}.{key}"):
+                        load_config(config)
 
     def test_resolves_paths_relative_to_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

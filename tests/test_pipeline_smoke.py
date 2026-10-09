@@ -42,7 +42,12 @@ class PipelineSmokeTest(unittest.TestCase):
         # Resolve paths to real assets in the workspace
         cls.project_root = Path(__file__).resolve().parent.parent
         cls.workspace_root = cls.project_root.parent
-        cls.manifest_path = cls.workspace_root / "prepared" / "train.jsonl"
+        # First existing prepared layout wins; the current export is otospeech-prepared.
+        cls.manifest_path = next(
+            (cls.workspace_root / name / "train.jsonl" for name in ("otospeech-prepared", "prepared")
+             if (cls.workspace_root / name / "train.jsonl").is_file()),
+            cls.workspace_root / "otospeech-prepared" / "train.jsonl",
+        )
         cls.models_path = cls.workspace_root / "models"
         cls.refs_source = cls.project_root / "src"
 
@@ -194,7 +199,7 @@ class PipelineSmokeTest(unittest.TestCase):
                 path=run_dir / "config.yaml",
                 model_root=self.models_path,
                 personaplex_source=self.refs_source,
-                prepared_dir=self.workspace_root / "prepared",
+                prepared_dir=self.manifest_path.parent,
                 output_dir=run_dir,
                 device="cpu",
             )

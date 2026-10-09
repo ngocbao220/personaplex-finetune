@@ -243,5 +243,7 @@ class SequenceBuilderTest(unittest.TestCase):
 
         self.assertEqual(padded.total_frames, example.total_frames + 5)
         self.assertTrue(all(not mask[-5:].count(True) for mask in padded.loss_mask))
-        self.assertEqual(padded.input_codes[0][-5:], (3,) * 5)
+        # Artificial batch tail uses the native zero token (-1): zero embedding and
+        # excluded from Moshi's mask, unlike in-dialogue PAD (3) which is trained on.
+        self.assertEqual(padded.input_codes[0][-5:], (-1,) * 5)
         self.assertEqual(padded.input_codes[1][-5:], (-1,) * 5)
