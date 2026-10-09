@@ -1,0 +1,85 @@
+# PersonaPlex LoRA fine-tuning: synthetic 500h Vietnamese dataset, 2x B200.
+# Global batch = batch_size 4 x grad_accum 4 x 2 GPUs = 32 chunks per optimizer step.
+# max_steps: ceil(passes * kept_train_chunks / 32), using kept_chunks printed at startup.
+# swap_roles_after_pass is false, so one pass = one epoch over the kept chunks.
+#
+# Fill the Mimi cache once, then train (same config both times):
+#   torchrun --nproc_per_node=2 train.py configs/train_vi_synthetic.yaml --precompute-codec-cache
+#   torchrun --nproc_per_node=2 train.py configs/train_vi_synthetic.yaml
+defaults:
+  - model: server
+  - data: vietnamese
+  - lora: default
+  - train: full
+  - _self_
+
+seed: 42
+duration_sec: 100
+sample_number: null
+sample_index: null
+batch_size: 4                 # Per GPU; global batch = 4 * 4 * 2 = 32.
+max_steps: 10000
+profile_steps: false
+no_eval: false
+user_loss: true               # IMPORTANT: also supervise the user audio stream.
+free_running_eval_every_steps: 1000
+free_running_eval_samples: 3
+free_running_eval_window_seconds: 100
+validation_max_samples: 32
+
+model:
+  root: /home/voice/data/voice/personaplex-7b-v1
+  source: ../src
+  device: cuda
+
+data:
+  prepared_dir: /home/voice/data/voice/vdt/data_ready/synthetic_500h
+  codec_cache_dir: auto       # <prepared_dir>/.mimi-cache
+  shuffle: true
+  vietnamese_text_mode: no_diacritics  # IMPORTANT: applied to agent text at training time.
+  swap_roles_after_pass: false
+  val_ratio: 0.05
+  val_manifest: null
+  test_manifest_path: null
+
+lora:
+  enable: true
+  rank: 128
+  alpha: 256
+  scaling: 2.0
+
+optim:
+  lr: 2.0e-6
+  weight_decay: 0.1
+  pct_start: 0.1              # OneCycle warmup fraction; keep train.warmup_steps at 0.
+
+train:
+  output_dir: ""              # Empty -> ../runs/train_vi_synthetic
+  depformer_learning_rate: 5.0e-6
+  stage: joint
+  gradient_accumulation_steps: 4
+  warmup_steps: 0
+  eval_every_steps: 500
+  eval_on_train_samples: false
+  save_every_steps: 500
+  num_workers: 4              # DataLoader audio workers per GPU.
+  filter_num_workers: 224     # CPU workers for prepared-sample validation and chunk overflow filtering.
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  gradient_checkpointing: false  # Batch 4 without checkpointing; if OOM use batch_size 2 + accum 8.
+  mixed_precision: bf16
+
+first_codebook_weight_multiplier: 1.0
+text_padding_weight: 0.3
+log_freq: 1
+ckpt_freq: 500
+
+# Keep these settings in sync with configs/infer.yaml for comparable generation.
+generation:
+  use_sampling: true
+  temp: 0.8
+  temp_text: 0.7
+  top_k: 250
+  top_k_text: 25
+  audio_silence_frame_cnt: 6
