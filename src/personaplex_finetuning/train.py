@@ -1733,11 +1733,11 @@ def run(
             force_filter=force_filter and main_process,
         )
 
-        def load_local():
+        def load_local(cache_only: bool = False):
             try:
                 if split_by_conversation:
-                    return dataset.split(val_ratio=config.val_ratio, seed=config.seed)
-                return dataset.load()
+                    return dataset.split(val_ratio=config.val_ratio, seed=config.seed, cache_only=cache_only)
+                return dataset.load(cache_only=cache_only)
             finally:
                 report = dataset.load_report
                 dataset_load_reports[label] = report
@@ -1745,6 +1745,14 @@ def run(
                     print(dataset_load_summary(label, report), flush=True)
 
         if distributed:
+            # Non-zero ranks read an already valid cache concurrently with rank 0
+            # instead of waiting for it; on a miss they wait for rank 0 to build it.
+            early = None
+            if not main_process and not force_filter:
+                try:
+                    early = load_local(cache_only=True)
+                except Exception:
+                    early = None  # Never skip the broadcast below; rank 0 reports the error.
             state = [None]
             result = None
             if main_process:
@@ -1757,6 +1765,8 @@ def run(
                 raise RuntimeError(f"prepared-sample filtering failed on rank 0: {state[0]}")
             if main_process:
                 return result
+            if early is not None:
+                return early
             return load_local()  # Rank 0 has completed the shared validated-sample cache.
         return load_local()
 

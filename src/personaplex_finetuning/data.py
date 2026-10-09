@@ -41,7 +41,7 @@ _SPEAKER_ALIASES = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Word:
     speaker: Speaker
     word: str
@@ -471,7 +471,12 @@ class PreparedDataset:
         if window_seconds is not None and window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
 
-    def load(self) -> list[PreparedSample]:
+    def load(self, cache_only: bool = False) -> list[PreparedSample] | None:
+        """Validate the manifest, reusing the prepared-sample cache when it matches.
+
+        ``cache_only=True`` returns None instead of validating on a miss, so
+        non-zero DDP ranks can read a valid cache while rank 0 does the same.
+        """
         if not self.manifest.is_file():
             raise ValidationError(f"manifest does not exist: {self.manifest}")
         from .filter_cache import filter_fingerprint, load_filter_manifest, save_filter_manifest
@@ -507,6 +512,8 @@ class PreparedDataset:
                         f"{self.load_report.skipped_invalid} invalid entries"
                     )
                 return cached["samples"]
+        if cache_only:
+            return None
         samples: list[PreparedSample] = []
         rejected: list[str] = []
         skipped_out_of_bounds = 0
@@ -600,9 +607,13 @@ class PreparedDataset:
             raise ValidationError(f"manifest has no samples: {self.manifest}")
         return samples
 
-    def split(self, val_ratio: float = 0.05, seed: int = 42) -> tuple[list[PreparedSample], list[PreparedSample]]:
+    def split(
+        self, val_ratio: float = 0.05, seed: int = 42, cache_only: bool = False,
+    ) -> tuple[list[PreparedSample], list[PreparedSample]] | None:
         """Split by conversation before any temporal chunking."""
-        samples = self.load()
+        samples = self.load(cache_only=cache_only)
+        if samples is None:
+            return None
         parents = list(range(len(samples)))
 
         def find(index):
