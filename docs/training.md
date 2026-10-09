@@ -104,6 +104,22 @@ Huấn luyện DDP trên 4 GPU:
 torchrun --nproc-per-node 4 train.py --config configs/full-finetuning.yaml
 ```
 
+### DDP timeout trước update đầu tiên
+
+Nếu một rank chờ ALLREDUCE có `NumelIn=2`, còn rank khác chưa enqueue operation
+tương ứng, đó là collective thống kê audio ngay sau chuẩn bị batch. Kiểm tra log
+`training_batch_phase` trên từng rank: `audio_loader`, `mimi_dialogue_encode`,
+`prompt_and_targets`, `collate_to_device`, rồi `audio_stats_allreduce`.
+Các phase chi tiết chỉ log ở batch đầu; không thêm collective vào luồng training.
+Nếu chuẩn bị batch đầu quá 120 giây, Python stack của rank bị kẹt được in ra stderr.
+DataLoader có worker cũng timeout sau 120 giây chờ batch để báo lỗi đọc dữ liệu
+trước NCCL timeout 600 giây; khi `train.num_workers=0`, timeout worker tắt.
+
+Để tách lỗi worker khỏi encode, chạy lại cùng lệnh/config với override
+`train.num_workers=0`. Nếu vẫn kẹt, phase cuối và stack sẽ cho biết chỗ cần kiểm
+tra tiếp. Override này là phép kiểm chứng; timeout NCCL riêng lẻ chưa chứng minh
+lỗi gradient checkpointing hay lỗi kết nối GPU.
+
 ## 5. Trọng Số Loss (Loss Weights)
 
 Loss (Cross Entropy) được tính sau khi so khớp chuẩn đầu ra của logits với chuỗi gốc:

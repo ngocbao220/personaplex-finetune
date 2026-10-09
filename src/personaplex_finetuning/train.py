@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import hashlib
 import json
 import os
@@ -12,7 +13,7 @@ import sys
 import time
 import traceback
 import math
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -560,6 +561,33 @@ def _initialize_audio_worker(_worker_id: int) -> None:
     torch.set_num_threads(1)
 
 
+def log_batch_phase(rank: int, phase: str, status: str, **details) -> None:
+    print(json.dumps({"event": "training_batch_phase", "rank": rank,
+                      "phase": phase, "status": status, **details}), flush=True)
+
+
+@contextmanager
+def trace_batch_preparation(rank: int, micro_step: int, enabled: bool):
+    """Dump the blocked rank's Python stack before NCCL's 600-second timeout."""
+    if not enabled:
+        yield
+        return
+    started = time.monotonic()
+    log_batch_phase(rank, "batch_prepare", "start", micro_step=micro_step)
+    faulthandler.dump_traceback_later(120, repeat=True)
+    try:
+        yield
+    except BaseException as exc:
+        log_batch_phase(rank, "batch_prepare", "error", micro_step=micro_step,
+                        error=f"{type(exc).__name__}: {exc}")
+        raise
+    else:
+        log_batch_phase(rank, "batch_prepare", "complete", micro_step=micro_step,
+                        elapsed_sec=time.monotonic() - started)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
 def iter_training_batches(config, chunks, runtime, device, rank: int, world_size: int, smoke: bool, skip_batches: int = 0):
     """Iterate the prefiltered fixed chunks with rank stride and small batches."""
     epoch = 0
@@ -567,6 +595,7 @@ def iter_training_batches(config, chunks, runtime, device, rank: int, world_size
     if not samples:
         raise ValueError("no training chunks remain after dataset filtering")
     use_prefetch = hasattr(runtime.codec, "encode_conversation_stereo_batch")
+    trace_first_batch = world_size > 1
     loader = sampler = None
     if use_prefetch:
         sampler = RankStrideBatchSampler(
@@ -583,6 +612,9 @@ def iter_training_batches(config, chunks, runtime, device, rank: int, world_size
             "pin_memory": config.pin_memory and str(device).startswith("cuda"),
             "persistent_workers": config.persistent_workers and worker_count > 0,
             "worker_init_fn": _initialize_audio_worker if worker_count > 0 else None,
+            # Worker stalls must raise here, before peers hit the NCCL watchdog.
+            # PyTorch requires timeout=0 for in-process loading.
+            "timeout": 120 if worker_count > 0 else 0,
         }
         if worker_count > 0:
             loader_options["prefetch_factor"] = config.prefetch_factor
@@ -594,6 +626,9 @@ def iter_training_batches(config, chunks, runtime, device, rank: int, world_size
     while True:
         if use_prefetch:
             sampler.set_epoch(epoch)
+            if trace_first_batch:
+                log_batch_phase(rank, "audio_loader", "start", workers=worker_count,
+                                epoch=epoch, batch_indices=next(iter(sampler), []))
             batches = enumerate(loader)
         else:
             ordered_samples = list(samples)
@@ -623,6 +658,9 @@ def iter_training_batches(config, chunks, runtime, device, rank: int, world_size
             if use_prefetch:
                 raw_audio = batch_value
                 batch_samples = raw_audio["samples"]
+                if trace_first_batch:
+                    log_batch_phase(rank, "audio_loader", "complete",
+                                    sample_ids=[s.sample_id for s in batch_samples])
             else:
                 raw_audio = None
                 batch_samples = batch_value
@@ -647,6 +685,9 @@ def iter_training_batches(config, chunks, runtime, device, rank: int, world_size
                     )
                 prepared_batch.append(sample)
             if hasattr(runtime.codec, "encode_conversation_stereo_batch"):
+                if trace_first_batch:
+                    log_batch_phase(rank, "mimi_dialogue_encode", "start",
+                                    sample_ids=[s.sample_id for s in prepared_batch])
                 dialogue_codes = runtime.codec.encode_conversation_stereo_batch([
                     (
                         sample.conversation_wav, sample.agent_channel, sample.user_channel,
@@ -654,12 +695,20 @@ def iter_training_batches(config, chunks, runtime, device, rank: int, world_size
                     )
                     for sample in prepared_batch
                 ], raw_audio=raw_audio)
+                if trace_first_batch:
+                    log_batch_phase(rank, "mimi_dialogue_encode", "complete")
+                    log_batch_phase(rank, "prompt_and_targets", "start")
                 examples = [
                     build_example(config, sample, runtime, dialogue_codes=codes)
                     for sample, codes in zip(prepared_batch, dialogue_codes, strict=True)
                 ]
             else:
+                if trace_first_batch:
+                    log_batch_phase(rank, "prompt_and_targets", "start", includes_dialogue=True)
                 examples = [build_example(config, sample, runtime) for sample in prepared_batch]
+            if trace_first_batch:
+                log_batch_phase(rank, "prompt_and_targets", "complete")
+                log_batch_phase(rank, "collate_to_device", "start")
             fixed_frames = expected_mimi_frames(config.duration_sec, runtime.codec.frame_rate) + max(
                 (example.prompt_frames for example in examples), default=0
             )
@@ -677,6 +726,9 @@ def iter_training_batches(config, chunks, runtime, device, rank: int, world_size
             batch = post_encode_collate(
                 examples, runtime.tokenizer.padding_id, runtime.zero_token, device
             )
+            if trace_first_batch:
+                log_batch_phase(rank, "collate_to_device", "complete")
+                trace_first_batch = False
             audio_seconds = sum(
                 max(0.0, min(item.window_end_sec, item.audio.duration_sec) - item.window_start_sec)
                 for item in batch_samples
@@ -2125,7 +2177,9 @@ def run(
             profile_sync()
             data_started = time.monotonic() if config.profile_steps else 0.0
             try:
-                batch, epoch, local_samples, local_audio_seconds, local_audio_frames, batch_samples = next(batch_iterator)
+                with trace_batch_preparation(rank, micro_step,
+                                             enabled=distributed and micro_step == start_micro_step):
+                    batch, epoch, local_samples, local_audio_seconds, local_audio_frames, batch_samples = next(batch_iterator)
             except StopIteration as exc:
                 raise RuntimeError("training batch iterator stopped before max_steps") from exc
             profile_sync()
@@ -2133,9 +2187,13 @@ def run(
                 pending_profile_times[0] += time.monotonic() - data_started
             codes = batch["codes"]
             samples_seen += local_samples * world_size
+            if distributed and micro_step == start_micro_step:
+                log_batch_phase(rank, "audio_stats_allreduce", "start")
             global_audio_seconds = all_reduce_sum(
                 torch.tensor([local_audio_seconds, local_audio_frames], dtype=torch.float32, device=device)
             )
+            if distributed and micro_step == start_micro_step:
+                log_batch_phase(rank, "audio_stats_allreduce", "complete")
             audio_seconds_seen += float(global_audio_seconds[0])
             audio_frames_seen += int(global_audio_seconds[1])
 
