@@ -362,3 +362,33 @@ class BatchContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AudioWorkerPayloadTest(unittest.TestCase):
+    def test_dataset_pickle_excludes_transcripts_metadata_and_prompts(self):
+        import pickle
+        from dataclasses import replace
+        sample = PreparedSample("sample", Path("conversation.wav"), Path("voice.wav"), (),
+                                "prompt", {}, AudioInfo(24000, 2, 1), 0, 1)
+        lean = RawAudioDataset([sample], 24000)
+        heavy_sample = replace(sample, text_prompt="prompt" * 100000,
+                               metadata={"large": "metadata" * 100000},
+                               words=(object(),) * 100000)
+        heavy = RawAudioDataset([heavy_sample], 24000)
+        self.assertEqual(pickle.dumps(heavy), pickle.dumps(lean))
+        self.assertLess(len(pickle.dumps(heavy)), 1000)
+
+    def test_worker_roundtrip_preserves_index_crop_and_waveform(self):
+        import pickle
+        samples = [PreparedSample(str(i), Path(f"{i}.wav"), Path("voice.wav"), (),
+                                  "prompt", {}, AudioInfo(24000, 2, 1), .25, 1.5)
+                   for i in range(2)]
+        dataset = pickle.loads(pickle.dumps(RawAudioDataset(samples, 24000)))
+        with patch("personaplex_finetuning.batching.read_stereo_window",
+                   return_value=np.ones((2, 18000), dtype=np.float32)) as read:
+            item = dataset[1]
+        self.assertEqual(item.sample.index, 1)
+        self.assertEqual(read.call_args.args, (Path("1.wav"), .25, 1, 24000, "1"))
+        batch = collate_raw_audio([item])
+        self.assertEqual(batch["samples"][0].index, 1)
+        self.assertEqual(tuple(batch["waveforms"].shape), (1, 2, 18000))

@@ -13,6 +13,7 @@ import sys
 import time
 import traceback
 import math
+import multiprocessing
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -30,7 +31,8 @@ from .data import (
     samples_for_role_pass,
 )
 from .batching import (
-    RankStrideBatchSampler, RawAudioDataset, collate_raw_audio, post_encode_collate,
+    RankStrideBatchSampler, RawAudioDataset, _initialize_audio_worker, collate_raw_audio,
+    post_encode_collate,
 )
 from .chunk_filter import ChunkFilterResult, expected_mimi_frames, filter_text_capacity_chunks
 from .filter_cache import filter_fingerprint
@@ -554,13 +556,6 @@ def deterministic_crop_rng(seed: int, process_index: int, micro_step: int) -> ra
     return random.Random(seed + (process_index * 1_000_003) + micro_step)
 
 
-def _initialize_audio_worker(_worker_id: int) -> None:
-    """Keep each spawned audio decoder worker from oversubscribing CPU threads."""
-    for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-        os.environ[variable] = "1"
-    torch.set_num_threads(1)
-
-
 def log_batch_phase(rank: int, phase: str, status: str, **details) -> None:
     print(json.dumps({"event": "training_batch_phase", "rank": rank,
                       "phase": phase, "status": status, **details}), flush=True)
@@ -618,9 +613,12 @@ def iter_training_batches(config, chunks, runtime, device, rank: int, world_size
         }
         if worker_count > 0:
             loader_options["prefetch_factor"] = config.prefetch_factor
-            # The model has already initialized CUDA in the parent. Spawn keeps
-            # decoder workers isolated from that CUDA runtime state.
-            loader_options["multiprocessing_context"] = "spawn"
+            # The model has already initialized CUDA in the parent. Forkserver keeps
+            # decoder workers isolated from CUDA like spawn, but forks them from a
+            # small server that preloads only the light batching module instead of
+            # re-importing the whole trainer per worker (which stalled DDP startup).
+            multiprocessing.set_forkserver_preload(["personaplex_finetuning.batching"])
+            loader_options["multiprocessing_context"] = "forkserver"
         loader = torch.utils.data.DataLoader(**loader_options)
 
     while True:
@@ -630,6 +628,8 @@ def iter_training_batches(config, chunks, runtime, device, rank: int, world_size
                 log_batch_phase(rank, "audio_loader", "start", workers=worker_count,
                                 epoch=epoch, batch_indices=next(iter(sampler), []))
             batches = enumerate(loader)
+            if trace_first_batch:
+                log_batch_phase(rank, "audio_loader", "workers_started", workers=worker_count, epoch=epoch)
         else:
             ordered_samples = list(samples)
             if config.shuffle and not smoke:
@@ -657,7 +657,8 @@ def iter_training_batches(config, chunks, runtime, device, rank: int, world_size
                 continue
             if use_prefetch:
                 raw_audio = batch_value
-                batch_samples = raw_audio["samples"]
+                # Workers return lightweight descriptors, never full transcripts.
+                batch_samples = [samples[window.index] for window in raw_audio["samples"]]
                 if trace_first_batch:
                     log_batch_phase(rank, "audio_loader", "complete",
                                     sample_ids=[s.sample_id for s in batch_samples])

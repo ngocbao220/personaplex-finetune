@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
@@ -16,21 +18,41 @@ class RawAudioItem:
     valid_samples: int
 
 
+@dataclass(frozen=True)
+class AudioWindow:
+    """Worker-only descriptor; training transcripts and prompts stay in the parent."""
+    index: int
+    sample_id: str
+    conversation_wav: Path
+    start_sec: float
+    end_sec: float
+
+
+def _initialize_audio_worker(_worker_id: int) -> None:
+    """Keep each audio decoder worker from oversubscribing CPU threads."""
+    for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[variable] = "1"
+    torch.set_num_threads(1)
+
+
 class RawAudioDataset(torch.utils.data.Dataset):
     """Decode only the requested stereo window in a DataLoader worker."""
 
     def __init__(self, samples, sample_rate: int) -> None:
-        self.samples = samples
+        self.windows = [AudioWindow(
+            index, sample.sample_id, sample.conversation_wav, sample.window_start_sec,
+            min(sample.window_end_sec, sample.audio.duration_sec),
+        ) for index, sample in enumerate(samples)]
         self.sample_rate = sample_rate
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.windows)
 
     def __getitem__(self, index):
-        sample = self.samples[index]
+        sample = self.windows[index]
         audio = read_stereo_window(
-            sample.conversation_wav, sample.window_start_sec,
-            min(sample.window_end_sec, sample.audio.duration_sec), self.sample_rate, sample.sample_id,
+            sample.conversation_wav, sample.start_sec,
+            sample.end_sec, self.sample_rate, sample.sample_id,
         )
         waveform = torch.from_numpy(audio.copy())
         return RawAudioItem(sample, waveform, waveform.shape[-1])

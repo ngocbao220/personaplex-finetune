@@ -114,6 +114,11 @@ Các phase chi tiết chỉ log ở batch đầu; không thêm collective vào l
 Nếu chuẩn bị batch đầu quá 120 giây, Python stack của rank bị kẹt được in ra stderr.
 DataLoader có worker cũng timeout sau 120 giây chờ batch để báo lỗi đọc dữ liệu
 trước NCCL timeout 600 giây; khi `train.num_workers=0`, timeout worker tắt.
+Timeout DataLoader chỉ áp dụng khi chờ batch, không giới hạn `Process.start()`.
+Stack tại `popen_spawn_posix._launch` cho thấy worker chưa khởi tạo xong.
+Worker dataset chỉ chứa index, đường WAV và mốc crop; transcript, metadata và
+prompt được giữ ở tiến trình train, tránh serialize toàn bộ prepared dataset
+sang từng worker khi spawn và gửi ngược sample đầy đủ qua queue.
 
 Để tách lỗi worker khỏi encode, chạy lại cùng lệnh/config với override
 `train.num_workers=0`. Nếu vẫn kẹt, phase cuối và stack sẽ cho biết chỗ cần kiểm
