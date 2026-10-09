@@ -21,56 +21,53 @@ python -m tools.check_text_chunk_capacity --config configs/config.yaml
 - Khi train, log riêng số manifest entry bị bỏ vì timestamp ngoài audio và số chunk bị bỏ vì out-of-bounds/text-token overflow. Chi tiết nằm trong `data_filter_report.json` của run; overflow làm bỏ cả chunk, và cả hai role view nếu bật role swap.
 - `--config`: chọn YAML; `--index`: chọn mẫu theo thứ tự.
 
-## Chạy thử và huấn luyện
+## Huấn luyện
 
-Chạy kiểm tra một bước trên một GPU:
-
-```bash
-python -m train configs/moshi_overfit_10.yaml model=server --smoke
-```
-
-Overfit 10 hội thoại trên một GPU:
+Kiểm tra nhanh trên một GPU:
 
 ```bash
-python -m train configs/moshi_overfit_10.yaml model=server
+python -m train configs/overfit.yaml --smoke   # 1 bước
+python -m train configs/overfit.yaml           # overfit 10 chunk
 ```
 
-Huấn luyện đa GPU với 8 GPU, batch toàn cục 16:
+Huấn luyện 2×B200 (ví dụ `configs/train_vi_synthetic.yaml`), luôn dùng **cùng config và override dữ liệu** ở mọi bước:
 
 ```bash
-torchrun --nproc-per-node 8 -m train configs/moshi_code_style.yaml \
-  model=server batch_size=1 train.gradient_accumulation_steps=2
+CFG=configs/train_vi_synthetic.yaml
+# 1. Lọc dữ liệu + encode sẵn Mimi (chunk train và voice prompt), chạy lại an toàn
+torchrun --nproc-per-node 2 -m train $CFG --precompute-codec-cache
+# 2. (Tuỳ chọn) profile ngắn: bộ nhớ và thời gian data/forward/backward
+torchrun --nproc-per-node 2 -m train $CFG profile_steps=true epochs=null max_steps=50
+# 3. Train
+torchrun --nproc-per-node 2 -m train $CFG
 ```
 
-Tiếp tục từ checkpoint:
+Tiếp tục:
 
 ```bash
-torchrun --nproc-per-node 8 -m train configs/moshi_code_style.yaml \
-  model=server batch_size=1 train.gradient_accumulation_steps=2 \
-  --resume-from runs/moshi-code-style/<run>/checkpoints/checkpoint_000500
+# Chạy tiếp đúng run bị ngắt (cùng dữ liệu, lịch LR, vị trí batch)
+torchrun --nproc-per-node 2 -m train $CFG --resume-from runs/<run>/checkpoints/checkpoint_000500
+# Run mới từ trọng số cũ: được đổi dữ liệu/epochs; optimizer và LR bắt đầu lại
+torchrun --nproc-per-node 2 -m train $CFG --init-from runs/<run>/checkpoints/best \
+  data.prepared_dir=/path/new-data epochs=1
 ```
 
-Thay `<run>` bằng thư mục run thực tế; đường dẫn resume phải trỏ tới thư mục checkpoint có `lora.safetensors` và `training_state.pt`.
-
-Các override dạng `key=value` thay YAML cho lần chạy đó. Tham số chính:
+Override `key=value` thay YAML cho lần chạy đó. Tham số chính:
 
 | Tham số | Ý nghĩa |
 | --- | --- |
-| `model=server` | Chọn cấu hình đường dẫn model; sửa `configs/model/server.yaml` theo máy. |
-| `duration_sec` | Độ dài chunk hội thoại. |
-| `sample_number=10` / `sample_number=null` | Giữ 10 chunk hợp lệ đầu tiên sau bộ lọc hoặc dùng toàn bộ dữ liệu. |
-| `batch_size` | Số chunk mỗi GPU trong một microbatch. |
-| `train.gradient_accumulation_steps` | Số microbatch tích lũy trước mỗi cập nhật. Batch toàn cục = batch mỗi GPU × accumulation × số GPU. |
-| `max_steps` | Số lần cập nhật optimizer. |
-| `lora.rank`, `lora.scaling` | Kích thước và hệ số LoRA. |
-| `optim.lr` | Learning rate. |
-| `gradient_checkpointing` | Giảm bộ nhớ GPU khi huấn luyện. |
-| `data.swap_roles_after_pass` | Luân phiên LEFT/RIGHT làm agent giữa các epoch; cần voice prompt và text prompt cho cả hai phía. |
-| `data.vietnamese_text_mode` | Dạng text target: `diacritics` (mặc định), `no_diacritics`, hoặc `telex`. |
-
-Chọn Telex khi chạy training bằng Hydra override `data.vietnamese_text_mode=telex`.
-| `--resume-from` | Tiếp tục adapter và trạng thái optimizer từ checkpoint. |
-| `--force-filter` | Bỏ cache và chạy lại cả validate sample lẫn lọc chunk overflow. Mặc định cache tự tái sử dụng và tự tạo lại nếu manifest, asset hoặc thiết lập liên quan thay đổi. |
+| `train=b200` / `train=b200-fast` | Preset 2×B200, batch toàn cục 32: an toàn (batch 1, checkpointing) / nhanh (batch 4, không checkpointing). |
+| `data.prepared_dir` | Thư mục dữ liệu đã chuẩn bị. |
+| `data.codec_cache_dir` | Cache Mimi: `auto` = `<prepared_dir>/.mimi-cache`, đường dẫn riêng, hoặc `null` để tắt. |
+| `epochs` | Số epoch; tự tính `max_steps` từ số chunk sau lọc (log `epochs_to_steps`). `null` để dùng `max_steps`. |
+| `max_steps` | Số lần cập nhật optimizer khi `epochs: null`. |
+| `batch_size`, `train.gradient_accumulation_steps` | Batch toàn cục = batch mỗi GPU × accumulation × số GPU. |
+| `optim.lr`, `lora.rank`, `lora.scaling` | Learning rate và LoRA. |
+| `text_padding_weight`, `epad_weight` | Trọng số loss của PAD và EPAD (token bắt đầu từ). |
+| `user_loss` | Tính loss cả user audio. |
+| `data.vietnamese_text_mode` | `diacritics`, `no_diacritics` hoặc `telex`. |
+| `data.swap_roles_after_pass` | Đổi vai LEFT/RIGHT giữa các epoch; cần prompt cho cả hai phía. |
+| `--force-filter` | Bỏ cache, lọc lại sample và chunk. |
 
 ## Inference
 
@@ -118,7 +115,7 @@ torchrun --nproc-per-node 4 train.py --config configs/full-finetuning.yaml
 
 ### Trọng số loss
 
-Mặc định huấn luyện là `user_loss: false`: user audio chỉ đóng vai trò làm input context/conditioning và không bị tính loss/gradient. Khi cần chạy thử nghiệm ablation study để so sánh, bật lại bằng cờ `--user-loss` (CLI) hoặc override `user_loss=true` (Hydra). Layout forward luôn giữ nguyên 17 streams. Text token thật có weight `1.0`, PAD/END_PAD là `0.3`; semantic codebook của agent là `1.0`, bảy acoustic codebook là `0.02` (khi bật `user_loss: true`, user codebook cũng nhận trọng số tương ứng). Log tách riêng `loss/text_real`, `loss/agent_semantic`, `loss/agent_acoustic`, `loss/user_semantic` và `loss/user_acoustic`.
+Mặc định huấn luyện là `user_loss: false`: user audio chỉ đóng vai trò làm input context/conditioning và không bị tính loss/gradient. Khi cần chạy thử nghiệm ablation study để so sánh, bật lại bằng cờ `--user-loss` (CLI) hoặc override `user_loss=true` (Hydra). Layout forward luôn giữ nguyên 17 streams. Text token thật có weight `1.0`, PAD là `text_padding_weight` (`0.3`), EPAD là `epad_weight` (`1.0`); semantic codebook của agent là `1.0`, bảy acoustic codebook là `0.02` (khi bật `user_loss: true`, user codebook cũng nhận trọng số tương ứng). Log tách riêng `loss/text_real`, `loss/agent_semantic`, `loss/agent_acoustic`, `loss/user_semantic` và `loss/user_acoustic`.
 
 ## Log huấn luyện
 
