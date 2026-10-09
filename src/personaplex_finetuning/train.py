@@ -1686,7 +1686,8 @@ def precompute_codec_cache(config: Config, chunks: list, device, rank: int, worl
         codec.encode_conversation_stereo_batch([window])
         if index % 100 == 0 or index == len(local):
             print(json.dumps({
-                "event": "codec_cache_precompute", "rank": rank, "done": index, "total": len(local),
+                "event": "codec_cache_precompute", "stage": "dialogue_chunks",
+                "rank": rank, "done": index, "total": len(local),
                 "encoded": encoded, "already_cached": cached,
                 "elapsed_sec": round(time.monotonic() - started, 1),
             }), flush=True)
@@ -1698,17 +1699,28 @@ def precompute_codec_cache(config: Config, chunks: list, device, rank: int, worl
         if path is not None
     })
     prompts_encoded = prompts_cached = 0
-    for path in prompts[rank::world_size]:
+    local_prompts = prompts[rank::world_size]
+    started = time.monotonic()
+    # Voice prompts use native streaming Mimi (frame by frame), so this stage is
+    # slower per item than dialogue chunks; report progress so it never looks hung.
+    for index, path in enumerate(local_prompts, 1):
         info = codec._voice_prompt_cache_info(path)
         if info is not None and info[1].is_file():
             prompts_cached += 1
         else:
             prompts_encoded += 1
         codec.encode_voice_prompt(Path(path))
-    print(json.dumps({
-        "event": "codec_cache_precompute_voice_prompts", "rank": rank,
-        "encoded": prompts_encoded, "already_cached": prompts_cached,
-    }), flush=True)
+        if index % 50 == 0 or index == len(local_prompts):
+            print(json.dumps({
+                "event": "codec_cache_precompute_voice_prompts", "stage": "voice_prompts", "rank": rank,
+                "done": index, "total": len(local_prompts),
+                "encoded": prompts_encoded, "already_cached": prompts_cached,
+                "elapsed_sec": round(time.monotonic() - started, 1),
+            }), flush=True)
+    if not local_prompts:
+        print(json.dumps({"event": "codec_cache_precompute_voice_prompts", "rank": rank,
+                          "done": 0, "total": 0, "encoded": 0, "already_cached": 0}), flush=True)
+    print(json.dumps({"event": "codec_cache_precompute_rank_done", "rank": rank}), flush=True)
     return {"encoded": encoded, "already_cached": cached,
             "voice_prompts_encoded": prompts_encoded, "voice_prompts_cached": prompts_cached}
 
@@ -1999,10 +2011,10 @@ def run(
             }), flush=True)
 
     if precompute_codec_cache_only:
-        precompute_codec_cache(config, train_samples, device, rank, world_size)
-        barrier()
-        if main_process:
-            print(f"[Codec cache] {len(train_samples)} train chunks ready in {config.codec_cache_dir}", flush=True)
+        stats = precompute_codec_cache(config, train_samples, device, rank, world_size)
+        # No barrier: ranks may finish far apart (cached vs encoded shares) and a
+        # NCCL barrier would time out; torchrun already waits for every rank.
+        print(f"[Codec cache] rank {rank} finished: {json.dumps(stats)} dir={config.codec_cache_dir}", flush=True)
         return None
 
     init_adapter_file = None
