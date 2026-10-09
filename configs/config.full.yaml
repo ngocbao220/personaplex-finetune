@@ -27,7 +27,7 @@ model:
 # ------------------------------------------------------------------------------
 data:
   prepared_dir: /storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared # Thư mục chứa train.jsonl & samples [path]
-  codec_cache_dir: /storage-voice/voice/vdt/baottn/personaplex-otospeech-prepared/.mimi-cache # Cache mã Mimi; tạo trước bằng --precompute-codec-cache [null: tắt, path]
+  codec_cache_dir: auto           # Cache mã Mimi tại <prepared_dir>/.mimi-cache; tạo bằng --precompute-codec-cache [auto, null: tắt, path]
   window_seconds: null            # null = nạp toàn hội thoại trước khi chia theo duration_sec
   shuffle: true                   # Xáo trộn dữ liệu giữa các epoch [true: xáo trộn, false: giữ nguyên thứ tự]
   prompt_aug_prob: 0.0            # Xác suất augment text prompt đa dạng hóa [float: 0.0 -> 0.5]

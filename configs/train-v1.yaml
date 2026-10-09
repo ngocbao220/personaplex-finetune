@@ -22,7 +22,7 @@ model:
 
 data:
   prepared_dir: ../data
-  codec_cache_dir: ../data/.mimi-cache  # Fill once with --precompute-codec-cache; null disables.
+  codec_cache_dir: auto  # <prepared_dir>/.mimi-cache; fill with --precompute-codec-cache; null disables.
   window_seconds: null
   shuffle: true
   prompt_aug_prob: 0.0

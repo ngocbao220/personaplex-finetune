@@ -162,6 +162,16 @@ class ConfigTest(unittest.TestCase):
 
             self.assertEqual(load_config(config).codec_cache_dir, Path("/nvme/mimi-codes"))
 
+    def test_auto_codec_cache_follows_prepared_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "train.json"
+            for prepared in ("/data-a", "/data-b"):
+                config.write_text(
+                    '{"model":{"root":"/models/base","source":"/source"},'
+                    f'"data":{{"prepared_dir":"{prepared}","codec_cache_dir":"auto"}}}}'
+                )
+                self.assertEqual(load_config(config).codec_cache_dir, Path(prepared) / ".mimi-cache")
+
     def test_profile_steps_is_an_explicit_training_setting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "train.yaml"

@@ -239,8 +239,14 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     )
     codec_cache_raw = data.get("codec_cache_dir")
     if codec_cache_raw is not None and (not isinstance(codec_cache_raw, str) or not codec_cache_raw.strip()):
-        raise ValueError("data.codec_cache_dir must be null or a non-empty path")
-    codec_cache_dir = resolve(data, "codec_cache_dir") if codec_cache_raw is not None else None
+        raise ValueError("data.codec_cache_dir must be null, auto, or a non-empty path")
+    if codec_cache_raw is None:
+        codec_cache_dir = None
+    elif codec_cache_raw.strip() == "auto":
+        # Follow the dataset: switching prepared_dir switches the cache with it.
+        codec_cache_dir = prepared_dir / ".mimi-cache"
+    else:
+        codec_cache_dir = resolve(data, "codec_cache_dir")
     qlora = bool(lora.get("qlora", False)) if isinstance(lora, dict) else False
     quant_type = str(lora.get("quant_type", "nf4")).lower() if isinstance(lora, dict) else "nf4"
     if quant_type not in {"nf4", "fp4"}:

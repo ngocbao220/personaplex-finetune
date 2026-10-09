@@ -1,7 +1,7 @@
 # Vietnamese Fine tuning
 prepared_dir: ../data
-# Mimi code cache (fill once: train.py ... --precompute-codec-cache). null disables caching.
-codec_cache_dir: ../data/.mimi-cache
+# Mimi code cache (fill once: train.py ... --precompute-codec-cache). null disables.
+codec_cache_dir: auto  # <prepared_dir>/.mimi-cache; or an explicit path
 window_seconds: null # null loads the full conversation; duration_sec chunks it during training.
 shuffle: true
 prompt_aug_prob: 0.0
