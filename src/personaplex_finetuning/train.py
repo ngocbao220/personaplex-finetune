@@ -28,6 +28,7 @@ from .data import (
     conversation_group_keys,
     duration_chunks,
     limit_conversations,
+    read_stereo_window,
     samples_for_role_pass,
 )
 from .batching import (
@@ -1676,21 +1677,58 @@ def precompute_codec_cache(config: Config, chunks: list, device, rank: int, worl
     local = chunks[rank::world_size]
     encoded = cached = 0
     started = time.monotonic()
-    for index, sample in enumerate(local, 1):
-        window = (sample.conversation_wav, sample.agent_channel, sample.user_channel,
-                  sample.window_start_sec, sample.window_end_sec)
-        if codec._conversation_cache_info(window[0], window[3], window[4])[1].is_file():
-            cached += 1
-        else:
-            encoded += 1
-        codec.encode_conversation_stereo_batch([window])
-        if index % 100 == 0 or index == len(local):
-            print(json.dumps({
-                "event": "codec_cache_precompute", "stage": "dialogue_chunks",
-                "rank": rank, "done": index, "total": len(local),
-                "encoded": encoded, "already_cached": cached,
-                "elapsed_sec": round(time.monotonic() - started, 1),
-            }), flush=True)
+    # Mimi stays batch-1 per channel (batched encodes change the codes), so the
+    # GPU step is fixed; decode/resample uncached windows on CPU threads ahead of it.
+    from concurrent.futures import ThreadPoolExecutor
+    from collections import deque
+    import numpy as np
+
+    def read_window(sample):
+        audio = read_stereo_window(Path(sample.conversation_wav), sample.window_start_sec,
+                                   sample.window_end_sec, codec.sample_rate, str(sample.conversation_wav))
+        return torch.from_numpy(np.ascontiguousarray(audio))
+
+    reader_threads = max(1, min(32, int(getattr(config, "filter_num_workers", 16))))
+    lookahead = reader_threads * 4
+    with ThreadPoolExecutor(max_workers=reader_threads, thread_name_prefix="mimi-read") as pool:
+        queue: deque = deque()
+        position = 0
+
+        def refill():
+            nonlocal position
+            while position < len(local) and len(queue) < lookahead:
+                sample = local[position]
+                position += 1
+                hit = codec._conversation_cache_info(
+                    sample.conversation_wav, sample.window_start_sec, sample.window_end_sec,
+                )[1].is_file()
+                queue.append((sample, hit, None if hit else pool.submit(read_window, sample)))
+
+        refill()
+        index = 0
+        while queue:
+            sample, hit, future = queue.popleft()
+            refill()
+            index += 1
+            window = (sample.conversation_wav, sample.agent_channel, sample.user_channel,
+                      sample.window_start_sec, sample.window_end_sec)
+            if hit:
+                cached += 1
+            else:
+                encoded += 1
+                audio = future.result()
+                if audio.ndim == 2 and audio.shape[0] != 2 and audio.shape[1] == 2:
+                    audio = audio.T.contiguous()
+                codec.encode_conversation_stereo_batch([window], raw_audio={
+                    "waveforms": audio.unsqueeze(0), "valid_samples": [audio.shape[-1]],
+                })
+            if index % 100 == 0 or index == len(local):
+                print(json.dumps({
+                    "event": "codec_cache_precompute", "stage": "dialogue_chunks",
+                    "rank": rank, "done": index, "total": len(local),
+                    "encoded": encoded, "already_cached": cached,
+                    "elapsed_sec": round(time.monotonic() - started, 1),
+                }), flush=True)
     # Voice prompts: one per conversation (both roles when passes swap speakers).
     prompts = sorted({
         str(path) for sample in chunks
