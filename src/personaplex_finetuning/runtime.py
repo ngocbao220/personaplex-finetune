@@ -112,6 +112,9 @@ class MimiCodec:
         self.device = device
         self._helpers = lm_helpers
         self._voice_cache: dict[str, tuple[tuple[int, ...], ...]] = {}
+        # The training batch prefetch thread and evaluation may both encode; Mimi's
+        # streaming state is not thread-safe, so live encodes are serialized.
+        self._mimi_lock = threading.RLock()
         # Cumulative per-process counters: disk-cache hits vs live Mimi encodes.
         self.cache_stats = {"dialogue_cache_hit": 0, "dialogue_encoded": 0,
                             "voice_cache_hit": 0, "voice_encoded": 0}
@@ -327,7 +330,7 @@ class MimiCodec:
         if audio.ndim == 1:
             audio = audio[None, :]
         frame_size = int(self.sample_rate / self.frame_rate)
-        with torch.no_grad(), self.mimi.streaming(1):
+        with self._mimi_lock, torch.no_grad(), self.mimi.streaming(1):
             native_frames = list(self._helpers.encode_from_sphn(
                 self.mimi,
                 self._helpers._iterate_audio(audio[:1], frame_size, pad=True),
@@ -371,7 +374,8 @@ class MimiCodec:
         if audio.ndim != 2 or audio.shape[0] != 1 or audio.shape[-1] == 0:
             raise ValueError("Mimi encoding requires one nonempty mono channel [1,T]")
         # A shared contract avoids batch-dependent quantization and inherited LM autocast.
-        with torch.no_grad(), torch.autocast(device_type=torch.device(self.device).type, enabled=False):
+        with self._mimi_lock, torch.no_grad(), \
+                torch.autocast(device_type=torch.device(self.device).type, enabled=False):
             codes = self.mimi.encode(audio.unsqueeze(0))[0]
         return tuple(tuple(int(token) for token in stream.tolist()) for stream in codes)
 

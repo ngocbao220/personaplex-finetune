@@ -609,6 +609,62 @@ def deterministic_crop_rng(seed: int, process_index: int, micro_step: int) -> ra
     return random.Random(seed + (process_index * 1_000_003) + micro_step)
 
 
+class BackgroundBatchPrefetcher:
+    """Run a batch generator in a daemon thread, keeping ``depth`` batches ready.
+
+    Batch preparation (cache reads, prompt/target building, tensor creation) runs
+    on the CPU while the GPU trains the current batch. Order is unchanged, so
+    training stays deterministic; generator exceptions re-raise in the caller.
+    """
+
+    _DONE = object()
+
+    def __init__(self, iterator, depth: int) -> None:
+        import queue
+        import threading
+
+        if depth < 1:
+            raise ValueError("prefetch depth must be positive")
+        self._queue = queue.Queue(maxsize=depth)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, args=(iterator,), name="batch-prefetch", daemon=True)
+        self._thread.start()
+
+    def _run(self, iterator) -> None:
+        try:
+            for item in iterator:
+                if not self._put((True, item)):
+                    return
+            self._put((True, self._DONE))
+        except BaseException as exc:  # Surface errors on the training thread.
+            self._put((False, exc))
+
+    def _put(self, item) -> bool:
+        import queue
+
+        while not self._stop.is_set():
+            try:
+                self._queue.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        ok, item = self._queue.get()
+        if not ok:
+            raise item
+        if item is self._DONE:
+            raise StopIteration
+        return item
+
+    def close(self) -> None:
+        self._stop.set()
+
+
 def log_batch_phase(rank: int, phase: str, status: str, **details) -> None:
     print(json.dumps({"event": "training_batch_phase", "rank": rank,
                       "phase": phase, "status": status, **details}), flush=True)
@@ -2336,6 +2392,9 @@ def run(
             config, train_samples, runtime, device, rank,
             world_size, smoke, skip_batches=start_micro_step,
         ))
+        if config.batch_prefetch > 0 and not smoke:
+            # Overlap CPU batch building with GPU compute instead of idling the GPU.
+            batch_iterator = BackgroundBatchPrefetcher(batch_iterator, config.batch_prefetch)
         samples_seen = 0
         audio_seconds_seen = 0.0
         audio_frames_seen = 0
@@ -2761,6 +2820,8 @@ def run(
             # work. Start the next timing window only after they have completed.
             update_started_at = None
 
+        if isinstance(batch_iterator, BackgroundBatchPrefetcher):
+            batch_iterator.close()
         if log_file:
             log_file.close()
         if progress is not None:

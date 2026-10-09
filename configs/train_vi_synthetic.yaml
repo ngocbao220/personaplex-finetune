@@ -67,6 +67,7 @@ train:
   num_workers: 4              # DataLoader audio workers per GPU.
   filter_num_workers: 224     # CPU workers for prepared-sample validation and chunk overflow filtering.
   prefetch_factor: 2
+  batch_prefetch: 2           # Training batches built ahead in a background thread; 0 disables.
   pin_memory: true
   persistent_workers: true
   gradient_checkpointing: false  # Batch 4 without checkpointing; if OOM use batch_size 2 + accum 8.
