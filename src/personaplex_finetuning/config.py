@@ -74,6 +74,12 @@ class Config:
     no_eval: bool = False
     ckpt_freq: int = 50
     eval_on_train_samples: bool = False
+    # Text vocabulary: "personaplex" keeps the original SentencePiece 32k; "vit5"
+    # swaps in another SentencePiece model behind text_vocab.TranslatedTokenizer.
+    text_tokenizer: str = "personaplex"
+    text_tokenizer_path: Path | None = None
+    text_head_init: str = "decomposition"
+    text_vocab_learning_rate: float = 1e-4
 
     @property
     def manifest(self) -> Path:
@@ -311,7 +317,28 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     if not 0 < pct_start < 1:
         raise ValueError("optim.pct_start must be strictly between 0 and 1")
 
+    text_tokenizer = str(model.get("text_tokenizer") or "personaplex").lower()
+    if text_tokenizer not in {"personaplex", "vit5"}:
+        raise ValueError("model.text_tokenizer must be personaplex or vit5")
+    text_tokenizer_path = resolve(model, "text_tokenizer_path") if model.get("text_tokenizer_path") else None
+    if text_tokenizer != "personaplex":
+        if text_tokenizer_path is None or not text_tokenizer_path.is_file():
+            raise ValueError(
+                f"model.text_tokenizer={text_tokenizer} requires an existing local "
+                f"model.text_tokenizer_path (got {text_tokenizer_path})"
+            )
+    text_head_init = str(model.get("text_head_init") or "decomposition").lower()
+    if text_head_init not in {"decomposition", "random"}:
+        raise ValueError("model.text_head_init must be decomposition or random")
+    text_vocab_learning_rate = float(train.get("text_vocab_learning_rate", 1e-4)) if isinstance(train, dict) else 1e-4
+    if text_vocab_learning_rate <= 0:
+        raise ValueError("train.text_vocab_learning_rate must be positive")
+
     return Config(
+        text_tokenizer=text_tokenizer,
+        text_tokenizer_path=text_tokenizer_path,
+        text_head_init=text_head_init,
+        text_vocab_learning_rate=text_vocab_learning_rate,
         path=path,
         model_root=resolve(model, "root"),
         personaplex_source=resolve(model, "source"),

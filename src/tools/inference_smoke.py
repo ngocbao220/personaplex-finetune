@@ -99,8 +99,10 @@ def main() -> int:
     )
     parser.add_argument("--index", type=int, default=None, help="Sample index in dataset to evaluate.")
     parser.add_argument(
-        "--split", choices=("train", "validation", "test"), default="train",
-        help="Conversation split used with --index; ignored when --sample-id is set.",
+        "--split", choices=("train", "validation", "test", "prepared"), default=None,
+        help="Conversation split used with --index; ignored when --sample-id is set. "
+             "'prepared' = raw manifest order (index 0 = first line of the prepared dir's "
+             "train.jsonl), filtering only the selected window.",
     )
     parser.add_argument(
         "--sample-id", default=None,
@@ -157,6 +159,10 @@ def main() -> int:
     # Sampling parameters for LMGen; unknown keys or bad values fail here, before any
     # model is loaded, so a typo cannot silently produce a different generation.
     generation = generation_from_config(raw_conf)
+    if args.split is None:
+        args.split = str(inf_sec.get("split", "train")) if hasattr(inf_sec, "get") else "train"
+    if args.split not in ("train", "validation", "test", "prepared"):
+        raise ValueError(f"inference.split must be train/validation/test/prepared, got {args.split!r}")
     sample_index = args.index if args.index is not None else int(inf_sec.get("sample_index", 0) if hasattr(inf_sec, "get") else 0)
     configured_sample_id = inf_sec.get("sample_id") if hasattr(inf_sec, "get") else None
     sample_id = args.sample_id if args.sample_id is not None else configured_sample_id
@@ -285,7 +291,7 @@ def main() -> int:
             )
             samples = [sample]
             logger.info("selected sample_id=%s from manifest=%s", sample_id, selected_manifest)
-        elif args.split == "train":
+        elif args.split in ("train", "prepared"):
             selected_manifest = config.manifest
             logger.info("loading split=%s window_seconds=%s", args.split, window_seconds)
             samples = PreparedDataset(
@@ -327,10 +333,22 @@ def main() -> int:
             if filter_model_root and getattr(config, "personaplex_source", None):
                 try:
                     resolved = RuntimePaths(filter_model_root, config.personaplex_source).validate(require_model=False)
-                    tokenizer = SentencePieceTokenizer(resolved.tokenizer)
+                    from personaplex_finetuning.inference import checkpoint_text_tokenizer
+                    from personaplex_finetuning.text_vocab import build_text_tokenizer, tokenizer_fingerprint_path
+                    checkpoint_for_vocab = adapter_path if adapter_path.exists() else None
+                    vocab_kind, vocab_path = checkpoint_text_tokenizer(config, checkpoint_for_vocab)
+                    tokenizer = (
+                        SentencePieceTokenizer(resolved.tokenizer) if vocab_kind == "personaplex"
+                        else build_text_tokenizer(resolved.tokenizer, vocab_kind, vocab_path)
+                    )
+                    filter_tokenizer_path = tokenizer_fingerprint_path(resolved.tokenizer, tokenizer)
+                except ValueError:
+                    raise  # Text-vocabulary mismatch must not silently fall back.
                 except Exception:
                     tokenizer = None
-            if tokenizer is not None and start_sec is None:
+            # 'prepared' keeps manifest order: index first, then validate only that window.
+            exact_selection = start_sec is not None or args.split == "prepared"
+            if tokenizer is not None and not exact_selection:
                 candidates_before_filter = len(samples)
                 filter_result = filter_text_capacity_chunks(
                     samples,
@@ -348,7 +366,7 @@ def main() -> int:
                             "val_ratio": config.val_ratio, "seed": config.seed,
                             "vietnamese_text_mode": config.vietnamese_text_mode,
                             "chunks": [(s.sample_id, s.window_start_sec, s.window_end_sec) for s in samples],
-                        }, resolved.tokenizer,
+                        }, filter_tokenizer_path,
                     ),
                     force_filter=args.force_filter,
                 )
@@ -414,7 +432,7 @@ def main() -> int:
                     voice_prompt_wav=voice_prompt if voice_prompt is not None else sample.voice_prompt_wav,
                     text_prompt=text_prompt if text_prompt is not None else sample.text_prompt,
                 )
-            if tokenizer is not None and start_sec is not None:
+            if tokenizer is not None and exact_selection:
                 exact_window_result = filter_text_capacity_chunks(
                     [sample],
                     tokenizer,
@@ -430,7 +448,7 @@ def main() -> int:
                             "sample_id": sample.sample_id,
                             "vietnamese_text_mode": config.vietnamese_text_mode,
                             "chunks": [(sample.sample_id, sample.window_start_sec, sample.window_end_sec)],
-                        }, resolved.tokenizer,
+                        }, filter_tokenizer_path,
                     ),
                     force_filter=args.force_filter,
                 )

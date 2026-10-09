@@ -256,6 +256,38 @@ def is_full_checkpoint(checkpoint: Path) -> bool:
     return (directory / "checkpoint.json").is_file() or checkpoint.name == "model.safetensors"
 
 
+def decode_text_tokens(tokenizer, token_ids) -> str:
+    """Decode generated text IDs with the tokenizer that produced the training targets."""
+    if hasattr(tokenizer, "decode"):
+        return str(tokenizer.decode(token_ids))
+    processor = tokenizer._processor
+    if hasattr(processor, "decode_ids"):
+        return str(processor.decode_ids(token_ids))
+    return "".join(processor.id_to_piece(token) for token in token_ids).strip()
+
+
+def checkpoint_text_tokenizer(config, checkpoint: Path | None) -> tuple[str, Path | None]:
+    """Text vocabulary for inference: the checkpoint's, verified against the config."""
+    from .text_vocab import TranslatedTokenizer, read_text_vocab_metadata, verify_text_vocab
+
+    metadata = read_text_vocab_metadata(checkpoint) if checkpoint is not None else None
+    configured = getattr(config, "text_tokenizer", "personaplex")
+    configured = configured if isinstance(configured, str) else "personaplex"
+    path = getattr(config, "text_tokenizer_path", None)
+    path = path if isinstance(path, (str, Path)) else None
+    if metadata is None:
+        if checkpoint is not None and configured != "personaplex":
+            raise ValueError(
+                f"checkpoint {checkpoint} was trained with the personaplex text vocabulary, "
+                f"but model.text_tokenizer={configured}"
+            )
+        return configured, path
+    if path is None:
+        path = Path(metadata["tokenizer_path"])
+    verify_text_vocab(metadata, TranslatedTokenizer(path))
+    return "vit5" if configured == "personaplex" else configured, path
+
+
 def checkpoint_model_root(checkpoint: Path) -> Path | None:
     if is_full_checkpoint(checkpoint):
         _, metadata = resolve_full_checkpoint(checkpoint)
@@ -305,7 +337,11 @@ def generate(
     model_root = adapter_model_root or Path(config.model_root)
     if adapter_model_root is not None and adapter_model_root != Path(config.model_root).expanduser().resolve():
         logger.info("using training base model from adapter metadata: %s", model_root)
-    runtime = load_runtime(RuntimePaths(model_root, config.personaplex_source), config.device, config.qlora, config.quant_type)
+    text_tokenizer, text_tokenizer_path = checkpoint_text_tokenizer(config, full_checkpoint or adapter_file)
+    runtime = load_runtime(
+        RuntimePaths(model_root, config.personaplex_source), config.device, config.qlora, config.quant_type,
+        text_tokenizer=text_tokenizer, text_tokenizer_path=text_tokenizer_path,
+    )
     if full_checkpoint is not None:
         load_full_weights(runtime.model, full_checkpoint)
     if adapter_file is not None:
@@ -348,12 +384,9 @@ def generate(
         raise RuntimeError("native PersonaPlex generation produced no frames")
     output_wav.parent.mkdir(parents=True, exist_ok=True)
     sphn.write_wav(str(output_wav), np.concatenate(pcm_frames), runtime.codec.sample_rate)
-    # SentencePiece decode_ids merges multi-byte tokens into clean Vietnamese text
-    if hasattr(runtime.tokenizer._processor, "decode_ids"):
-        cleaned_text = runtime.tokenizer._processor.decode_ids(text_token_ids)
-    else:
-        pieces = [runtime.tokenizer._processor.id_to_piece(t) for t in text_token_ids]
-        cleaned_text = "".join(pieces).replace(" ", " ").strip()
+    # SentencePiece decode merges multi-byte tokens into clean Vietnamese text; a
+    # translated vocabulary (text_vocab.py) maps IDs back before decoding.
+    cleaned_text = decode_text_tokens(runtime.tokenizer, text_token_ids)
     write_generated_text(output_text, cleaned_text, config.vietnamese_text_mode)
 
 
@@ -449,10 +482,7 @@ def generate_text_with_runtime(
             sphn.write_wav(
                 str(output_wav), audio, runtime.codec.sample_rate,
             )
-        processor = runtime.tokenizer._processor
-        if hasattr(processor, "decode_ids"):
-            return str(processor.decode_ids(token_ids))
-        return "".join(processor.id_to_piece(token) for token in token_ids).strip()
+        return decode_text_tokens(runtime.tokenizer, token_ids)
     finally:
         model.train(was_training)
 

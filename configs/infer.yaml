@@ -24,6 +24,8 @@ generation:
 # Inference input and evaluation settings
 inference:
   filter_num_workers: 64   # CPU workers for prepared-sample validation and chunk overflow filtering.
+  split: prepared          # prepared = thứ tự gốc trong train.jsonl của prepared_dir (sample_index 0 = dòng đầu); train/validation/test = sau lọc chunk.
+  sample_index: 0
   sample_id: null          # Tìm sample_id trên mọi manifest đã cấu hình; không phụ thuộc train/validation/test split.
   input_file: null         # WAV/MP3 user audio ngoài; vẫn dùng conditioning từ sample_id nếu không truyền đủ hai prompt riêng.
   voice_prompt: null       # Đường dẫn file audio WAV voice prompt của agent (mẫu giọng); nếu để null sẽ lấy theo sample_id

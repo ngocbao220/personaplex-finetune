@@ -1,0 +1,998 @@
+[
+  {
+    "speaker": "agent",
+    "word": "Dạo",
+    "start": 0.0,
+    "end": 0.2968
+  },
+  {
+    "speaker": "agent",
+    "word": "này",
+    "start": 0.2968,
+    "end": 0.5937
+  },
+  {
+    "speaker": "agent",
+    "word": "tôi",
+    "start": 0.5937,
+    "end": 0.8905
+  },
+  {
+    "speaker": "agent",
+    "word": "hơi",
+    "start": 0.8905,
+    "end": 1.1874
+  },
+  {
+    "speaker": "agent",
+    "word": "tò",
+    "start": 1.1874,
+    "end": 1.4842
+  },
+  {
+    "speaker": "agent",
+    "word": "mò",
+    "start": 1.4842,
+    "end": 1.7811
+  },
+  {
+    "speaker": "agent",
+    "word": "về",
+    "start": 1.7811,
+    "end": 2.0779
+  },
+  {
+    "speaker": "agent",
+    "word": "việc",
+    "start": 2.0779,
+    "end": 2.3747
+  },
+  {
+    "speaker": "agent",
+    "word": "làm",
+    "start": 2.3747,
+    "end": 2.6716
+  },
+  {
+    "speaker": "agent",
+    "word": "vườn",
+    "start": 2.6716,
+    "end": 2.9684
+  },
+  {
+    "speaker": "agent",
+    "word": "tức",
+    "start": 2.9684,
+    "end": 3.2653
+  },
+  {
+    "speaker": "agent",
+    "word": "là",
+    "start": 3.2653,
+    "end": 3.5621
+  },
+  {
+    "speaker": "agent",
+    "word": "bạn",
+    "start": 3.5621,
+    "end": 3.8589
+  },
+  {
+    "speaker": "agent",
+    "word": "đã",
+    "start": 3.8589,
+    "end": 4.1558
+  },
+  {
+    "speaker": "agent",
+    "word": "từng",
+    "start": 4.1558,
+    "end": 4.4526
+  },
+  {
+    "speaker": "agent",
+    "word": "thử",
+    "start": 4.4526,
+    "end": 4.7495
+  },
+  {
+    "speaker": "agent",
+    "word": "trồng",
+    "start": 4.7495,
+    "end": 5.0463
+  },
+  {
+    "speaker": "agent",
+    "word": "cây",
+    "start": 5.0463,
+    "end": 5.3432
+  },
+  {
+    "speaker": "agent",
+    "word": "chưa",
+    "start": 5.3432,
+    "end": 5.64
+  },
+  {
+    "speaker": "user",
+    "word": "Ồ",
+    "start": 6.1531,
+    "end": 6.5131
+  },
+  {
+    "speaker": "user",
+    "word": "tất",
+    "start": 6.5131,
+    "end": 6.8731
+  },
+  {
+    "speaker": "user",
+    "word": "nhiên",
+    "start": 6.8731,
+    "end": 7.2331
+  },
+  {
+    "speaker": "user",
+    "word": "rồi",
+    "start": 7.2331,
+    "end": 7.5931
+  },
+  {
+    "speaker": "user",
+    "word": "Ừm",
+    "start": 7.5931,
+    "end": 7.7802
+  },
+  {
+    "speaker": "agent",
+    "word": "ừ",
+    "start": 7.5931,
+    "end": 8.3031
+  },
+  {
+    "speaker": "user",
+    "word": "tôi",
+    "start": 7.7802,
+    "end": 7.9674
+  },
+  {
+    "speaker": "user",
+    "word": "thích",
+    "start": 7.9674,
+    "end": 8.1545
+  },
+  {
+    "speaker": "user",
+    "word": "cái",
+    "start": 8.1545,
+    "end": 8.3417
+  },
+  {
+    "speaker": "user",
+    "word": "ý",
+    "start": 8.3417,
+    "end": 8.5288
+  },
+  {
+    "speaker": "user",
+    "word": "tưởng",
+    "start": 8.5288,
+    "end": 8.7159
+  },
+  {
+    "speaker": "user",
+    "word": "nuôi",
+    "start": 8.7159,
+    "end": 8.9031
+  },
+  {
+    "speaker": "user",
+    "word": "dưỡng",
+    "start": 8.9031,
+    "end": 9.0902
+  },
+  {
+    "speaker": "user",
+    "word": "sự",
+    "start": 9.0902,
+    "end": 9.2774
+  },
+  {
+    "speaker": "user",
+    "word": "sống",
+    "start": 9.2774,
+    "end": 9.4645
+  },
+  {
+    "speaker": "user",
+    "word": "từ",
+    "start": 9.4645,
+    "end": 9.6517
+  },
+  {
+    "speaker": "user",
+    "word": "hạt",
+    "start": 9.6517,
+    "end": 9.8388
+  },
+  {
+    "speaker": "user",
+    "word": "giống",
+    "start": 9.8388,
+    "end": 10.0259
+  },
+  {
+    "speaker": "user",
+    "word": "lắm",
+    "start": 10.0259,
+    "end": 10.2131
+  },
+  {
+    "speaker": "user",
+    "word": "Mà",
+    "start": 10.2131,
+    "end": 10.6931
+  },
+  {
+    "speaker": "agent",
+    "word": "surprisewow",
+    "start": 10.3018,
+    "end": 10.6818
+  },
+  {
+    "speaker": "agent",
+    "word": "Ồ",
+    "start": 10.6818,
+    "end": 11.0617
+  },
+  {
+    "speaker": "agent",
+    "word": "vậy",
+    "start": 11.0617,
+    "end": 11.4418
+  },
+  {
+    "speaker": "agent",
+    "word": "là",
+    "start": 11.4418,
+    "end": 11.8217
+  },
+  {
+    "speaker": "agent",
+    "word": "bạn",
+    "start": 11.8217,
+    "end": 12.2018
+  },
+  {
+    "speaker": "agent",
+    "word": "đã",
+    "start": 12.2018,
+    "end": 12.5817
+  },
+  {
+    "speaker": "agent",
+    "word": "từng",
+    "start": 12.5817,
+    "end": 12.9618
+  },
+  {
+    "speaker": "agent",
+    "word": "trồng",
+    "start": 12.9618,
+    "end": 13.3418
+  },
+  {
+    "speaker": "agent",
+    "word": "cây",
+    "start": 13.3418,
+    "end": 13.7218
+  },
+  {
+    "speaker": "agent",
+    "word": "rồi",
+    "start": 13.7218,
+    "end": 14.1017
+  },
+  {
+    "speaker": "agent",
+    "word": "Tôi",
+    "start": 14.1017,
+    "end": 14.4506
+  },
+  {
+    "speaker": "agent",
+    "word": "luôn",
+    "start": 14.4506,
+    "end": 14.7995
+  },
+  {
+    "speaker": "agent",
+    "word": "muốn",
+    "start": 14.7995,
+    "end": 15.1484
+  },
+  {
+    "speaker": "agent",
+    "word": "thử",
+    "start": 15.1484,
+    "end": 15.4973
+  },
+  {
+    "speaker": "agent",
+    "word": "tôi",
+    "start": 15.4973,
+    "end": 15.8462
+  },
+  {
+    "speaker": "agent",
+    "word": "nghĩ",
+    "start": 15.8462,
+    "end": 16.1951
+  },
+  {
+    "speaker": "agent",
+    "word": "mình",
+    "start": 16.1951,
+    "end": 16.544
+  },
+  {
+    "speaker": "agent",
+    "word": "sẽ",
+    "start": 16.544,
+    "end": 16.8929
+  },
+  {
+    "speaker": "agent",
+    "word": "thích",
+    "start": 16.8929,
+    "end": 17.2417
+  },
+  {
+    "speaker": "agent",
+    "word": "trồng",
+    "start": 17.2417,
+    "end": 17.5906
+  },
+  {
+    "speaker": "agent",
+    "word": "cà",
+    "start": 17.5906,
+    "end": 17.9395
+  },
+  {
+    "speaker": "agent",
+    "word": "chua",
+    "start": 17.9395,
+    "end": 18.2884
+  },
+  {
+    "speaker": "agent",
+    "word": "chúng",
+    "start": 18.2884,
+    "end": 18.6373
+  },
+  {
+    "speaker": "agent",
+    "word": "rất",
+    "start": 18.6373,
+    "end": 18.9862
+  },
+  {
+    "speaker": "agent",
+    "word": "linh",
+    "start": 18.9862,
+    "end": 19.3351
+  },
+  {
+    "speaker": "agent",
+    "word": "hoạt",
+    "start": 19.3351,
+    "end": 19.684
+  },
+  {
+    "speaker": "agent",
+    "word": "và",
+    "start": 19.684,
+    "end": 20.0329
+  },
+  {
+    "speaker": "agent",
+    "word": "ngon",
+    "start": 20.0329,
+    "end": 20.3818
+  },
+  {
+    "speaker": "agent",
+    "word": "Còn",
+    "start": 20.3818,
+    "end": 20.8117
+  },
+  {
+    "speaker": "agent",
+    "word": "bạn",
+    "start": 20.8117,
+    "end": 21.2417
+  },
+  {
+    "speaker": "agent",
+    "word": "thì",
+    "start": 21.2417,
+    "end": 21.6717
+  },
+  {
+    "speaker": "agent",
+    "word": "sao",
+    "start": 21.6717,
+    "end": 22.1018
+  },
+  {
+    "speaker": "user",
+    "word": "Nghe",
+    "start": 22.2767,
+    "end": 22.64
+  },
+  {
+    "speaker": "user",
+    "word": "tuyệt",
+    "start": 22.64,
+    "end": 23.0033
+  },
+  {
+    "speaker": "user",
+    "word": "quá",
+    "start": 23.0033,
+    "end": 23.3667
+  },
+  {
+    "speaker": "user",
+    "word": "Cà",
+    "start": 23.3667,
+    "end": 23.6042
+  },
+  {
+    "speaker": "agent",
+    "word": "ừ",
+    "start": 23.3667,
+    "end": 24.0767
+  },
+  {
+    "speaker": "user",
+    "word": "chua",
+    "start": 23.6042,
+    "end": 23.8417
+  },
+  {
+    "speaker": "user",
+    "word": "là",
+    "start": 23.8417,
+    "end": 24.0792
+  },
+  {
+    "speaker": "user",
+    "word": "lựa",
+    "start": 24.0792,
+    "end": 24.3167
+  },
+  {
+    "speaker": "user",
+    "word": "chọn",
+    "start": 24.3167,
+    "end": 24.5542
+  },
+  {
+    "speaker": "user",
+    "word": "tuyệt",
+    "start": 24.5542,
+    "end": 24.7917
+  },
+  {
+    "speaker": "agent",
+    "word": "surprisewow",
+    "start": 24.7656,
+    "end": 25.2981
+  },
+  {
+    "speaker": "user",
+    "word": "vời",
+    "start": 24.7917,
+    "end": 25.0292
+  },
+  {
+    "speaker": "user",
+    "word": "và",
+    "start": 25.0292,
+    "end": 25.2667
+  },
+  {
+    "speaker": "agent",
+    "word": "Cảm",
+    "start": 25.2981,
+    "end": 25.8306
+  },
+  {
+    "speaker": "agent",
+    "word": "ơn",
+    "start": 25.8306,
+    "end": 26.3631
+  },
+  {
+    "speaker": "agent",
+    "word": "bạn",
+    "start": 26.3631,
+    "end": 26.8956
+  },
+  {
+    "speaker": "agent",
+    "word": "Tôi",
+    "start": 26.8956,
+    "end": 27.2072
+  },
+  {
+    "speaker": "agent",
+    "word": "thực",
+    "start": 27.2072,
+    "end": 27.5189
+  },
+  {
+    "speaker": "agent",
+    "word": "sự",
+    "start": 27.5189,
+    "end": 27.8306
+  },
+  {
+    "speaker": "agent",
+    "word": "không",
+    "start": 27.8306,
+    "end": 28.1423
+  },
+  {
+    "speaker": "agent",
+    "word": "thể",
+    "start": 28.1423,
+    "end": 28.4539
+  },
+  {
+    "speaker": "agent",
+    "word": "chờ",
+    "start": 28.4539,
+    "end": 28.7656
+  },
+  {
+    "speaker": "agent",
+    "word": "để",
+    "start": 28.7656,
+    "end": 29.0772
+  },
+  {
+    "speaker": "agent",
+    "word": "bắt",
+    "start": 29.0772,
+    "end": 29.3889
+  },
+  {
+    "speaker": "agent",
+    "word": "đầu",
+    "start": 29.3889,
+    "end": 29.7006
+  },
+  {
+    "speaker": "agent",
+    "word": "khu",
+    "start": 29.7006,
+    "end": 30.0123
+  },
+  {
+    "speaker": "agent",
+    "word": "vườn",
+    "start": 30.0123,
+    "end": 30.3239
+  },
+  {
+    "speaker": "agent",
+    "word": "nhỏ",
+    "start": 30.3239,
+    "end": 30.6356
+  },
+  {
+    "speaker": "agent",
+    "word": "của",
+    "start": 30.6356,
+    "end": 30.9473
+  },
+  {
+    "speaker": "agent",
+    "word": "mình",
+    "start": 30.9473,
+    "end": 31.2589
+  },
+  {
+    "speaker": "agent",
+    "word": "và",
+    "start": 31.2589,
+    "end": 31.5706
+  },
+  {
+    "speaker": "agent",
+    "word": "trồng",
+    "start": 31.5706,
+    "end": 31.8822
+  },
+  {
+    "speaker": "agent",
+    "word": "cà",
+    "start": 31.8822,
+    "end": 32.1939
+  },
+  {
+    "speaker": "agent",
+    "word": "chua",
+    "start": 32.1939,
+    "end": 32.5056
+  },
+  {
+    "speaker": "agent",
+    "word": "chắc",
+    "start": 32.5056,
+    "end": 32.8173
+  },
+  {
+    "speaker": "agent",
+    "word": "chắn",
+    "start": 32.8173,
+    "end": 33.1289
+  },
+  {
+    "speaker": "agent",
+    "word": "sẽ",
+    "start": 33.1289,
+    "end": 33.4406
+  },
+  {
+    "speaker": "agent",
+    "word": "rất",
+    "start": 33.4406,
+    "end": 33.7523
+  },
+  {
+    "speaker": "agent",
+    "word": "thỏa",
+    "start": 33.7523,
+    "end": 34.0639
+  },
+  {
+    "speaker": "agent",
+    "word": "mãn",
+    "start": 34.0639,
+    "end": 34.3756
+  },
+  {
+    "speaker": "agent",
+    "word": "Bạn",
+    "start": 34.3756,
+    "end": 34.7243
+  },
+  {
+    "speaker": "agent",
+    "word": "có",
+    "start": 34.7243,
+    "end": 35.0731
+  },
+  {
+    "speaker": "agent",
+    "word": "những",
+    "start": 35.0731,
+    "end": 35.4218
+  },
+  {
+    "speaker": "agent",
+    "word": "loại",
+    "start": 35.4218,
+    "end": 35.7706
+  },
+  {
+    "speaker": "agent",
+    "word": "cây",
+    "start": 35.7706,
+    "end": 36.1193
+  },
+  {
+    "speaker": "agent",
+    "word": "gì",
+    "start": 36.1193,
+    "end": 36.4681
+  },
+  {
+    "speaker": "agent",
+    "word": "trong",
+    "start": 36.4681,
+    "end": 36.8168
+  },
+  {
+    "speaker": "agent",
+    "word": "vườn",
+    "start": 36.8168,
+    "end": 37.1656
+  },
+  {
+    "speaker": "agent",
+    "word": "Tôi",
+    "start": 37.1656,
+    "end": 37.4602
+  },
+  {
+    "speaker": "agent",
+    "word": "rất",
+    "start": 37.4602,
+    "end": 37.7548
+  },
+  {
+    "speaker": "agent",
+    "word": "muốn",
+    "start": 37.7548,
+    "end": 38.0494
+  },
+  {
+    "speaker": "agent",
+    "word": "nghe",
+    "start": 38.0494,
+    "end": 38.344
+  },
+  {
+    "speaker": "agent",
+    "word": "về",
+    "start": 38.344,
+    "end": 38.6387
+  },
+  {
+    "speaker": "agent",
+    "word": "những",
+    "start": 38.6387,
+    "end": 38.9333
+  },
+  {
+    "speaker": "agent",
+    "word": "cuộc",
+    "start": 38.9333,
+    "end": 39.2279
+  },
+  {
+    "speaker": "agent",
+    "word": "phiêu",
+    "start": 39.2279,
+    "end": 39.5225
+  },
+  {
+    "speaker": "agent",
+    "word": "lưu",
+    "start": 39.5225,
+    "end": 39.8171
+  },
+  {
+    "speaker": "agent",
+    "word": "làm",
+    "start": 39.8171,
+    "end": 40.1117
+  },
+  {
+    "speaker": "agent",
+    "word": "vườn",
+    "start": 40.1117,
+    "end": 40.4064
+  },
+  {
+    "speaker": "agent",
+    "word": "của",
+    "start": 40.4064,
+    "end": 40.701
+  },
+  {
+    "speaker": "agent",
+    "word": "bạn",
+    "start": 40.701,
+    "end": 40.9956
+  },
+  {
+    "speaker": "user",
+    "word": "Ồ",
+    "start": 41.5869,
+    "end": 41.9029
+  },
+  {
+    "speaker": "user",
+    "word": "nghe",
+    "start": 41.9029,
+    "end": 42.2189
+  },
+  {
+    "speaker": "user",
+    "word": "hào",
+    "start": 42.2189,
+    "end": 42.5349
+  },
+  {
+    "speaker": "user",
+    "word": "hứng",
+    "start": 42.5349,
+    "end": 42.8509
+  },
+  {
+    "speaker": "user",
+    "word": "quá",
+    "start": 42.8509,
+    "end": 43.1669
+  },
+  {
+    "speaker": "user",
+    "word": "Tôi",
+    "start": 43.1669,
+    "end": 43.3358
+  },
+  {
+    "speaker": "agent",
+    "word": "ừ",
+    "start": 43.1669,
+    "end": 43.8469
+  },
+  {
+    "speaker": "user",
+    "word": "có",
+    "start": 43.3358,
+    "end": 43.5047
+  },
+  {
+    "speaker": "user",
+    "word": "một",
+    "start": 43.5047,
+    "end": 43.6735
+  },
+  {
+    "speaker": "user",
+    "word": "bụi",
+    "start": 43.6735,
+    "end": 43.8424
+  },
+  {
+    "speaker": "user",
+    "word": "hồng",
+    "start": 43.8424,
+    "end": 44.0113
+  },
+  {
+    "speaker": "user",
+    "word": "xinh",
+    "start": 44.0113,
+    "end": 44.1802
+  },
+  {
+    "speaker": "user",
+    "word": "xắn",
+    "start": 44.1802,
+    "end": 44.3491
+  },
+  {
+    "speaker": "user",
+    "word": "và",
+    "start": 44.3491,
+    "end": 44.518
+  },
+  {
+    "speaker": "user",
+    "word": "vài",
+    "start": 44.518,
+    "end": 44.6869
+  },
+  {
+    "speaker": "user",
+    "word": "loại",
+    "start": 44.6869,
+    "end": 44.8558
+  },
+  {
+    "speaker": "user",
+    "word": "thảo",
+    "start": 44.8558,
+    "end": 45.0247
+  },
+  {
+    "speaker": "user",
+    "word": "mộc",
+    "start": 45.0247,
+    "end": 45.1935
+  },
+  {
+    "speaker": "user",
+    "word": "như",
+    "start": 45.1935,
+    "end": 45.3624
+  },
+  {
+    "speaker": "user",
+    "word": "húng",
+    "start": 45.3624,
+    "end": 45.5313
+  },
+  {
+    "speaker": "user",
+    "word": "quế",
+    "start": 45.5313,
+    "end": 45.7002
+  },
+  {
+    "speaker": "user",
+    "word": "với",
+    "start": 45.7002,
+    "end": 45.8691
+  },
+  {
+    "speaker": "user",
+    "word": "bạc",
+    "start": 45.8691,
+    "end": 46.038
+  },
+  {
+    "speaker": "user",
+    "word": "hà",
+    "start": 46.038,
+    "end": 46.2069
+  },
+  {
+    "speaker": "user",
+    "word": "Luôn",
+    "start": 46.2069,
+    "end": 46.408
+  },
+  {
+    "speaker": "agent",
+    "word": "ừ",
+    "start": 46.2069,
+    "end": 46.9469
+  },
+  {
+    "speaker": "user",
+    "word": "vui",
+    "start": 46.408,
+    "end": 46.6091
+  },
+  {
+    "speaker": "user",
+    "word": "khi",
+    "start": 46.6091,
+    "end": 46.8102
+  },
+  {
+    "speaker": "user",
+    "word": "chia",
+    "start": 46.8102,
+    "end": 47.0113
+  },
+  {
+    "speaker": "user",
+    "word": "sẻ",
+    "start": 47.0113,
+    "end": 47.2124
+  },
+  {
+    "speaker": "user",
+    "word": "mẹo",
+    "start": 47.2124,
+    "end": 47.4135
+  },
+  {
+    "speaker": "user",
+    "word": "làm",
+    "start": 47.4135,
+    "end": 47.6147
+  },
+  {
+    "speaker": "user",
+    "word": "vườn",
+    "start": 47.6147,
+    "end": 47.8158
+  },
+  {
+    "speaker": "user",
+    "word": "mà",
+    "start": 47.8158,
+    "end": 48.0169
+  }
+]

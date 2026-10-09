@@ -90,6 +90,19 @@ class SentencePieceTokenizer:
     def decode(self, tokens: list[int]) -> str:
         return str(self._processor.decode(tokens))
 
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def id_to_piece(self, token: int) -> str:
+        return str(self._processor.id_to_piece(int(token)))
+
+    def is_byte(self, token: int) -> bool:
+        return bool(self._processor.is_byte(int(token)))
+
+    def is_unk(self, token: int) -> bool:
+        return int(token) == self._processor.unk_id()
+
 
 def torch_device_type(device) -> str:
     """``cuda:1`` -> ``cuda``; Mimi codes do not depend on which GPU encoded them."""
@@ -434,6 +447,9 @@ def load_runtime(
     load_model_weights: bool = True,
     codec_cache_dir: Path | None = None,
     full_precision_model: bool = False,
+    text_tokenizer: str = "personaplex",
+    text_tokenizer_path: Path | None = None,
+    text_head_init: str = "decomposition",
 ) -> PersonaPlexRuntime:
     """Load from explicit local assets only. No Hugging Face function is imported."""
     resolved = paths.validate()
@@ -474,6 +490,18 @@ def load_runtime(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+    from .text_vocab import build_text_tokenizer, resize_text_vocab
+
+    base_tokenizer = SentencePieceTokenizer(resolved.tokenizer)
+    tokenizer = build_text_tokenizer(resolved.tokenizer, text_tokenizer, text_tokenizer_path)
+    if tokenizer is not base_tokenizer and not isinstance(tokenizer, SentencePieceTokenizer):
+        if qlora:
+            raise ValueError("model.text_tokenizer other than personaplex is not supported with QLoRA")
+        if not load_model_weights or target_model_device == "meta":
+            raise ValueError("text vocabulary resize needs loaded PersonaPlex weights")
+        # Every rank resizes deterministically from the same base weights.
+        resize_text_vocab(model, base_tokenizer, tokenizer, head_init=text_head_init)
+
     model.train()
     initial = tuple(int(value) for value in model._get_initial_token()[0, :, 0].tolist())
     if len(initial) != 17 or model.dep_q != 16 or model.n_q != 16:
@@ -481,7 +509,7 @@ def load_runtime(
     return PersonaPlexRuntime(
         model=model,
         codec=codec,
-        tokenizer=SentencePieceTokenizer(resolved.tokenizer),
+        tokenizer=tokenizer,
         initial_tokens=initial,
         zero_token=int(model.zero_token_id),
         delays=tuple(int(delay) for delay in model.delays),

@@ -2,3 +2,9 @@
 root: /home/voice/data/voice/personaplex-7b-v1
 source: ../src
 device: cuda
+# Text vocabulary. personaplex = original SentencePiece 32k. vit5 = local ViT5 spiece.model
+# (VietAI/vit5-large) behind a token-ID translation layer; text_emb, depformer_text_emb and
+# text_linear are resized and trained (lr: train.text_vocab_learning_rate).
+text_tokenizer: personaplex
+text_tokenizer_path: null
+text_head_init: decomposition   # decomposition | random (A/B for text_linear)

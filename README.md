@@ -69,6 +69,25 @@ Override `key=value` thay YAML cho lần chạy đó. Tham số chính:
 | `data.swap_roles_after_pass` | Đổi vai LEFT/RIGHT giữa các epoch; cần prompt cho cả hai phía. |
 | `--force-filter` | Bỏ cache, lọc lại sample và chunk. |
 
+### Tokenizer text (tuỳ chọn ViT5)
+
+Mặc định dùng SentencePiece 32k gốc. Tiếng Việt có dấu bị cắt ~4 token/âm tiết với tokenizer này; đo bằng:
+```bash
+PYTHONPATH=src python -m tools.benchmark_vi_tokenizer --config configs/train_vi_synthetic.yaml \
+  --translated /path/vit5-large/spiece.model
+```
+Dùng ViT5 (file `spiece.model` local của `VietAI/vit5-large`):
+```bash
+torchrun --nproc_per_node=2 train.py configs/train_vi_synthetic.yaml \
+  model.text_tokenizer=vit5 model.text_tokenizer_path=/path/vit5-large/spiece.model \
+  data.vietnamese_text_mode=diacritics [model.text_head_init=random] [train.text_vocab_learning_rate=1e-4]
+```
+- ID PAD=3, EPAD=0, initial token=`text_card` giữ nguyên nghĩa; piece ViT5 nằm ở 4..text_card-1.
+- `text_emb`, `depformer_text_emb`, `text_linear` được resize, khởi tạo bằng trung bình embedding các token
+  cũ ghép thành piece, rồi train full (lưu trong `lora.safetensors`). Transformer vẫn LoRA, Mimi frozen.
+- Checkpoint kèm `text_vocab.json` (sha256 tokenizer); inference/resume báo lỗi nếu tokenizer khác.
+- Không dùng chung với QLoRA. Chạy lại bước lọc chunk (cache tự tách theo tokenizer); Mimi cache dùng lại được.
+
 ## Inference
 
 ```bash

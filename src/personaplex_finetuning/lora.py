@@ -136,23 +136,29 @@ def inject_lora(model, rank: int, alpha: float, dropout: float = 0.0, prefixes: 
     return [name for name, _, _ in targets]
 
 
+def _adapter_parameter_names(model) -> set[str]:
+    """LoRA tensors plus resized text-vocabulary modules (text_vocab.py), if any."""
+    from .text_vocab import text_vocab_parameter_names
+
+    names = {name for name, _ in model.named_parameters() if ".lora_a." in name or ".lora_b." in name}
+    return names | set(text_vocab_parameter_names(model))
+
+
 def adapter_state_dict(model):
-    return {name: parameter.detach().cpu() for name, parameter in model.named_parameters() if ".lora_a." in name or ".lora_b." in name}
+    names = _adapter_parameter_names(model)
+    return {name: parameter.detach().cpu() for name, parameter in model.named_parameters() if name in names}
 
 
 def load_adapter(model, path) -> None:
     from safetensors.torch import load_file
     state = load_file(str(path))
-    expected = {
-        name for name, _ in model.named_parameters()
-        if ".lora_a." in name or ".lora_b." in name
-    }
+    expected = _adapter_parameter_names(model)
     supplied = set(state)
     missing = expected - supplied
     unexpected = supplied - expected
-    if not expected or missing or unexpected:
+    if not any(".lora_" in name for name in expected) or missing or unexpected:
         raise RuntimeError(
-            f"adapter LoRA keys do not match model: "
+            f"adapter keys do not match model (text vocabulary must match too): "
             f"missing={sorted(missing)[:5]}, unexpected={sorted(unexpected)[:5]}"
         )
     model.load_state_dict(state, strict=False)

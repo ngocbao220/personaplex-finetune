@@ -1,0 +1,76 @@
+# Overfit 8 synthetic conversations with the ViT5 text vocabulary (1x A100 40GB).
+# Run from personaplex-finetuning/ (see docs/run_vit5_overfit_a100.md):
+#   python train.py configs/overfit-8-vit5.yaml
+# A/B the text head init:  ... model.text_head_init=random train.output_dir=../runs/overfit-8-vit5-random
+defaults:
+  - model: server
+  - data: vietnamese
+  - lora: default
+  - _self_
+
+seed: 42
+duration_sec: 100
+sample_index: null
+sample_number: 8
+batch_size: 1
+max_steps: 600
+user_loss: false
+
+model:
+  root: /home/voice/data/voice/personaplex-7b-v1      # EDIT: local PersonaPlex snapshot
+  source: ../src
+  device: cuda
+  text_tokenizer: vit5
+  text_tokenizer_path: /home/voice/data/voice/vit5-large/spiece.model   # EDIT: local ViT5 spiece.model
+  text_head_init: decomposition                        # decomposition | random
+
+data:
+  prepared_dir: ../synthetic_samples                   # EDIT: the 8 prepared samples on the server
+  codec_cache_dir: auto
+  shuffle: false
+  vietnamese_text_mode: diacritics                     # ViT5 tokenizes accented Vietnamese ~1 token/syllable
+  swap_roles_after_pass: false
+  val_ratio: 0.0
+
+lora:
+  enable: true
+  rank: 64
+  alpha: 128
+  scaling: 2.0
+
+optim:
+  lr: 2.0e-5
+  weight_decay: 0.1
+  pct_start: 0.05
+
+train:
+  output_dir: ../runs/overfit-8-vit5
+  depformer_learning_rate: 5.0e-5
+  text_vocab_learning_rate: 1.0e-4    # resized text_emb / depformer_text_emb / text_linear (full-trained)
+  stage: joint
+  gradient_accumulation_steps: 1
+  eval_every_steps: 0
+  eval_on_train_samples: true
+  num_workers: 2
+  filter_num_workers: 8
+  batch_prefetch: 1
+  mixed_precision: bf16
+  gradient_checkpointing: true        # Required on 40GB at 100 s windows.
+
+first_codebook_weight_multiplier: 1.0
+text_padding_weight: 0.3
+epad_weight: 1.0
+log_freq: 1
+no_eval: false
+free_running_eval_every_steps: 100
+free_running_eval_samples: 2
+free_running_eval_window_seconds: 100
+ckpt_freq: 100
+
+generation:
+  use_sampling: false
+  temp: 0.0
+  temp_text: 0.0
+  top_k: 250
+  top_k_text: 25
+  audio_silence_frame_cnt: 6

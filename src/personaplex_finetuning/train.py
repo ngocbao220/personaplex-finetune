@@ -202,6 +202,17 @@ def resolve_compatible_checkpoint(
             )
     if model_root is not None and model_root != Path(config.model_root).expanduser().resolve():
         raise RuntimeError(f"{purpose} base model differs: checkpoint={model_root}, current={config.model_root}")
+    from .text_vocab import file_sha256, read_text_vocab_metadata
+    recorded = (read_text_vocab_metadata(adapter) or {}).get("tokenizer_sha256")
+    current = (
+        file_sha256(config.text_tokenizer_path)
+        if getattr(config, "text_tokenizer", "personaplex") != "personaplex" else None
+    )
+    if recorded != current:
+        raise RuntimeError(
+            f"{purpose} text vocabulary differs: checkpoint={recorded or 'personaplex'}, "
+            f"current={current or 'personaplex'}"
+        )
     return adapter, metadata
 
 
@@ -1229,7 +1240,17 @@ def save_full_checkpoint(
         num_processes, config.per_device_batch_size,
     )
     write_full_metadata(path, base_model_root=config.model_root, step=step)
+    write_checkpoint_text_vocab(path, config)
     return path
+
+
+def write_checkpoint_text_vocab(path: Path, config: Config) -> None:
+    """Record the text vocabulary so inference refuses a mismatched tokenizer."""
+    if getattr(config, "text_tokenizer", "personaplex") == "personaplex":
+        return
+    from .text_vocab import TEXT_VOCAB_FILE, TranslatedTokenizer
+    metadata = TranslatedTokenizer(config.text_tokenizer_path).metadata()
+    (Path(path) / TEXT_VOCAB_FILE).write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
 def save_adapter_state(run_dir: Path, state_dict, config: Config, step: int, optimizer=None, scheduler=None, gradient_accumulation_steps: int = 1, num_processes: int = 1) -> Path:
@@ -1246,6 +1267,7 @@ def save_adapter_state(run_dir: Path, state_dict, config: Config, step: int, opt
             indent=2,
         )
     )
+    write_checkpoint_text_vocab(path, config)
     if optimizer is not None:
         save_training_state(path, optimizer, scheduler, step, gradient_accumulation_steps, num_processes, config.per_device_batch_size)
     return adapter
@@ -1279,6 +1301,7 @@ def save_best_adapter_state(
             indent=2,
         )
     )
+    write_checkpoint_text_vocab(path, config)
     if optimizer is not None:
         save_training_state(path, optimizer, scheduler, step, gradient_accumulation_steps, num_processes, config.per_device_batch_size)
     return adapter
@@ -1918,7 +1941,12 @@ def run(
     test_samples = duration_chunks(test_samples, config.duration_sec) if test_samples else []
 
     resolved = RuntimePaths(config.model_root, config.personaplex_source).validate(require_model=False)
-    filter_tokenizer = SentencePieceTokenizer(resolved.tokenizer)
+    from .text_vocab import build_text_tokenizer, tokenizer_fingerprint_path
+    filter_tokenizer = (
+        SentencePieceTokenizer(resolved.tokenizer) if config.text_tokenizer == "personaplex"
+        else build_text_tokenizer(resolved.tokenizer, config.text_tokenizer, config.text_tokenizer_path)
+    )
+    filter_tokenizer_path = tokenizer_fingerprint_path(resolved.tokenizer, filter_tokenizer)
     filter_payloads = {}
 
     def filter_split(label: str, chunks: list, check_role_swap: bool = False) -> list:
@@ -1950,7 +1978,7 @@ def run(
                             "swap_roles": check_role_swap,
                             "chunks": [(s.sample_id, s.window_start_sec, s.window_end_sec) for s in chunks],
                         },
-                        resolved.tokenizer,
+                        filter_tokenizer_path,
                     ),
                     force_filter=force_filter,
                 )
@@ -2192,7 +2220,13 @@ def run(
         load_model_weights=True,
         codec_cache_dir=config.codec_cache_dir,
         full_precision_model=config.train_method == "full",
+        text_tokenizer=config.text_tokenizer,
+        text_tokenizer_path=config.text_tokenizer_path,
+        text_head_init=config.text_head_init,
     )
+    if main_process and config.text_tokenizer != "personaplex":
+        print(f"[Text vocab] tokenizer={config.text_tokenizer} path={config.text_tokenizer_path} "
+              f"text_card={runtime.model.text_card} head_init={config.text_head_init}", flush=True)
     if main_process:
         cache_dir = config.codec_cache_dir
         print(
@@ -2259,6 +2293,11 @@ def run(
         barrier()
 
     targets = configure_trainable_parameters(runtime.model, config, lora_prefixes)
+    from .text_vocab import text_vocab_parameter_names
+    text_vocab_names = set(text_vocab_parameter_names(runtime.model))
+    for name, parameter in runtime.model.named_parameters():
+        if name in text_vocab_names:
+            parameter.requires_grad_(True)
 
     # Optional gradient checkpointing
     if config.gradient_checkpointing:
@@ -2296,7 +2335,7 @@ def run(
         raise RuntimeError("model has no trainable parameters")
     unexpected_trainable = [
         name for name, parameter in runtime.model.named_parameters()
-        if parameter.requires_grad and "lora_" not in name
+        if parameter.requires_grad and "lora_" not in name and name not in text_vocab_names
     ]
     if config.train_method == "lora" and unexpected_trainable:
         raise RuntimeError(f"unexpected non-LoRA trainable parameters: {unexpected_trainable[:5]}")
@@ -2345,6 +2384,22 @@ def run(
             print(f"Using Dual Learning Rates -> Temporal Transformer: {temp_lr:.2e}, Depth Transformer: {dep_lr:.2e}")
     else:
         optimizer = torch.optim.AdamW(trainable, lr=temp_lr, weight_decay=config.weight_decay, fused=device.type == "cuda")
+    if text_vocab_names:
+        text_vocab_ids = {
+            id(parameter) for name, parameter in runtime.model.named_parameters() if name in text_vocab_names
+        }
+        for group in optimizer.param_groups:
+            group["params"] = [p for p in group["params"] if id(p) not in text_vocab_ids]
+        optimizer.param_groups[:] = [group for group in optimizer.param_groups if group["params"]]
+        optimizer.add_param_group({
+            "params": [p for n, p in runtime.model.named_parameters() if n in text_vocab_names],
+            "lr": config.text_vocab_learning_rate, "weight_decay": 0.0,
+        })
+        if main_process:
+            print(f"[Text vocab] trainable modules {sorted({n.split('.')[0] for n in text_vocab_names})} "
+                  f"lr={config.text_vocab_learning_rate:.2e} params="
+                  f"{sum(p.numel() for n, p in runtime.model.named_parameters() if n in text_vocab_names):,}",
+                  flush=True)
     max_steps = 1 if smoke else config.max_steps
     scheduler = None
     if max_steps > 1:

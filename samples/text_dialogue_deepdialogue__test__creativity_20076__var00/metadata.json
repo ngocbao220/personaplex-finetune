@@ -1,0 +1,12 @@
+{
+    "sample_id": "text_dialogue_deepdialogue__test__creativity_20076__var00",
+    "layout": "flat",
+    "text_prompt_left": "You are a helpful voice assistant.",
+    "text_prompt_right": "You are a helpful voice assistant.",
+    "voice_prompt_left": "same_conversation",
+    "voice_prompt_right": "same_conversation",
+    "transcript_source": "asr",
+    "transcript_exported": true,
+    "agent_channel": "left",
+    "user_channel": "right"
+}
