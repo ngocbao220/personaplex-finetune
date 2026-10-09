@@ -183,19 +183,34 @@ def validate_resume_step(start_step: int, max_steps: int) -> None:
         )
 
 
+def resolve_compatible_checkpoint(
+    config: Config, checkpoint: str, prefixes: tuple[str, ...], purpose: str = "resume",
+) -> tuple[Path, dict]:
+    """Resolve weights whose architecture (LoRA shape/targets, base model) fits this run."""
+    if config.train_method == "full":
+        adapter, metadata = resolve_full_checkpoint(Path(checkpoint))
+        model_root = Path(metadata["base_model_root"]).expanduser().resolve()
+    else:
+        adapter, rank, alpha, model_root, adapter_prefixes = resolve_adapter_checkpoint(Path(checkpoint))
+        metadata = json.loads((adapter.parent / "adapter.json").read_text(encoding="utf-8"))
+        if rank != config.lora_rank or alpha != config.lora_alpha or adapter_prefixes != prefixes:
+            raise RuntimeError(
+                f"{purpose} LoRA configuration differs: checkpoint rank={rank}, alpha={alpha}, "
+                f"prefixes={adapter_prefixes}; current rank={config.lora_rank}, "
+                f"alpha={config.lora_alpha}, prefixes={prefixes}"
+            )
+    if model_root is not None and model_root != Path(config.model_root).expanduser().resolve():
+        raise RuntimeError(f"{purpose} base model differs: checkpoint={model_root}, current={config.model_root}")
+    return adapter, metadata
+
+
 def validate_resume_checkpoint(
     config: Config, resume_from: str, prefixes: tuple[str, ...], train_conversations: list,
     train_chunks: list | None = None,
 ) -> tuple[Path, int]:
     """Require a complete checkpoint compatible with this exact training run."""
-    if config.train_method == "full":
-        adapter, metadata = resolve_full_checkpoint(Path(resume_from))
-        metadata_file = adapter.parent / "checkpoint.json"
-        model_root = Path(metadata["base_model_root"]).expanduser().resolve()
-    else:
-        adapter, rank, alpha, model_root, adapter_prefixes = resolve_adapter_checkpoint(Path(resume_from))
-        metadata_file = adapter.parent / "adapter.json"
-        metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+    adapter, metadata = resolve_compatible_checkpoint(config, resume_from, prefixes)
+    metadata_file = adapter.parent / ("checkpoint.json" if config.train_method == "full" else "adapter.json")
     step = metadata.get("step")
     if isinstance(step, bool) or not isinstance(step, int) or step < 0:
         raise ValueError(f"resume checkpoint has invalid optimizer step: {metadata_file}")
@@ -204,14 +219,6 @@ def validate_resume_checkpoint(
             f"resume requires training_state.pt alongside {adapter}; "
             "weights alone cannot restore optimizer, scheduler, or data position"
         )
-    if config.train_method == "lora" and (rank != config.lora_rank or alpha != config.lora_alpha or adapter_prefixes != prefixes):
-        raise RuntimeError(
-            f"resume LoRA configuration differs: checkpoint rank={rank}, alpha={alpha}, "
-            f"prefixes={adapter_prefixes}; current rank={config.lora_rank}, "
-            f"alpha={config.lora_alpha}, prefixes={prefixes}"
-        )
-    if model_root is not None and model_root != Path(config.model_root).expanduser().resolve():
-        raise RuntimeError(f"resume base model differs: checkpoint={model_root}, current={config.model_root}")
     run_config_file = adapter.parent.parent.parent / "config.json"
     if not run_config_file.is_file():
         raise RuntimeError(f"resume checkpoint has no run config to verify training data/objective: {run_config_file}")
@@ -291,7 +298,7 @@ def training_contract(config: Config, train_conversations: list, train_chunks: l
         "pct_start": config.pct_start,
         "first_codebook_weight_multiplier": config.first_codebook_weight_multiplier,
         "text_padding_weight": config.text_padding_weight,
-        "epad_as_padding": config.epad_as_padding,
+        "epad_weight": config.epad_weight,
         "user_loss": config.user_loss,
         "train_stage": config.train_stage,
         "qlora": config.qlora, "quant_type": config.quant_type if config.qlora else None,
@@ -448,19 +455,15 @@ def pack_text_training_stats(
     ))
 
 
-def tokenizer_text_padding_ids(tokenizer, include_end_padding: bool = False) -> tuple[int, ...]:
-    """Text IDs treated as padding (down-weighted in loss, excluded from "real" text metrics).
+def tokenizer_text_padding_ids(tokenizer) -> tuple[int, ...]:
+    """Text IDs treated as padding (text_padding_weight in loss, excluded from "real" text metrics).
 
-    EPAD (end_padding_id) marks a word onset. Free-running generation can only start a
-    word after the model itself emits EPAD, so by default EPAD is a full-weight target.
-    Audit evidence: with EPAD down-weighted, the model never emitted EPAD and stayed on PAD.
-    ``include_end_padding=True`` restores the legacy (and moshi-finetune reference) behavior.
+    Only PAD. EPAD (end_padding_id) marks a word onset and is a real target with its
+    own ``epad_weight``: free-running generation can only start a word after the model
+    emits EPAD. Audit evidence: with EPAD down-weighted like PAD, the model never
+    emitted EPAD and stayed on PAD.
     """
-    ids = [int(tokenizer.padding_id)]
-    end_padding_id = getattr(tokenizer, "end_padding_id", None)
-    if include_end_padding and end_padding_id is not None and int(end_padding_id) not in ids:
-        ids.append(int(end_padding_id))
-    return normalize_text_padding_ids(ids)
+    return normalize_text_padding_ids([int(tokenizer.padding_id)])
 
 
 def text_target_token_loss_stats(batch, model_output, padding_id: int):
@@ -937,7 +940,7 @@ def _add_loss_compatibility_aliases(components):
 def loss_components(
     model_output, codes, example, text_padding_id, torch_module,
     first_codebook_weight_multiplier=1.0, text_padding_weight=0.3,
-    *, user_loss=False, distributed=False,
+    *, user_loss=False, distributed=False, epad_id=None, epad_weight=1.0,
 ):
     """Compute per-stream losses using GPU-native vectorized weights."""
     if isinstance(example, dict):
@@ -951,6 +954,8 @@ def loss_components(
         first_codebook_weight_multiplier=first_codebook_weight_multiplier,
         text_padding_weight=text_padding_weight,
         user_loss=user_loss,
+        epad_id=epad_id,
+        epad_weight=epad_weight,
     )
 
     text_target = labels_tensor[:, 0, :]
@@ -1050,8 +1055,9 @@ def one_step(config: Config, runtime, example, optimizer=None):
     codes = torch.tensor(example.input_codes, dtype=torch.long, device=config.device).unsqueeze(0)
     output = model_forward_train(runtime.model, codes)
     total, components = loss_components(
-        output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding), torch,
+        output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer), torch,
         config.first_codebook_weight_multiplier, config.text_padding_weight,
+        epad_id=getattr(runtime.tokenizer, "end_padding_id", None), epad_weight=config.epad_weight,
         user_loss=config.user_loss,
     )
     if optimizer is not None:
@@ -1241,8 +1247,9 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
             codes = torch.tensor(example.input_codes, dtype=torch.long, device=device).unsqueeze(0)
             output = model_forward_train(unwrapped, codes)
             total, comps = loss_components(
-                output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding), torch,
+                output, codes, example, tokenizer_text_padding_ids(runtime.tokenizer), torch,
                 config.first_codebook_weight_multiplier, config.text_padding_weight,
+                epad_id=getattr(runtime.tokenizer, "end_padding_id", None), epad_weight=config.epad_weight,
                 user_loss=config.user_loss,
             )
             totals["total"] += float(total.detach())
@@ -1252,7 +1259,7 @@ def evaluate_validation(config: Config, runtime, val_samples: list, rank: int, w
             labels = torch.tensor(example.labels, dtype=torch.long, device=device).unsqueeze(0)
             loss_mask = torch.tensor(example.loss_mask, dtype=torch.bool, device=device).unsqueeze(0)
             text_loss_sum, text_token_count = text_target_token_loss_stats(
-                {"labels": labels, "loss_mask": loss_mask}, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding),
+                {"labels": labels, "loss_mask": loss_mask}, output, tokenizer_text_padding_ids(runtime.tokenizer),
             )
             nonpadding_text_loss_sum += float(text_loss_sum)
             nonpadding_text_token_count += int(text_token_count)
@@ -1627,7 +1634,31 @@ def precompute_codec_cache(config: Config, chunks: list, device, rank: int, worl
                 "encoded": encoded, "already_cached": cached,
                 "elapsed_sec": round(time.monotonic() - started, 1),
             }), flush=True)
-    return {"encoded": encoded, "already_cached": cached}
+    # Voice prompts: one per conversation (both roles when passes swap speakers).
+    prompts = sorted({
+        str(path) for sample in chunks
+        for path in (sample.voice_prompt_wav,
+                     sample.voice_prompt_right_wav if config_swaps_roles(config) else None)
+        if path is not None
+    })
+    prompts_encoded = prompts_cached = 0
+    for path in prompts[rank::world_size]:
+        info = codec._voice_prompt_cache_info(path)
+        if info is not None and info[1].is_file():
+            prompts_cached += 1
+        else:
+            prompts_encoded += 1
+        codec.encode_voice_prompt(Path(path))
+    print(json.dumps({
+        "event": "codec_cache_precompute_voice_prompts", "rank": rank,
+        "encoded": prompts_encoded, "already_cached": prompts_cached,
+    }), flush=True)
+    return {"encoded": encoded, "already_cached": cached,
+            "voice_prompts_encoded": prompts_encoded, "voice_prompts_cached": prompts_cached}
+
+
+def config_swaps_roles(config) -> bool:
+    return bool(getattr(config, "swap_roles_after_pass", False))
 
 
 def run(
@@ -1636,7 +1667,10 @@ def run(
     resume_from: str | None = None,
     force_filter: bool = False,
     precompute_codec_cache_only: bool = False,
+    init_from: str | None = None,
 ) -> Path | None:
+    if resume_from and init_from:
+        raise ValueError("use either --resume-from (exact continuation) or --init-from (new run from weights)")
     if config.train_method == "full":
         if config.qlora:
             raise ValueError("train.method=full cannot use lora.qlora=true")
@@ -1905,6 +1939,13 @@ def run(
             print(f"[Codec cache] {len(train_samples)} train chunks ready in {config.codec_cache_dir}", flush=True)
         return None
 
+    init_adapter_file = None
+    if init_from:
+        # Warm start: weights only. Data, epochs/max_steps, LR schedule and optimizer
+        # start fresh, so the new run may use a different dataset or longer schedule.
+        init_adapter_file, _ = resolve_compatible_checkpoint(
+            config, init_from, lora_prefixes_for_stage(config), purpose="init",
+        )
     resume_adapter_file = None
     adapter_resume_step = 0
     if resume_from:
@@ -1920,6 +1961,7 @@ def run(
         run_dir = create_run_dir(config.output_dir, smoke)
         config_record = {
             "event": "configuration",
+            "init_from": str(init_adapter_file) if init_adapter_file else None,
             "seed": config.seed,
             "model_root": str(config.model_root),
             "personaplex_source": str(config.personaplex_source),
@@ -1954,7 +1996,7 @@ def run(
             "pct_start": config.pct_start,
             "first_codebook_weight_multiplier": config.first_codebook_weight_multiplier,
             "text_padding_weight": config.text_padding_weight,
-            "epad_as_padding": config.epad_as_padding,
+            "epad_weight": config.epad_weight,
             "user_loss": config.user_loss,
             "log_freq": config.log_freq,
             "no_eval": config.no_eval,
@@ -2012,7 +2054,7 @@ def run(
         (run_dir / "data_filter_report.json").write_text(
             json.dumps(filter_report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
         )
-        print(json.dumps(config_record))
+        print("[Training configuration]\n" + json.dumps(config_record, indent=2, ensure_ascii=False), flush=True)
         print(f"[Main Process] Active across {world_size} process(es) on device {device}")
 
     if world_size > 1:
@@ -2111,6 +2153,14 @@ def run(
             load_adapter(runtime.model, resume_adapter_file)
         if main_process:
             print(f"Checkpoint is at optimizer step {adapter_resume_step}")
+    elif init_adapter_file is not None:
+        if main_process:
+            print(f"Initializing {config.train_method} weights from {init_adapter_file}; "
+                  "optimizer, scheduler and step start fresh")
+        if config.train_method == "full":
+            load_full_weights(runtime.model, init_adapter_file)
+        else:
+            load_adapter(runtime.model, init_adapter_file)
 
     # Alias LMModel.forward to forward_train for training execution
     from moshi.models.lm import LMModel
@@ -2318,7 +2368,7 @@ def run(
                 forward_started = time.monotonic() if config.profile_steps else 0.0
                 output = model_forward_train(runtime.model, codes)
                 diagnostics = fused_training_diagnostics(
-                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding)
+                    batch, output, tokenizer_text_padding_ids(runtime.tokenizer)
                 )
                 pending_text_target_tokens += diagnostics["text_target_tokens"]
                 pending_text_padding_positions += diagnostics["text_padding_positions"]
@@ -2331,8 +2381,9 @@ def run(
                 pending_audio_cb_loss_sum += diagnostics["audio_loss_sum"]
 
                 loss_result = loss_components(
-                    output, codes, batch, tokenizer_text_padding_ids(runtime.tokenizer, config.epad_as_padding), torch,
+                    output, codes, batch, tokenizer_text_padding_ids(runtime.tokenizer), torch,
                     config.first_codebook_weight_multiplier, config.text_padding_weight,
+                    epad_id=getattr(runtime.tokenizer, "end_padding_id", None), epad_weight=config.epad_weight,
                     user_loss=config.user_loss,
                     distributed=distributed,
                 )
@@ -2801,7 +2852,10 @@ def main() -> int:
     parser.add_argument("--no-qlora", dest="qlora", action="store_false", help="Disable QLoRA")
     parser.add_argument("--user-loss", action="store_true", default=None, help="Supervise user audio stream codebooks (ablation)")
     parser.add_argument("--no-user-loss", dest="user_loss", action="store_false", help="Disable user audio supervision")
-    parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint directory to resume from")
+    parser.add_argument("--resume-from", type=str, default=None,
+                        help="Exact continuation: same data/schedule, restores optimizer, scheduler and data position")
+    parser.add_argument("--init-from", type=str, default=None,
+                        help="New run initialized from checkpoint weights; data, epochs/max_steps and optimizer may change")
     parser.add_argument("--force-filter", action="store_true", help="Revalidate prepared samples and rebuild chunk-filter caches")
     parser.add_argument("--precompute-codec-cache", action="store_true",
                         help="Encode all kept training chunks into data.codec_cache_dir with Mimi only, then exit")
@@ -2828,6 +2882,7 @@ def main() -> int:
         config,
         smoke=args.smoke,
         resume_from=args.resume_from,
+        init_from=args.init_from,
         force_filter=args.force_filter,
         precompute_codec_cache_only=args.precompute_codec_cache,
     )

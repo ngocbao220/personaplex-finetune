@@ -86,6 +86,8 @@ def stream_weights_torch(
     text_padding_weight: float = 0.3,
     first_codebook_weight_multiplier: float = 1.0,
     user_loss: bool = False,
+    epad_id: int | None = None,
+    epad_weight: float = 1.0,
 ) -> "torch.Tensor":
     """GPU-native weight computation for use inside the training loop.
 
@@ -119,6 +121,10 @@ def stream_weights_torch(
         torch.where(is_pad, torch.tensor(text_padding_weight, device=codes.device), torch.tensor(1.0, device=codes.device)),
         torch.tensor(0.0, device=codes.device),
     )
+    if epad_id is not None and int(epad_id) not in normalize_text_padding_ids(text_padding_id):
+        # EPAD (word onset) gets its own explicit weight.
+        is_epad = text_mask & (codes[:, 0] == int(epad_id))
+        weights[:, 0] = torch.where(is_epad, torch.tensor(epad_weight, device=codes.device), weights[:, 0])
 
     # First codebook of each speaker stream is semantic.
     weights[:, (1, 9)] = loss_mask[:, (1, 9)].float() * first_codebook_weight_multiplier

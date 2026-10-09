@@ -283,11 +283,39 @@ class MimiCodec:
         audio = _pad_audio_window(audio, self.sample_rate, duration_sec)
         return self._encode(audio[channel : channel + 1], torch)
 
+    def _voice_prompt_cache_info(self, path):
+        if self._cache_dir is None:
+            return None
+        path = Path(path).expanduser().resolve()
+        stat = path.stat()
+        identity = json.dumps({
+            "kind": "voice_prompt", "format_version": 1,
+            "encoding_contract": "native-streaming-batch1-normalized-24lufs",
+            "encoding_device": torch_device_type(self.device),
+            "source_path": str(path), "source_size": stat.st_size, "source_mtime_ns": stat.st_mtime_ns,
+            "sample_rate": self.sample_rate, "mimi_namespace": self._cache_namespace,
+        }, sort_keys=True, separators=(",", ":"))
+        key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return identity, self._cache_dir / "voice" / (key + ".pt")
+
     def encode_voice_prompt(self, path: Path):
         key = str(path)
         if key in self._voice_cache:
             return self._voice_cache[key]
         import torch
+        # Streaming Mimi encodes the prompt frame by frame on the training thread;
+        # a disk hit keeps that latency off every first-seen conversation.
+        info = self._voice_prompt_cache_info(path)
+        if info is not None and info[1].is_file():
+            data = torch.load(str(info[1]), map_location="cpu", weights_only=True)
+            if data.get("identity") != info[0]:
+                raise ValueError(f"Mimi voice-prompt cache identity mismatch: {info[1]}")
+            codes = data["codes"]
+            if not isinstance(codes, (tuple, list)) or len(codes) != 8 or not codes[0]:
+                raise ValueError(f"invalid voice-prompt codes in Mimi cache: {info[1]}")
+            codes = tuple(tuple(stream) for stream in codes)
+            self._voice_cache[key] = codes
+            return codes
         audio = self._helpers.load_audio(str(path), self.sample_rate)
         audio = self._helpers.normalize_audio(audio, self.sample_rate, -24.0)
         if audio.ndim == 1:
@@ -304,6 +332,15 @@ class MimiCodec:
         encoded = torch.cat(native_frames, dim=2)[0]
         codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in encoded)
         self._voice_cache[key] = codes
+        if info is not None:
+            cache_file = info[1]
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                torch.save({"identity": info[0], "codes": codes}, str(temporary))
+                os.replace(temporary, cache_file)
+            finally:
+                temporary.unlink(missing_ok=True)
         return codes
 
     def sine(self, frames: int):

@@ -101,6 +101,39 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(quota["requested_valid_chunks"], 100)
         self.assertEqual(quota["quota_shortfall"], 100)
 
+    def test_init_from_needs_only_compatible_weights(self) -> None:
+        from safetensors.torch import save_file
+        from personaplex_finetuning.config import Config
+        from personaplex_finetuning.train import resolve_compatible_checkpoint, run
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(
+                path=root / "config.yaml", model_root=Path("/models/personaplex"),
+                personaplex_source=root / "src", prepared_dir=root, output_dir=root,
+                lora_rank=2, lora_alpha=4,
+            )
+            checkpoint = root / "old-run" / "checkpoints" / "checkpoint_000300"
+            checkpoint.mkdir(parents=True)
+            save_file({
+                "transformer.projection.lora_a.weight": torch.zeros(2, 3),
+                "transformer.projection.lora_b.weight": torch.zeros(4, 2),
+            }, str(checkpoint / "lora.safetensors"))
+            (checkpoint / "adapter.json").write_text(json.dumps({
+                "step": 300, "rank": 2, "alpha": 4, "model_root": "/models/personaplex",
+            }))
+            # No training_state.pt and no run config.json: weights alone are enough.
+            adapter, metadata = resolve_compatible_checkpoint(config, str(checkpoint), ("transformer",), "init")
+            self.assertEqual((adapter, metadata["step"]), (checkpoint / "lora.safetensors", 300))
+            with self.assertRaisesRegex(RuntimeError, "init LoRA configuration differs"):
+                resolve_compatible_checkpoint(config.replace(lora_rank=4, lora_alpha=8),
+                                              str(checkpoint), ("transformer",), "init")
+            with self.assertRaisesRegex(RuntimeError, "init base model differs"):
+                resolve_compatible_checkpoint(config.replace(model_root=Path("/models/other")),
+                                              str(checkpoint), ("transformer",), "init")
+            with self.assertRaisesRegex(ValueError, "either --resume-from"):
+                run(config, resume_from=str(checkpoint), init_from=str(checkpoint))
+
     def test_resume_requires_complete_matching_checkpoint(self) -> None:
         from safetensors.torch import save_file
         from personaplex_finetuning.config import Config

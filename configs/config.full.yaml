@@ -78,6 +78,7 @@ train:
 # ------------------------------------------------------------------------------
 first_codebook_weight_multiplier: 1.0 # Trọng số cho codebook âm thanh ngữ nghĩa số 1 [float: 0.5 -> 2.0]
 text_padding_weight: 0.3              # Trọng số cho token <pad> lúc Agent im lặng lắng nghe [float: 0.0 -> 1.0]
+epad_weight: 1.0              # Trọng số loss của EPAD (token bắt đầu từ) [0 -> 1; PAD dùng text_padding_weight]
 user_loss: false                      # Mặc định tắt (chỉ bật true khi chạy ablation study giám sát user audio)
 log_freq: 1                           # Tần suất in log loss ra console (steps) [int >= 1: 1, 5, 10]
 ckpt_freq: 500                        # Tần suất lưu checkpoint dự phòng [int >= 1: 100, 500]
