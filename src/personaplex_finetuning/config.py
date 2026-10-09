@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ class Config:
     window_seconds: float | None = None
     shuffle: bool = False
     max_steps: int = 300
+    epochs: float | None = None  # If set, run() derives max_steps from kept train chunks.
     learning_rate: float = 2e-5
     depformer_learning_rate: float | None = None
     train_stage: str = "joint"
@@ -289,6 +291,10 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
     lora_alpha = round(lora_rank * lora_scaling)
     generation_settings = generation_from_config(raw)
     max_steps = int(raw.get("max_steps", train.get("max_steps", 300)))
+    epochs_raw = raw.get("epochs", train.get("epochs"))
+    epochs = None if epochs_raw is None else float(epochs_raw)
+    if epochs is not None and not (math.isfinite(epochs) and epochs > 0):
+        raise ValueError("epochs must be a positive number or null")
     warmup_steps = int(train.get("warmup_steps", 0))
     if max_steps < 1 or warmup_steps < 0 or warmup_steps >= max_steps:
         raise ValueError("max_steps must be positive and train.warmup_steps must be in [0, max_steps)")
@@ -319,6 +325,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         ),
         shuffle=bool(data.get("shuffle", False)),
         max_steps=max_steps,
+        epochs=epochs,
         learning_rate=float(optim.get("lr", train.get("learning_rate", 2e-5))),
         depformer_learning_rate=float(train["depformer_learning_rate"]) if (isinstance(train, dict) and train.get("depformer_learning_rate") is not None) else None,
         train_stage=str(train.get("stage") or train.get("train_stage") or "joint").lower() if isinstance(train, dict) else "joint",

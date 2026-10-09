@@ -28,10 +28,26 @@ def _stat_record(path: Path) -> dict[str, Any]:
     }
 
 
+_ASSET_CACHE: dict[tuple, list[dict[str, Any]]] = {}
+
+
 def _manifest_assets(manifest: Path) -> list[dict[str, Any]]:
-    """Return inexpensive file fingerprints for assets referenced by JSONL."""
+    """Return inexpensive file fingerprints for assets referenced by JSONL.
+
+    Memoized per process on the manifest's own stat: one startup fingerprints
+    the dataset and each chunk split, and re-stating every WAV on network
+    storage dominated startup time.
+    """
     if not manifest.is_file():
         return []
+    manifest_stat = manifest.stat()
+    memo_key = (str(manifest.resolve()), manifest_stat.st_size, manifest_stat.st_mtime_ns)
+    if memo_key not in _ASSET_CACHE:
+        _ASSET_CACHE[memo_key] = _scan_manifest_assets(manifest)
+    return _ASSET_CACHE[memo_key]
+
+
+def _scan_manifest_assets(manifest: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     root_dir = manifest.parent.resolve()
     for line_number, line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):

@@ -122,6 +122,10 @@ def _compact_chunks_for_workers(chunks: list[PreparedSample]) -> list[PreparedSa
     return compact
 
 
+def _chunk_key(chunk: PreparedSample) -> tuple[str, float, float]:
+    return (chunk.sample_id, float(chunk.window_start_sec), float(chunk.window_end_sec))
+
+
 def filter_text_capacity_chunks(
     chunks: list[PreparedSample],
     tokenizer: Tokenizer,
@@ -150,24 +154,29 @@ def filter_text_capacity_chunks(
 
         if not force_filter:
             cached = load_filter_manifest(cache_path, cache_fingerprint)
-            if cached is not None and "kept" in cached and "rejected" in cached:
+            if cached is not None and "kept_keys" in cached and "rejected" in cached:
                 print(
                     f"[Chunk filter workers] candidates={len(chunks)} configured={num_workers} "
                     f"active=0 mode=cache", flush=True,
                 )
-                print(
-                    f"[Chunk filter cache] hit path={cache_path} candidates={len(chunks)} kept={len(cached['kept'])}",
-                    flush=True,
-                )
-                rejected_cached = tuple(
-                    RejectedChunk(
-                        item["sample_id"], float(item["window_start_sec"]),
-                        float(item["window_end_sec"]), item["reason"], tuple(item["roles"]),
-                        Word(item.get("word_speaker", "agent"), item["word"], float(item["word_start_sec"]),
-                             float(item.get("word_end_sec", item["word_start_sec"]))),
-                    ) for item in cached["rejected"]
-                )
-                return ChunkFilterResult(tuple(cached["kept"]), rejected_cached)
+                # The cache stores only chunk keys; rebuild kept chunks from the
+                # in-memory candidates instead of re-parsing full conversation words.
+                by_key = {_chunk_key(chunk): chunk for chunk in chunks}
+                kept_keys = [tuple(key) for key in cached["kept_keys"]]
+                if all(key in by_key for key in kept_keys):
+                    print(
+                        f"[Chunk filter cache] hit path={cache_path} candidates={len(chunks)} kept={len(kept_keys)}",
+                        flush=True,
+                    )
+                    rejected_cached = tuple(
+                        RejectedChunk(
+                            item["sample_id"], float(item["window_start_sec"]),
+                            float(item["window_end_sec"]), item["reason"], tuple(item["roles"]),
+                            Word(item.get("word_speaker", "agent"), item["word"], float(item["word_start_sec"]),
+                                 float(item.get("word_end_sec", item["word_start_sec"]))),
+                        ) for item in cached["rejected"]
+                    )
+                    return ChunkFilterResult(tuple(by_key[key] for key in kept_keys), rejected_cached)
 
     tasks_per_worker = 8
     task_count = math.ceil(len(chunks) / tasks_per_worker)
@@ -218,7 +227,7 @@ def filter_text_capacity_chunks(
     result = ChunkFilterResult(tuple(kept), tuple(rejected))
     if cache_path is not None:
         save_filter_manifest(cache_path, cache_fingerprint, {
-            "kept": result.kept,
+            "kept_keys": [list(_chunk_key(chunk)) for chunk in result.kept],
             "rejected": [{
                 "sample_id": item.sample_id,
                 "window_start_sec": item.window_start_sec,

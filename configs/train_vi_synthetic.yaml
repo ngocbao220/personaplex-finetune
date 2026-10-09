@@ -1,7 +1,8 @@
 # PersonaPlex LoRA fine-tuning: synthetic 500h Vietnamese dataset, 2x B200.
 # Global batch = batch_size 4 x grad_accum 4 x 2 GPUs = 32 chunks per optimizer step.
-# max_steps: ceil(passes * kept_train_chunks / 32), using kept_chunks printed at startup.
-# swap_roles_after_pass is false, so one pass = one epoch over the kept chunks.
+# epochs sets max_steps from the kept train chunks at startup (logged as
+# "epochs_to_steps"); the LR schedule still runs per optimizer step.
+# One epoch = one pass over the kept chunks (~535 steps for ~17k chunks).
 #
 # Fill the Mimi cache once, then train (same config both times):
 #   torchrun --nproc_per_node=2 train.py configs/train_vi_synthetic.yaml --precompute-codec-cache
@@ -18,7 +19,8 @@ duration_sec: 100
 sample_number: null
 sample_index: null
 batch_size: 4                 # Per GPU; global batch = 4 * 4 * 2 = 32.
-max_steps: 10000
+epochs: 2                     # Derives max_steps; set null to use max_steps instead.
+max_steps: 10000              # Ignored while epochs is set.
 profile_steps: false
 no_eval: false
 user_loss: true               # IMPORTANT: also supervise the user audio stream.

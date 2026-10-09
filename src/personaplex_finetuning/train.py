@@ -1585,6 +1585,19 @@ def verify_reloaded_full(config: Config, sample, checkpoint: Path, runtime) -> f
         parallel_model.train(was_training)
 
 
+def steps_for_epochs(epochs: float, train_chunks: int, per_device_batch_size: int,
+                     world_size: int, accum_steps: int) -> int:
+    """Optimizer steps covering ``epochs`` passes over the kept train chunks.
+
+    Mirrors RankStrideBatchSampler: every rank runs the same number of micro
+    batches per pass, and one optimizer step consumes ``accum_steps`` of them.
+    """
+    micro_batches_per_epoch = len(RankStrideBatchSampler(train_chunks, per_device_batch_size, 0, world_size))
+    if micro_batches_per_epoch < 1:
+        raise ValueError("no full training batch per epoch; lower batch_size or add data")
+    return max(1, math.ceil(epochs * micro_batches_per_epoch / accum_steps))
+
+
 def precompute_codec_cache(config: Config, chunks: list, device, rank: int, world_size: int) -> dict[str, int]:
     """Encode every kept training chunk into the Mimi disk cache, then stop.
 
@@ -1840,7 +1853,11 @@ def run(
         sample for sample in train_conversations
         if retained_groups.intersection(conversation_group_keys(sample))
     ]
-    if config.eval_on_train_samples:
+    if precompute_codec_cache_only:
+        # Only train chunks go through the Mimi cache; skip eval-split filtering.
+        # The train/validation split above is kept so train chunks match training.
+        val_samples, test_samples = [], []
+    elif config.eval_on_train_samples:
         # Reuse the exact kept training chunks; do not classify them twice.
         val_samples = list(train_samples)
         filter_payloads["validation"] = {
@@ -1852,7 +1869,8 @@ def run(
         }
     else:
         val_samples = filter_split("validation", val_samples)
-    test_samples = filter_split("test", test_samples)
+    if not precompute_codec_cache_only:
+        test_samples = filter_split("test", test_samples)
     minimum_chunks = world_size * config.per_device_batch_size
     if len(train_samples) < minimum_chunks:
         raise ValueError(
@@ -1862,6 +1880,23 @@ def run(
             f"{filter_payloads['train']['skipped_text_overflow_chunks']}); at least {minimum_chunks} "
             f"are required for world_size={world_size}, batch_size_per_gpu={config.per_device_batch_size}"
         )
+
+    if config.epochs is not None and not smoke:
+        max_steps = steps_for_epochs(
+            config.epochs, len(train_samples), config.per_device_batch_size, world_size, accum_steps,
+        )
+        if config.warmup_steps >= max_steps:
+            raise ValueError(f"train.warmup_steps={config.warmup_steps} must be below derived max_steps={max_steps}")
+        config = config.replace(
+            max_steps=max_steps,
+            # warmup_steps was converted to a fraction of the YAML max_steps; redo it.
+            pct_start=config.warmup_steps / max_steps if config.warmup_steps else config.pct_start,
+        )
+        if main_process:
+            print(json.dumps({
+                "event": "epochs_to_steps", "epochs": config.epochs, "train_chunks": len(train_samples),
+                "global_batch_size": global_batch_size, "max_steps": max_steps,
+            }), flush=True)
 
     if precompute_codec_cache_only:
         precompute_codec_cache(config, train_samples, device, rank, world_size)
