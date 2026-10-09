@@ -106,6 +106,8 @@ class RuntimePathsTest(unittest.TestCase):
                 # Second role pass swaps agent/user: same physical channels, no re-encode.
                 self.assertEqual(first.encode_conversation_stereo_cached(path, 1, 0, 0, 16 / 24_000), (right, left))
                 self.assertEqual(model.calls, 2)
+                self.assertEqual(
+                    (first.cache_stats["dialogue_encoded"], first.cache_stats["dialogue_cache_hit"]), (1, 1))
             rank0 = MimiCodec(model, 24_000, 12.5, "cuda:0", object(), cache_dir=root / "cache")
             rank1 = MimiCodec(model, 24_000, 12.5, "cuda:1", object(), cache_dir=root / "cache")
             self.assertEqual(rank0._conversation_cache_info(path, 0, 1), rank1._conversation_cache_info(path, 0, 1))

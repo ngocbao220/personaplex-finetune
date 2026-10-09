@@ -112,6 +112,9 @@ class MimiCodec:
         self.device = device
         self._helpers = lm_helpers
         self._voice_cache: dict[str, tuple[tuple[int, ...], ...]] = {}
+        # Cumulative per-process counters: disk-cache hits vs live Mimi encodes.
+        self.cache_stats = {"dialogue_cache_hit": 0, "dialogue_encoded": 0,
+                            "voice_cache_hit": 0, "voice_encoded": 0}
         self._cache_dir = cache_dir  # Optional persistent disk cache for conversation encoding
         self._cache_namespace = cache_namespace
 
@@ -153,6 +156,7 @@ class MimiCodec:
                 agent, user = channels[agent_channel], channels[user_channel]
                 self._validate_cached_codes(agent, user, cache_file)
                 results[index] = (agent, user)
+                self.cache_stats["dialogue_cache_hit"] += 1
             else:
                 pending.append((index, Path(path), agent_channel, user_channel, start_sec, end_sec))
 
@@ -192,6 +196,7 @@ class MimiCodec:
                 self.device, dtype=torch.float32, non_blocking=use_pinned_transfer,
             )
             encoded = [self._encode(channel, torch) for channel in batch]
+            self.cache_stats["dialogue_encoded"] += len(pending)
             for pending_index, (result_index, *_rest) in enumerate(pending):
                 agent_codes = encoded[pending_index * 2]
                 user_codes = encoded[pending_index * 2 + 1]
@@ -315,6 +320,7 @@ class MimiCodec:
                 raise ValueError(f"invalid voice-prompt codes in Mimi cache: {info[1]}")
             codes = tuple(tuple(stream) for stream in codes)
             self._voice_cache[key] = codes
+            self.cache_stats["voice_cache_hit"] += 1
             return codes
         audio = self._helpers.load_audio(str(path), self.sample_rate)
         audio = self._helpers.normalize_audio(audio, self.sample_rate, -24.0)
@@ -332,6 +338,7 @@ class MimiCodec:
         encoded = torch.cat(native_frames, dim=2)[0]
         codes = tuple(tuple(int(token) for token in stream.tolist()) for stream in encoded)
         self._voice_cache[key] = codes
+        self.cache_stats["voice_encoded"] += 1
         if info is not None:
             cache_file = info[1]
             cache_file.parent.mkdir(parents=True, exist_ok=True)

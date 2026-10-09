@@ -2087,6 +2087,15 @@ def run(
         codec_cache_dir=config.codec_cache_dir,
         full_precision_model=config.train_method == "full",
     )
+    if main_process:
+        cache_dir = config.codec_cache_dir
+        print(
+            f"[Codec cache] dir={cache_dir} dialogue_files="
+            f"{sum(1 for _ in Path(cache_dir).glob('*.pt')) if cache_dir and Path(cache_dir).is_dir() else 0} "
+            f"voice_files={sum(1 for _ in (Path(cache_dir) / 'voice').glob('*.pt')) if cache_dir and (Path(cache_dir) / 'voice').is_dir() else 0}"
+            if cache_dir else "[Codec cache] disabled (data.codec_cache_dir=null): Mimi encodes every chunk live",
+            flush=True,
+        )
     if not math.isclose(runtime.codec.frame_rate, PERSONAPLEX_MIMI_FRAME_RATE, rel_tol=0, abs_tol=1e-6):
         raise RuntimeError(
             f"loaded Mimi frame_rate={runtime.codec.frame_rate:g} does not match "
@@ -2582,6 +2591,9 @@ def run(
                     ),
                     "timing/train_update_sec_mean": pending_train_seconds / pending_train_updates,
                     "gpu_peak_bytes": device_memory_bytes(device),
+                    # Rank-0 cumulative Mimi work: *_encoded should stay 0 with a full cache.
+                    **{f"codec_cache/{name}": value
+                       for name, value in getattr(runtime.codec, "cache_stats", {}).items()},
                 }
                 if profile_times is not None:
                     record.update({
