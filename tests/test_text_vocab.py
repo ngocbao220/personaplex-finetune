@@ -125,3 +125,51 @@ class TextVocabTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TextVocabFp32MasterTest(unittest.TestCase):
+    def test_bf16_text_modules_train_on_fp32_masters_and_adapter_round_trips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tok = TranslatedTokenizer(train_spm(Path(tmp)))
+            model = TinyLM().to(torch.bfloat16)
+            resize_text_vocab(model, OldTokenizer(), tok)
+            inject_lora(model, rank=2, alpha=4)
+            self.assertEqual(text_vocab.keep_text_vocab_fp32(model), 3)
+            self.assertEqual(text_vocab.keep_text_vocab_fp32(model), 0)  # idempotent
+            names = text_vocab.text_vocab_parameter_names(model)
+            params = dict(model.named_parameters())
+            self.assertEqual(len(names), 3)
+            self.assertTrue(all(params[name].dtype == torch.float32 for name in names))
+            self.assertEqual(model.text_emb.weight.dtype, torch.bfloat16)  # forward dtype unchanged
+
+            # An update far below BF16 resolution survives in the fp32 master.
+            master = params[[n for n in names if n.startswith("text_emb.")][0]]
+            master.requires_grad_(True)
+            before = master.detach().clone()
+            optimizer = torch.optim.SGD([master], lr=1e-5)
+            model.text_emb(torch.tensor([5])).float().sum().backward()
+            optimizer.step()
+            self.assertGreater(int((master.detach() != before).sum()), 0)
+
+            state = adapter_state_dict(model)
+            self.assertIn("text_emb.weight", state)
+            self.assertFalse(any("parametrizations" in key for key in state))
+            path = Path(tmp) / "lora.safetensors"
+            from safetensors.torch import save_file
+            save_file(state, str(path))
+
+            # Load into a plain BF16 model (inference path, no fp32 masters).
+            plain = TinyLM().to(torch.bfloat16)
+            resize_text_vocab(plain, OldTokenizer(), tok)
+            inject_lora(plain, rank=2, alpha=4)
+            load_adapter(plain, path)
+            torch.testing.assert_close(plain.text_emb.weight.float(), master.detach().to(torch.bfloat16).float())
+
+            # And back into an fp32-master model (resume path).
+            resumed = TinyLM().to(torch.bfloat16)
+            resize_text_vocab(resumed, OldTokenizer(), tok)
+            inject_lora(resumed, rank=2, alpha=4)
+            text_vocab.keep_text_vocab_fp32(resumed)
+            load_adapter(resumed, path)
+            resumed_master = dict(resumed.named_parameters())[[n for n in names if n.startswith("text_emb.")][0]]
+            torch.testing.assert_close(resumed_master, master.detach())

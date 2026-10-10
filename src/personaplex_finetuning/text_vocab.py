@@ -196,6 +196,51 @@ def resize_text_vocab(model, old_tokenizer, new_tokenizer, head_init: str = "dec
     return {"old_text_card": old_card, "new_text_card": new_card, "head_init": head_init}
 
 
+_PARAMETRIZED = (".parametrizations.weight.original", ".parametrizations.bias.original")
+
+
+def canonical_parameter_name(name: str) -> str:
+    """Checkpoint key of a parameter, independent of the fp32 master-weight parametrization."""
+    for marker, plain in zip(_PARAMETRIZED, (".weight", ".bias")):
+        name = name.replace(marker, plain)
+    return name
+
+
+def keep_text_vocab_fp32(model) -> int:
+    """Train the resized text modules on fp32 master weights.
+
+    BF16 keeps ~3 significant digits, so AdamW updates of lr~1e-4 on BF16
+    embeddings mostly round to zero. The forward pass still sees the original
+    compute dtype through a cast parametrization; only storage/updates are fp32.
+    Returns the number of tensors promoted.
+    """
+    import torch
+    from torch.nn.utils import parametrize
+
+    class CastTo(torch.nn.Module):
+        def __init__(self, dtype):
+            super().__init__()
+            self.dtype = dtype
+
+        def forward(self, value):
+            return value.to(self.dtype)
+
+    if getattr(model, "_personaplex_text_vocab", None) is None:
+        return 0
+    promoted = 0
+    for module_name in TEXT_VOCAB_MODULES:
+        module = getattr(model, module_name)
+        for attribute in ("weight", "bias"):
+            tensor = getattr(module, attribute, None)
+            if tensor is None or parametrize.is_parametrized(module, attribute) or tensor.dtype == torch.float32:
+                continue
+            compute_dtype = tensor.dtype
+            setattr(module, attribute, torch.nn.Parameter(tensor.detach().float(), requires_grad=tensor.requires_grad))
+            parametrize.register_parametrization(module, attribute, CastTo(compute_dtype), unsafe=True)
+            promoted += 1
+    return promoted
+
+
 def text_vocab_parameter_names(model) -> list[str]:
     if getattr(model, "_personaplex_text_vocab", None) is None:
         return []

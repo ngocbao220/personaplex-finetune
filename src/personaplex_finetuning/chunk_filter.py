@@ -245,3 +245,67 @@ def filter_text_capacity_chunks(
             f"path={cache_path} candidates={len(chunks)} kept={len(result.kept)}", flush=True,
         )
     return result
+
+
+@dataclass(frozen=True)
+class LanguageReport:
+    """Whisper LID scores from scripts/filter_whisper_lid.py, keyed by (sample_id, chunk index)."""
+    threshold: float
+    duration_sec: float
+    scores: dict[tuple[str, int], float]
+
+    @property
+    def sample_ids(self) -> set[str]:
+        return {sample_id for sample_id, _ in self.scores}
+
+
+def _chunk_index(start_sec: float, duration_sec: float) -> int:
+    index = round(start_sec / duration_sec)
+    if abs(start_sec - index * duration_sec) > 1e-3:
+        raise ValueError(f"chunk start {start_sec} is not on the {duration_sec}s grid")
+    return index
+
+
+def load_language_report(path, manifest, duration_sec: float) -> LanguageReport:
+    """Validate a LID report against the manifest it scored and the training chunk length."""
+    import hashlib
+    import json
+    from pathlib import Path
+
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if raw.get("duration_sec") != duration_sec:
+        raise ValueError(f"Whisper LID chunk duration {raw.get('duration_sec')} differs from training {duration_sec}")
+    if raw.get("source_manifest_sha256") != hashlib.sha256(Path(manifest).read_bytes()).hexdigest():
+        raise ValueError("Whisper LID report was built from a different manifest")
+    threshold = raw.get("threshold")
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1:
+        raise ValueError(f"Whisper LID report has an invalid threshold: {threshold!r}")
+    scores = {
+        (str(row["sample_id"]), _chunk_index(float(row["window_start_sec"]), duration_sec)): float(row["vi_probability"])
+        for row in raw.get("chunks", [])
+    }
+    return LanguageReport(float(threshold), float(duration_sec), scores)
+
+
+def filter_language_chunks(chunks: list[PreparedSample], report: LanguageReport) -> tuple[list[PreparedSample], int, int]:
+    """Drop scored chunks below the threshold; conversations the report never scored pass through.
+
+    Returns (kept, rejected, unscored). A scored conversation with a missing
+    chunk means the report is stale, so that fails instead of passing silently.
+    """
+    scored_ids = report.sample_ids
+    kept: list[PreparedSample] = []
+    rejected = unscored = 0
+    for chunk in chunks:
+        if chunk.sample_id not in scored_ids:
+            kept.append(chunk)
+            unscored += 1
+            continue
+        key = (chunk.sample_id, _chunk_index(chunk.window_start_sec, report.duration_sec))
+        if key not in report.scores:
+            raise ValueError(f"Whisper LID report is missing chunk {key}; rebuild it for this data")
+        if report.scores[key] >= report.threshold:
+            kept.append(chunk)
+        else:
+            rejected += 1
+    return kept, rejected, unscored

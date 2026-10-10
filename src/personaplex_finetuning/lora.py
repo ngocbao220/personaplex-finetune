@@ -145,14 +145,26 @@ def _adapter_parameter_names(model) -> set[str]:
 
 
 def adapter_state_dict(model):
+    from .text_vocab import canonical_parameter_name
+
     names = _adapter_parameter_names(model)
-    return {name: parameter.detach().cpu() for name, parameter in model.named_parameters() if name in names}
+    return {
+        canonical_parameter_name(name): parameter.detach().cpu()
+        for name, parameter in model.named_parameters() if name in names
+    }
 
 
 def load_adapter(model, path) -> None:
+    import torch
     from safetensors.torch import load_file
+    from .text_vocab import canonical_parameter_name
+
     state = load_file(str(path))
-    expected = _adapter_parameter_names(model)
+    parameters = {
+        canonical_parameter_name(name): parameter
+        for name, parameter in model.named_parameters() if name in _adapter_parameter_names(model)
+    }
+    expected = set(parameters)
     supplied = set(state)
     missing = expected - supplied
     unexpected = supplied - expected
@@ -161,4 +173,9 @@ def load_adapter(model, path) -> None:
             f"adapter keys do not match model (text vocabulary must match too): "
             f"missing={sorted(missing)[:5]}, unexpected={sorted(unexpected)[:5]}"
         )
-    model.load_state_dict(state, strict=False)
+    with torch.no_grad():
+        for name, parameter in parameters.items():
+            if parameter.shape != state[name].shape:
+                raise RuntimeError(f"adapter tensor {name} has shape {tuple(state[name].shape)}, "
+                                   f"model expects {tuple(parameter.shape)}")
+            parameter.copy_(state[name])

@@ -1949,33 +1949,19 @@ def run(
     test_samples = duration_chunks(test_samples, config.duration_sec) if test_samples else []
 
     if config.whisper_lid_report is not None:
-        lid = json.loads(config.whisper_lid_report.read_text(encoding="utf-8"))
-        if lid.get("duration_sec") != config.duration_sec:
-            raise ValueError("Whisper LID chunk duration differs from training")
-        if lid.get("source_manifest_sha256") != hashlib.sha256(config.manifest.read_bytes()).hexdigest():
-            raise ValueError("Whisper LID report was built from a different manifest")
-        if not 0 <= lid.get("threshold", -1) <= 1:
-            raise ValueError("Whisper LID report has an invalid threshold")
-        report_keys = {
-            (row["sample_id"], row["window_start_sec"], row["window_end_sec"]): row
-            for row in lid["chunks"]
-        }
-        all_chunks = train_samples + val_samples + test_samples
-        missing = [
-            (s.sample_id, s.window_start_sec, s.window_end_sec) for s in all_chunks
-            if (s.sample_id, s.window_start_sec, s.window_end_sec) not in report_keys
-        ]
-        if missing:
-            raise ValueError(f"Whisper LID report missing {len(missing)} chunks; first={missing[0]}")
-        def keep_vi(chunks, split):
-            kept = [s for s in chunks if report_keys[(s.sample_id, s.window_start_sec, s.window_end_sec)]["vi_probability"] >= lid["threshold"]]
+        from .chunk_filter import filter_language_chunks, load_language_report
+        lid_report = load_language_report(config.whisper_lid_report, config.manifest, config.duration_sec)
+
+        def keep_scored_language(chunks, split):
+            kept, rejected, unscored = filter_language_chunks(chunks, lid_report)
             if main_process:
-                print(f"[Whisper LID] split={split} kept={len(kept)} rejected={len(chunks)-len(kept)} "
-                      f"threshold={lid['threshold']}", flush=True)
+                print(f"[Whisper LID] split={split} kept={len(kept)} rejected={rejected} "
+                      f"unscored={unscored} threshold={lid_report.threshold}", flush=True)
             return kept
-        train_samples = keep_vi(train_samples, "train")
-        val_samples = keep_vi(val_samples, "validation")
-        test_samples = keep_vi(test_samples, "test")
+
+        train_samples = keep_scored_language(train_samples, "train")
+        val_samples = keep_scored_language(val_samples, "validation")
+        test_samples = keep_scored_language(test_samples, "test")
 
     resolved = RuntimePaths(config.model_root, config.personaplex_source).validate(require_model=False)
     from .text_vocab import build_text_tokenizer, file_sha256, tokenizer_fingerprint_path
@@ -2337,7 +2323,12 @@ def run(
         barrier()
 
     targets = configure_trainable_parameters(runtime.model, config, lora_prefixes)
-    from .text_vocab import text_vocab_parameter_names
+    from .text_vocab import keep_text_vocab_fp32, text_vocab_parameter_names
+    if config.train_method != "full":
+        # Before resume/init adapter loads and optimizer creation, so both see fp32 masters.
+        promoted = keep_text_vocab_fp32(runtime.model)
+        if promoted and main_process:
+            print(f"[Text vocab] fp32 master weights for {promoted} tensors (forward stays bf16)", flush=True)
     text_vocab_names = set(text_vocab_parameter_names(runtime.model))
     for name, parameter in runtime.model.named_parameters():
         if name in text_vocab_names:
