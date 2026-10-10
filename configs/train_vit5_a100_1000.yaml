@@ -1,0 +1,88 @@
+# ViT5 LoRA fine-tuning on one A100 40 GB.
+defaults:
+  - model: server
+  - data: vietnamese
+  - lora: default
+  - _self_
+
+seed: 42
+duration_sec: 100
+sample_number: null
+sample_index: null
+batch_size: 1
+epochs: null
+max_steps: 1000
+profile_steps: false
+no_eval: false
+user_loss: false
+free_running_eval_every_steps: 500
+free_running_eval_samples: 2
+free_running_eval_window_seconds: 30
+validation_max_samples: 32
+
+model:
+  root: /content/drive/MyDrive/VDT-TurnTaking/personaplex-finetune/personaplex-7b-v1
+  source: ../src
+  device: cuda
+  text_tokenizer: vit5
+  text_tokenizer_path: /content/drive/MyDrive/VDT-TurnTaking/personaplex-finetune/vit5/spiece.model
+  text_head_init: decomposition
+
+data:
+  prepared_dir: /content/training-assets/ready
+  codec_cache_dir: /content/training-assets/mimi-cache
+  whisper_lid_report: /content/drive/MyDrive/VDT-TurnTaking/personaplex-finetune/whisper_lid_small_100s.json
+  window_seconds: null
+  shuffle: true
+  prompt_aug_prob: 0.0
+  vietnamese_text_mode: diacritics
+  swap_roles_after_pass: false
+  val_ratio: 0.05
+  val_manifest: null
+  test_manifest_path: null
+
+lora:
+  enable: true
+  rank: 128
+  alpha: 256
+  scaling: 2.0
+  qlora: false
+  quant_type: nf4
+
+optim:
+  lr: 2.0e-6
+  weight_decay: 0.1
+  pct_start: 0.05
+
+train:
+  output_dir: /content/drive/MyDrive/VDT-TurnTaking/personaplex-finetune/runs/vit5-a100-1000
+  depformer_learning_rate: 5.0e-6
+  text_vocab_learning_rate: 1.0e-4
+  stage: joint
+  gradient_accumulation_steps: 8
+  warmup_steps: 0
+  eval_every_steps: 500
+  eval_on_train_samples: false
+  save_every_steps: 500
+  num_workers: 4
+  filter_num_workers: 16
+  prefetch_factor: 2
+  batch_prefetch: 2
+  pin_memory: true
+  persistent_workers: true
+  gradient_checkpointing: true
+  mixed_precision: bf16
+
+first_codebook_weight_multiplier: 1.0
+text_padding_weight: 0.3
+epad_weight: 1.0
+log_freq: 1
+ckpt_freq: 500
+
+generation:
+  use_sampling: true
+  temp: 0.8
+  temp_text: 0.7
+  top_k: 250
+  top_k_text: 25
+  audio_silence_frame_cnt: 6

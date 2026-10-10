@@ -290,6 +290,10 @@ def training_contract(config: Config, train_conversations: list, train_chunks: l
     ).hexdigest()
     contract = {
         "manifest": str(manifest), "manifest_sha256": digest.hexdigest(),
+        "whisper_lid_report_sha256": (
+            hashlib.sha256(config.whisper_lid_report.read_bytes()).hexdigest()
+            if config.whisper_lid_report is not None else None
+        ),
         "prepared_sources_sha256": source_digest.hexdigest(),
         "text_capacity_filter_version": 1,
         "sample_number_contract": "valid-chunks-v1",
@@ -1943,6 +1947,35 @@ def run(
         train_samples = train_samples[:1]
     val_samples = duration_chunks(val_samples, config.duration_sec) if val_samples else []
     test_samples = duration_chunks(test_samples, config.duration_sec) if test_samples else []
+
+    if config.whisper_lid_report is not None:
+        lid = json.loads(config.whisper_lid_report.read_text(encoding="utf-8"))
+        if lid.get("duration_sec") != config.duration_sec:
+            raise ValueError("Whisper LID chunk duration differs from training")
+        if lid.get("source_manifest_sha256") != hashlib.sha256(config.manifest.read_bytes()).hexdigest():
+            raise ValueError("Whisper LID report was built from a different manifest")
+        if not 0 <= lid.get("threshold", -1) <= 1:
+            raise ValueError("Whisper LID report has an invalid threshold")
+        report_keys = {
+            (row["sample_id"], row["window_start_sec"], row["window_end_sec"]): row
+            for row in lid["chunks"]
+        }
+        all_chunks = train_samples + val_samples + test_samples
+        missing = [
+            (s.sample_id, s.window_start_sec, s.window_end_sec) for s in all_chunks
+            if (s.sample_id, s.window_start_sec, s.window_end_sec) not in report_keys
+        ]
+        if missing:
+            raise ValueError(f"Whisper LID report missing {len(missing)} chunks; first={missing[0]}")
+        def keep_vi(chunks, split):
+            kept = [s for s in chunks if report_keys[(s.sample_id, s.window_start_sec, s.window_end_sec)]["vi_probability"] >= lid["threshold"]]
+            if main_process:
+                print(f"[Whisper LID] split={split} kept={len(kept)} rejected={len(chunks)-len(kept)} "
+                      f"threshold={lid['threshold']}", flush=True)
+            return kept
+        train_samples = keep_vi(train_samples, "train")
+        val_samples = keep_vi(val_samples, "validation")
+        test_samples = keep_vi(test_samples, "test")
 
     resolved = RuntimePaths(config.model_root, config.personaplex_source).validate(require_model=False)
     from .text_vocab import build_text_tokenizer, file_sha256, tokenizer_fingerprint_path

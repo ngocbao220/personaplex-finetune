@@ -1,0 +1,19 @@
+# Separate 100-valid-chunk train-set diagnostic; does not affect the ongoing run.
+defaults:
+  - train_vit5_a100_1000
+  - _self_
+
+sample_number: 100
+user_loss: true
+
+data:
+  val_ratio: 0.0
+
+optim:
+  lr: 2.0e-5
+
+train:
+  output_dir: /content/drive/MyDrive/VDT-TurnTaking/personaplex-finetune/runs/vit5-a100-userloss-lr10-train100
+  depformer_learning_rate: 5.0e-5
+  text_vocab_learning_rate: 1.0e-3
+  eval_on_train_samples: true

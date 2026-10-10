@@ -21,6 +21,7 @@ class Config:
     prepared_dir: Path
     output_dir: Path
     codec_cache_dir: Path | None = None
+    whisper_lid_report: Path | None = None
     seed: int = 42
     window_seconds: float | None = None
     shuffle: bool = False
@@ -247,6 +248,10 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         else train
     )
     codec_cache_raw = data.get("codec_cache_dir")
+    lid_raw = data.get("whisper_lid_report")
+    whisper_lid_report = resolve(data, "whisper_lid_report") if lid_raw else None
+    if whisper_lid_report is not None and not whisper_lid_report.is_file():
+        raise ValueError(f"Whisper LID report does not exist: {whisper_lid_report}")
     if codec_cache_raw is not None and (not isinstance(codec_cache_raw, str) or not codec_cache_raw.strip()):
         raise ValueError("data.codec_cache_dir must be null, auto, or a non-empty path")
     if codec_cache_raw is None:
@@ -347,6 +352,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         # configs/overfit.yaml -> ../runs/overfit.
         output_dir=resolve(output_dir_section, "output_dir", output_dir_default),
         codec_cache_dir=codec_cache_dir,
+        whisper_lid_report=whisper_lid_report,
         seed=int(raw.get("seed", 42)),
         window_seconds=(
             float(data["window_seconds"])
