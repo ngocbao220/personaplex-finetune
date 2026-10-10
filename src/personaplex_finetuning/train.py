@@ -1414,6 +1414,10 @@ def inference_config_snapshot(config: Config, adapter_path: Path, output_dir: Pa
             "root": str(config.model_root),
             "source": str(config.personaplex_source),
             "device": config.device,
+            "text_tokenizer": getattr(config, "text_tokenizer", "personaplex"),
+            "text_tokenizer_path": (
+                str(config.text_tokenizer_path) if getattr(config, "text_tokenizer_path", None) else None
+            ),
         },
         "data": data,
         "lora": {"qlora": config.qlora, "quant_type": config.quant_type},
@@ -1941,7 +1945,7 @@ def run(
     test_samples = duration_chunks(test_samples, config.duration_sec) if test_samples else []
 
     resolved = RuntimePaths(config.model_root, config.personaplex_source).validate(require_model=False)
-    from .text_vocab import build_text_tokenizer, tokenizer_fingerprint_path
+    from .text_vocab import build_text_tokenizer, file_sha256, tokenizer_fingerprint_path
     filter_tokenizer = (
         SentencePieceTokenizer(resolved.tokenizer) if config.text_tokenizer == "personaplex"
         else build_text_tokenizer(resolved.tokenizer, config.text_tokenizer, config.text_tokenizer_path)
@@ -2173,6 +2177,13 @@ def run(
             "swap_roles_after_pass": config.swap_roles_after_pass,
             "gradient_checkpointing": config.gradient_checkpointing,
             "mixed_precision": config.mixed_precision,
+            "text_tokenizer": config.text_tokenizer,
+            "text_tokenizer_path": str(filter_tokenizer_path),
+            "text_tokenizer_sha256": file_sha256(filter_tokenizer_path),
+            "text_head_init": config.text_head_init if config.text_tokenizer != "personaplex" else None,
+            "text_vocab_learning_rate": (
+                config.text_vocab_learning_rate if config.text_tokenizer != "personaplex" else None
+            ),
             "num_train_samples": len(train_samples),
             "num_train_candidate_chunks": train_candidate_count,
             "num_val_samples": len(val_samples),

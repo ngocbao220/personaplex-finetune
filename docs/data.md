@@ -13,6 +13,8 @@ Dữ liệu đầu vào cho quá trình huấn luyện bắt buộc đã đượ
 *   Text/System prompt của Agent.
 *   Metadata.
 
+Định dạng chi tiết từng file và script xuất mẫu: [prepared_data_format.md](prepared_data_format.md).
+
 ## 2. Công cụ Đánh giá & Lọc dữ liệu
 
 Trước khi train, người dùng cần chạy các module nằm trong `tools` để xác thực:

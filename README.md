@@ -69,24 +69,90 @@ Override `key=value` thay YAML cho lần chạy đó. Tham số chính:
 | `data.swap_roles_after_pass` | Đổi vai LEFT/RIGHT giữa các epoch; cần prompt cho cả hai phía. |
 | `--force-filter` | Bỏ cache, lọc lại sample và chunk. |
 
+### Benchmark tokenizer tiếng Việt
+
+`tools.benchmark_vi_tokenizer` đo tokenizer đúng như trainer đặt text agent lên lưới Mimi 12.5 frame/s. Tool chỉ chạy CPU, không load LM hay Mimi. Các chỉ số đo:
+- round-trip: `decode(encode(x)) == x`;
+- số token trên mỗi âm tiết (tok/syl) và token/giây nói;
+- tỉ lệ byte-fallback;
+- số chunk bị loại do quá tải text (`overflow`) hoặc lệch timestamp (`oob`).
+
+```bash
+# Tokenizer gốc (mặc định <model.root>/tokenizer_spm_32k_3.model) so với ViT5, cả 3 chế độ text
+PYTHONPATH=src python -m tools.benchmark_vi_tokenizer --config configs/train_vi_synthetic.yaml \
+  data.prepared_dir=../synthetic_samples \
+  --tokenizer /path/personaplex-7b-v1/tokenizer_spm_32k_3.model \
+  --translated /path/vit5-large/spiece.model \
+  --modes diacritics,no_diacritics,telex \
+  --output outputs/tokenizer_benchmark/report.json
+```
+
+Các tuỳ chọn:
+- `--tokenizer`: một file `.model` SentencePiece đọc trực tiếp. Lặp lại flag để so sánh nhiều tokenizer.
+- `--translated`: một file `.model` đọc qua lớp dịch ID của PersonaPlex. Lớp dịch này là cách `model.text_tokenizer=vit5` dùng tokenizer.
+- `--speakers agent|all`: mặc định `agent`, là phần text được train.
+- `--max-conversations N`: chỉ dùng N hội thoại.
+- `--num-workers`: số worker CPU.
+- Các override Hydra (`key=value`) được truyền thẳng vào config.
+
+Tool in bảng ra màn hình và ghi JSON chi tiết vào `--output`, gồm cả ví dụ round-trip lỗi và các từ bị byte-fallback nhiều nhất. Nếu `tok/s` vượt 12.5 thì chunk dễ bị loại vì overflow.
+
+Kết quả trên 8 mẫu `../synthetic_samples`:
+
+| Tokenizer | Chế độ | tok/âm tiết | tok/s | byte-fallback |
+|---|---|---|---|---|
+| gốc 32k | diacritics | 4.07 | 16.5 | 46% |
+| gốc 32k | no_diacritics | 1.81 | — | 0% |
+| ViT5 | diacritics | 1.01 | 4.1 | 0% |
+
 ### Tokenizer text (tuỳ chọn ViT5)
 
-Mặc định dùng SentencePiece 32k gốc. Tiếng Việt có dấu bị cắt ~4 token/âm tiết với tokenizer này; đo bằng:
-```bash
-PYTHONPATH=src python -m tools.benchmark_vi_tokenizer --config configs/train_vi_synthetic.yaml \
-  --translated /path/vit5-large/spiece.model
+Mặc định trainer dùng SentencePiece 32k gốc (`model.text_tokenizer: personaplex`), nên không có gì thay đổi. ViT5 phù hợp khi muốn train tiếng Việt có dấu (`data.vietnamese_text_mode=diacritics`).
+
+**1. Chuẩn bị** (server offline, nên copy sẵn file lên): file `spiece.model` của `VietAI/vit5-large`, ví dụ `/home/voice/data/voice/vit5-large/spiece.model`.
+
+**2. Config.** Thêm vào file YAML hoặc truyền dưới dạng override:
+```yaml
+model:
+  text_tokenizer: vit5                       # personaplex | vit5
+  text_tokenizer_path: /home/voice/data/voice/vit5-large/spiece.model
+  text_head_init: decomposition              # decomposition | random (A/B cho text_linear)
+data:
+  vietnamese_text_mode: diacritics
+train:
+  text_vocab_learning_rate: 1.0e-4           # LR riêng cho 3 module text, weight decay 0
 ```
-Dùng ViT5 (file `spiece.model` local của `VietAI/vit5-large`):
+Có sẵn config mẫu `configs/overfit-8-vit5.yaml` để overfit 8 mẫu trên A100 40GB. Hướng dẫn chi tiết nằm ở `docs/run_vit5_overfit_a100.md`.
+
+**3. Lọc chunk, precompute Mimi rồi train.** Hai lệnh dùng cùng config:
 ```bash
+python train.py configs/overfit-8-vit5.yaml --precompute-codec-cache
+python train.py configs/overfit-8-vit5.yaml
+
+# Hoặc override trên config có sẵn
 torchrun --nproc_per_node=2 train.py configs/train_vi_synthetic.yaml \
   model.text_tokenizer=vit5 model.text_tokenizer_path=/path/vit5-large/spiece.model \
-  data.vietnamese_text_mode=diacritics [model.text_head_init=random] [train.text_vocab_learning_rate=1e-4]
+  data.vietnamese_text_mode=diacritics model.text_head_init=decomposition
 ```
-- ID PAD=3, EPAD=0, initial token=`text_card` giữ nguyên nghĩa; piece ViT5 nằm ở 4..text_card-1.
-- `text_emb`, `depformer_text_emb`, `text_linear` được resize, khởi tạo bằng trung bình embedding các token
-  cũ ghép thành piece, rồi train full (lưu trong `lora.safetensors`). Transformer vẫn LoRA, Mimi frozen.
-- Checkpoint kèm `text_vocab.json` (sha256 tokenizer); inference/resume báo lỗi nếu tokenizer khác.
-- Không dùng chung với QLoRA. Chạy lại bước lọc chunk (cache tự tách theo tokenizer); Mimi cache dùng lại được.
+Log đầu run phải có dòng `[Text vocab] tokenizer=vit5 ... text_card=36001`. File `<run_dir>/config.json` ghi lại `text_tokenizer`, `text_tokenizer_path`, `text_tokenizer_sha256`, `text_head_init` và `text_vocab_learning_rate`.
+
+Để A/B `text_linear`, chạy 2 run giống hệt nhau, chỉ khác `model.text_head_init=decomposition` và `model.text_head_init=random`. Sau đó so text loss và CER của transcript sinh ra.
+
+**4. Inference.** Không cần flag gì thêm: tokenizer được chọn theo file `text_vocab.json` nằm cạnh checkpoint.
+```bash
+python -m tools.inference_smoke --config configs/infer.yaml \
+  --adapter runs/<run>/checkpoints/<step> \
+  model.text_tokenizer_path=/path/vit5-large/spiece.model   # chỉ cần khi file nằm chỗ khác lúc train
+```
+`inference_config.json` trong run cũng đã ghi sẵn tokenizer.
+
+**Cơ chế và lưu ý**
+- Lớp dịch ID giữ nguyên nghĩa các ID đặc biệt của PersonaPlex: PAD=3, EPAD=0, UNK=1, initial token=`text_card`. Các piece thường của ViT5 nằm ở 4..36000, nên `text_card=36001`.
+- Ba module `text_emb`, `depformer_text_emb`, `text_linear` được resize. Mỗi hàng mới khởi tạo bằng trung bình embedding của các token cũ ghép thành piece đó, rồi được train full và lưu trong `lora.safetensors`. Transformer vẫn train bằng LoRA, Mimi frozen.
+- Checkpoint luôn đi kèm `text_vocab.json` chứa sha256 của tokenizer. Resume, init-from và inference đều báo lỗi nếu tokenizer khác. Nếu copy checkpoint sang máy khác, phải copy cả `spiece.model`.
+- Không dùng được với QLoRA. Cache lọc chunk tự tách theo tokenizer; Mimi cache dùng lại được.
+- Model "base" trong eval khi chạy vit5 là model đã resize nhưng chưa train phần text, nên không phải PersonaPlex gốc. Muốn so với bản gốc, chạy inference riêng với `model.text_tokenizer=personaplex` và không truyền adapter.
+- Không so text loss giữa hai tokenizer, vì số token khác nhau. Hãy so CER/WER của transcript sinh ra.
 
 ## Inference
 

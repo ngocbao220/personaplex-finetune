@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 Speaker = Literal["agent", "user"]
+MANIFEST_DURATION_TOLERANCE_SEC = 0.05
 _SPEAKER_ALIASES = {
     "agent": "agent", "left": "agent", "a": "agent",
     "user": "user", "right": "user", "b": "user",
@@ -669,6 +670,15 @@ class PreparedDataset:
         audio = read_wav_info(conversation)
         if audio.channels != 2:
             raise ValidationError(f"{sample_id}: conversation.wav must have exactly 2 channels")
+        if "duration" in entry:
+            declared = entry["duration"]
+            if isinstance(declared, bool) or not isinstance(declared, (int, float)) or declared <= 0:
+                raise ValidationError(f"{sample_id}: manifest duration must be a positive number of seconds")
+            if abs(float(declared) - audio.duration_sec) > MANIFEST_DURATION_TOLERANCE_SEC:
+                raise ValidationError(
+                    f"{sample_id}: manifest duration {float(declared):.3f}s differs from "
+                    f"conversation.wav {audio.duration_sec:.3f}s"
+                )
         prompt_audio = read_wav_info(voice_prompt)
         if prompt_audio.duration_sec <= 0:
             raise ValidationError(f"{sample_id}: voice_prompt_left.wav is empty")

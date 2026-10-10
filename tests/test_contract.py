@@ -65,6 +65,28 @@ class PreparedDatasetTest(unittest.TestCase):
                 invalidated.load()
             loader.assert_called_once()
 
+    def test_manifest_duration_is_optional_and_must_match_conversation_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sample_dir = root / "samples" / "one"
+            sample_dir.mkdir(parents=True)
+            write_stereo_wav(sample_dir / "conversation.wav", frames=48000)
+            write_stereo_wav(sample_dir / "voice_prompt_left.wav")
+            (sample_dir / "metadata.json").write_text(json.dumps({"text_prompt_left": "Be helpful."}))
+            (sample_dir / "words.json").write_text(json.dumps([
+                {"speaker": "agent", "word": "Hello", "start": 0.0, "end": 0.2},
+            ]))
+            manifest = root / "train.jsonl"
+            for duration, valid in ((2.0, True), (2.04, True), (3.0, False), (-1, False), ("2", False)):
+                entry = {"sample_id": "one", "sample_dir": "samples/one", "duration": duration}
+                manifest.write_text(json.dumps(entry) + "\n")
+                dataset = PreparedDataset(manifest, force_filter=True)
+                if valid:
+                    self.assertEqual(len(dataset.load()), 1)
+                else:
+                    with self.assertRaisesRegex(ValidationError, "duration"):
+                        dataset.load()
+
     def test_sample_number_caps_raw_conversations_and_none_keeps_all(self) -> None:
         samples = [
             PreparedSample(
