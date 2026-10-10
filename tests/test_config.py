@@ -6,7 +6,7 @@ from personaplex_finetuning.config import load_config
 
 
 class ConfigTest(unittest.TestCase):
-    def test_user_loss_defaults_false_and_padding_weight_defaults_point_three(self) -> None:
+    def test_user_loss_defaults_true_and_padding_weight_defaults_point_three(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "train.yaml"
             config.write_text(
@@ -17,7 +17,7 @@ class ConfigTest(unittest.TestCase):
 
             loaded = load_config(config)
 
-            self.assertFalse(loaded.user_loss)
+            self.assertTrue(loaded.user_loss)
             self.assertEqual(loaded.text_padding_weight, 0.3)
 
     def test_user_loss_can_enable_user_audio_supervision_for_ablation(self) -> None:

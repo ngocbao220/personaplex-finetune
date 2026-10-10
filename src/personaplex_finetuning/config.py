@@ -69,7 +69,7 @@ class Config:
     first_codebook_weight_multiplier: float = 1.0
     text_padding_weight: float = 0.3
     epad_weight: float = 1.0  # Text-loss weight of EPAD (word onset) when not treated as padding
-    user_loss: bool = False
+    user_loss: bool = True
     log_freq: int = 1
     no_eval: bool = False
     ckpt_freq: int = 50
@@ -276,7 +276,7 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> Config:
         raise ValueError("free_running_eval_window_seconds must be positive")
     first_codebook_weight_multiplier = float(raw.get("first_codebook_weight_multiplier", 1.0))
     text_padding_weight = float(raw.get("text_padding_weight", 0.3))
-    user_loss = raw.get("user_loss", False)
+    user_loss = raw.get("user_loss", True)
     if "epad_as_padding" in raw:
         raise ValueError("epad_as_padding was removed; set epad_weight (e.g. equal to text_padding_weight)")
     epad_weight = float(raw.get("epad_weight", 1.0))

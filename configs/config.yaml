@@ -14,7 +14,7 @@ no_eval: false
 free_running_eval_every_steps: 500
 free_running_eval_samples: 3
 validation_max_samples: 32
-user_loss: false
+user_loss: true                # Supervise user audio stream too (set false to train agent stream only)
 text_padding_weight: 0.3
 epad_weight: 1.0          # Text-loss weight of EPAD (word-onset token); PAD uses text_padding_weight.
 

@@ -9,5 +9,6 @@ Chào mừng bạn đến với tài liệu của dự án fine-tuning mô hình
 *   **[Suy luận (Inference)](inference.md)**: Cách chạy inference với adapter, giải quyết các lỗi liên quan đến CUDA engine/cuDNN khi chạy `mimi.decode`, xử lý text Telex.
 *   **[Dữ liệu (Data Pipeline)](data.md)**: Chi tiết về cấu trúc Manifest, WAV stereo, các tool kiểm tra dữ liệu (`validate_dataset`, `inspect_sample`).
 *   **[Định dạng prepared dir](prepared_data_format.md)**: Cách xuất `samples/` và `train.jsonl` (kèm `duration`) từ pipeline tạo data stereo.
+*   **[Chạy trên Colab/VM qua terminal](run_colab.md)**: Tải data/model/checkpoint qua Hugging Face Hub, train, tự push checkpoint, resume.
 
 *(Lưu ý: Các liên kết trên hiện đang được xây dựng.)*

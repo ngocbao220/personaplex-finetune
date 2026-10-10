@@ -64,7 +64,7 @@ train:
 first_codebook_weight_multiplier: 1.0
 text_padding_weight: 0.3
 epad_weight: 1.0          # Text-loss weight of EPAD (word-onset token); PAD uses text_padding_weight.
-user_loss: false
+user_loss: true                # Supervise user audio stream too (set false to train agent stream only)
 log_freq: 1
 ckpt_freq: 500
 

@@ -14,7 +14,7 @@ sample_index: null
 sample_number: 8
 batch_size: 1
 max_steps: 600
-user_loss: false
+user_loss: true                # Supervise user audio stream too (set false to train agent stream only)
 
 model:
   root: /home/voice/data/voice/personaplex-7b-v1      # EDIT: local PersonaPlex snapshot
